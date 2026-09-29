@@ -1,0 +1,6 @@
+Vendored third-party libraries (served locally so the app works offline):
+
+- @xterm/xterm 5.5.0 (xterm.js, xterm.css) - MIT License - https://github.com/xtermjs/xterm.js
+- @xterm/addon-fit 0.11.0 (addon-fit.js) - MIT License - https://github.com/xtermjs/xterm.js
+- marked v15.0.12 (marked.min.js) - MIT License - https://github.com/markedjs/marked
+- DOMPurify 3.4.16 (purify.min.js) - Apache-2.0 OR MPL-2.0 - https://github.com/cure53/DOMPurify

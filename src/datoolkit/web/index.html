@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAToolkit</title>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header id="topbar">
+  <span class="brand">DAToolkit</span>
+  <button id="case-btn" class="ghost" title="Start a new case">No case</button>
+  <span id="sens-badge" class="badge"></span>
+  <span class="spacer"></span>
+  <button id="model-btn" class="ghost" title="Choose model"><span id="model-name">Choose model</span> <span id="tier-badge" class="badge"></span></button>
+  <button id="attest-btn" class="ghost small hidden" title="Re-check the enclave's attestation"></button>
+  <div class="menu-wrap">
+    <button id="export-btn" class="ghost">Export ▾</button>
+    <div id="export-menu" class="menu hidden">
+      <button data-act="markdown">Export transcript (Markdown)</button>
+      <button data-act="summary">Ticket summary (AI)</button>
+      <button data-act="folder">Open case folder</button>
+    </div>
+  </div>
+  <button id="settings-btn" class="ghost">Settings</button>
+</header>
+
+<div id="keyring-banner" class="banner hidden"></div>
+
+<main id="workspace">
+  <section id="chat-pane">
+    <div id="chat-log"></div>
+    <div id="chat-status" class="hidden"><span class="spinner"></span><span id="chat-status-text">Thinking…</span></div>
+    <form id="chat-form">
+      <textarea id="chat-input" rows="3" placeholder="Describe the problem, or reply to the AI…  (Enter to send, Shift+Enter for newline)"></textarea>
+      <div class="chat-actions">
+        <button type="button" id="stop-btn" class="danger hidden">Stop</button>
+        <button type="submit" id="send-btn" class="primary">Send</button>
+      </div>
+    </form>
+  </section>
+  <div class="splitter vertical" id="split-v"></div>
+  <section id="term-pane">
+    <div id="tabs">
+      <div id="tab-list"></div>
+      <div class="menu-wrap">
+        <button id="new-session-btn" class="ghost" title="Open a session">+ Session</button>
+        <div id="session-menu" class="menu hidden"></div>
+      </div>
+    </div>
+    <div id="terms">
+      <div id="terms-empty" class="empty">No sessions open. Use <b>+ Session</b> to open a local shell, SSH or WinRM session.</div>
+    </div>
+  </section>
+</main>
+
+<div class="splitter horizontal" id="split-h"></div>
+
+<section id="queue-pane">
+  <div class="queue-head">
+    <span class="title">Command queue</span>
+    <span id="queue-count" class="muted"></span>
+    <label class="muted small"><input type="checkbox" id="show-done"> show sent</label>
+    <span class="spacer"></span>
+    <button id="send-selection-btn" class="ghost" title="Send the text selected in the terminal to the AI">Send terminal selection</button>
+    <button id="send-results-btn" class="primary">Send results</button>
+  </div>
+  <div id="queue-list"></div>
+</section>
+
+<div id="modal-root"></div>
+<div id="toasts"></div>
+
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/addon-fit.js"></script>
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

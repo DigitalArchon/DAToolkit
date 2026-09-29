@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datoolkit"
+version = "0.1.0"
+description = "Gated AI diagnostic console: the AI proposes commands, the technician decides."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.50",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pywebview>=5",
+    "ptyprocess>=0.7",
+    "pypsrp>=0.8",
+    "keyring>=25",
+    "tomli-w>=1.0",
+    # NanoGPT sends brotli-compressed replies; the OpenAI SDK's HTTP layer needs Brotli >= 1.2.
+    # Pinned here so the venv never falls back to an older distro copy (Mint/Ubuntu ship 1.1).
+    "brotli>=1.2",
+    # End-to-end encrypted NanoGPT Private Mode (llm/private_mode.py): Tinfoil's attestation
+    # verifier and EHBP client. Pinned exactly: it holds the plaintext.
+    "tinfoil==0.14.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+
+[project.scripts]
+datoolkit = "datoolkit.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+datoolkit = ["web/*.html", "web/*.js", "web/*.css", "web/vendor/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
