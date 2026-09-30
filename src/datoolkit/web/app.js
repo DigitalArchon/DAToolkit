@@ -216,7 +216,7 @@ function handleEvent(ev) {
       renderBusy();
       renderChat(true);
       renderUsage();
-      if (ev.error && ev.error !== "stopped") toast(`AI request failed: ${ev.error}`, "error", 12000);
+      if (ev.error && ev.error !== "stopped") toast(ev.error.startsWith("not sent: ") ? `AI request ${ev.error}` : `AI request failed: ${ev.error}`, "error", 12000);
       break;
     case "search":
       if (!S.streaming) break;
@@ -276,13 +276,35 @@ function renderTop() {
 }
 
 // Attestation state of a model, as short text and a CSS class (chat model and vision helper).
+// TEE models: Intel TDX + NVIDIA attestation (llm/tee.py); "partial" names what couldn't be checked.
+const TEE_CLEAR = "A TEE model runs in an attested enclave, but prompts still pass NanoGPT's gateway in the clear; only private/ models are end-to-end encrypted.";
 function attestLabel(att) {
   if (!att) return null;
-  if (att.status === "unattested") return { text: "TEE · not attested", cls: "warn", title: att.note };
-  if (att.status === "checking") return { text: "attesting…", cls: "", title: "Verifying the enclave…" };
-  if (att.status === "failed") return { text: "⚠ attestation failed", cls: "bad", title: `${att.error}\nNothing is sent to it until attestation succeeds.` };
+  const tee = att.kind === "tee";
+  if (att.status === "checking") return { text: tee ? "TEE attesting…" : "attesting…", cls: "",
+    title: tee ? "Verifying the enclave: Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict…" : "Verifying the enclave…" };
+  if (att.status === "failed") return { text: tee ? "⚠ TEE attestation refused" : "⚠ attestation failed", cls: "bad", title: `${att.error}\nNothing is sent to it until attestation succeeds.` };
+  if (tee) {
+    const partial = att.level === "partial";
+    return { text: partial ? "🛡 TEE attested (partial)" : "🛡 TEE attested", cls: partial ? "warn" : "ok",
+      title: `${att.summary}.\n${att.detail}.` + (att.signing_address ? `\nReply-signing key: ${att.signing_address}` : "") + `\n${TEE_CLEAR}` };
+  }
   return { text: att.latest_release ? "🔐 attested (older release)" : "🔐 attested", cls: "ok",
     title: `End-to-end encrypted to an attested enclave.\n${att.summary}\nKey sha256: ${(att.hpke_key_sha256 || "").slice(0, 16)}…` };
+}
+
+// A TEE reply: attested before it was sent; was the reply signed by that enclave's key?
+const TEE_SIGNATURE = {
+  checking: ["checking signature…", "", "Asking NanoGPT for this reply's signature…"],
+  signed: ["✔ signed", "ok", "NanoGPT holds a record of this reply's id signed by the attested enclave's key. The record hashes the request and reply as NanoGPT's gateway saw them, so it shows the enclave answered, not that every byte you see is what it wrote."],
+  failed: ["✖ signature mismatch", "bad", "The reply's signature was NOT made by the attested enclave's key. Treat this reply with suspicion and re-check the attestation."],
+  unsigned: ["unsigned", "", "This model's provider signs no replies; every instance that could answer was attested before sending instead."],
+  unchecked: ["signature unchecked", "warn", "The signature couldn't be fetched (the provider kept none, or it was out of reach). That is not a failed check."],
+};
+function teeBadge(e) {
+  const [text, cls, why] = TEE_SIGNATURE[e.tee_signature] || ["", "", ""];
+  return h("span", { class: `tee-badge ${cls}`, title: `Attested before sending: ${e.tee_attested}.${why ? `\n\nReply: ${why}` : ""}\n\n${TEE_CLEAR}` },
+    "🛡 TEE", text ? ` · ${text}` : "");
 }
 
 // Can images be used with the current model? native: it reads them; helper: a vision model
@@ -392,7 +414,8 @@ function renderEntry(e, live = false) {
       }
       box.append(strip);
       for (const [name, d] of Object.entries(e.image_notes || {})) {
-        box.append(h("details", {}, h("summary", {}, `👁 ${name} as described by ${d.model} for the chat model`), h("pre", {}, d.text)));
+        box.append(h("details", {}, h("summary", { title: d.sealed ? `End-to-end encrypted: ${d.sealed}` : d.tee_attested ? `TEE attested before sending: ${d.tee_attested}` : "" },
+          `👁 ${name} as described by ${d.model} for the chat model${d.sealed ? " · 🔐" : d.tee_attested ? " · 🛡 TEE" : ""}`), h("pre", {}, d.text)));
       }
     }
     return box;
@@ -401,6 +424,7 @@ function renderEntry(e, live = false) {
   const who = h("div", { class: "who" }, "AI", e.model ? ` · ${e.model}` : "",
     e.tier ? h("span", { class: `badge ${e.tier}` }, e.tier) : null,
     e.sealed ? h("span", { class: "sealed", title: e.sealed }, "🔐 end-to-end encrypted") : null,
+    e.tee_attested ? teeBadge(e) : null,
     !e.streaming && e.text ? h("button", { type: "button", class: "small ghost copy", title: "Copy this message (Markdown)",
       onclick: () => guarded(async () => { await clipWrite(e.text); toast("Message copied.", "ok", 2000); }) }, "Copy") : null);
   const box = h("div", { class: "msg assistant" }, who);
@@ -2086,7 +2110,7 @@ function openSettings(tab = "providers") {
       h("label", { class: "field" }, h("span", {}, "Default model"), def),
       h("label", { class: "field" }, h("span", {}, "Tier overrides"), overrides),
       h("label", { class: "field" }, h("span", {}, "Reads images (overrides)"), visionOv),
-      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models, attested with Tinfoil's verifier); LOCAL = your own hardware (localhost/private IP URLs)."),
+      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave, attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict) and each reply's signature checked, but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models, attested with Tinfoil's verifier); LOCAL = your own hardware (localhost/private IP URLs)."),
       status,
       h("div", { class: "row" },
         h("button", { onclick: () => show("providers") }, "Back"),
@@ -2242,7 +2266,7 @@ function openSettings(tab = "providers") {
       h("b", {}, `Vision helper ${v.helper}: ${lab.text}`), h("div", { class: "muted small pre" }, lab.title),
       att.status === "verified" || att.status === "failed" ? h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
         const r = await api("POST", "/api/attest", { slot: "helper" });
-        toast(r.status === "verified" ? `Vision helper attested: ${r.summary}` : `Attestation failed: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
+        toast(r.status === "verified" ? `Vision helper attested: ${r.summary}` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
         show("model");
       }) }, "Re-check") : null);
   }
@@ -2484,9 +2508,8 @@ function init() {
   $("#case-btn").addEventListener("click", () => openCaseModal(false));
   $("#model-btn").addEventListener("click", openModelPicker);
   $("#attest-btn").addEventListener("click", () => guarded(async () => {
-    if (S.state.attestation?.status === "unattested") return toast(S.state.attestation.note, "info", 12000);
     const r = await api("POST", "/api/attest");
-    toast(r.status === "verified" ? `Enclave attested: ${r.summary}` : `Attestation failed: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
+    toast(r.status === "verified" ? `${r.kind === "tee" ? "TEE" : "Enclave"} attested: ${r.summary}` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
   }));
   $("#settings-btn").addEventListener("click", () => openSettings());
   $("#vision-btn").addEventListener("click", () => openSettings("model"));

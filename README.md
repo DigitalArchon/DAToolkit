@@ -182,9 +182,9 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
   shown under the image in the chat. That adds a request per image, so replies with images
   are slower. The helper (and the second-opinion reviewer) is chosen with the same searchable
   picker as the chat model; the helper's lists only vision models. An end-to-end encrypted
-  helper is attested like the chat model before any image is sealed to it, and its state shows
-  in the top bar and Settings → Model. TEE models, as chat model or helper, are labelled
-  "not attested": DAToolkit doesn't verify TEE attestations yet (see the roadmap). With neither, every image feature is disabled and says why; the top bar shows
+  helper, or a TEE one, is attested like the chat model before any image goes to it, and its
+  state shows in the top bar and Settings → Model. With neither a vision model nor a helper,
+  every image feature is disabled and says why; the top bar shows
   the current state (👁, 👁 via helper, or "no images").
 - Screenshots are drawn at a whole-number 2× scale, cropped to the rows in use, with plain
   (not sub-pixel) text smoothing, and are not resampled again unless over 2048 px.
@@ -270,7 +270,7 @@ max). The same settings apply through NanoGPT Private Mode.
 | Tier | Detected from | What the provider can see |
 |---|---|---|
 | **Standard** | anything else | Everything |
-| **TEE** | ids starting `TEE/` or `phala/` | The model runs in an enclave, but prompts pass NanoGPT's gateway **in the clear** |
+| **TEE** | ids starting `TEE/` or `phala/` | The model runs in an attested enclave, but prompts pass NanoGPT's gateway **in the clear** |
 | **E2EE** | NanoGPT `private/…` ids | Ciphertext only, plus your account, the model, timing, sizes and usage |
 | **Local** | localhost / private-IP base URL | Nothing leaves your network |
 
@@ -303,8 +303,42 @@ Like SealedLore, DAToolkit doesn't use NanoGPT's `npx @nanogpt/private-mode@late
 because that would let NanoGPT change the code that holds your plaintext.
 
 Verifying an enclave contacts NanoGPT's relay (for the attestation bundle), Sigstore and
-GitHub. `TEE/` models aren't attested yet, which is one reason they're excluded from
-Confidential cases.
+GitHub.
+
+**How TEE attestation works** (`src/datoolkit/llm/tee.py`, `dcap.py`, `nras.py`, `ethsig.py`,
+ported from SealedLore with the checks unchanged, and tested against a real attestation
+captured from `TEE/glm-5.3-flash`):
+
+1. **Attest before sending.** NanoGPT's `/tee/attestation` is asked for evidence bound to a
+   fresh random nonce. Nothing goes to a TEE model (chat, vision helper, write-ups or the
+   second-opinion reviewer) until that holds, and it is made again before a send once it is
+   15 minutes old.
+   - The Intel TDX quote's own bytes must bind the enclave's reply-signing key and our nonce
+     (never NanoGPT's JSON copy of them). For per-instance providers (Chutes), each instance's
+     key, bound into its quote, must have signed our nonce, and every instance must attest.
+   - The quote is verified up to Intel's SGX root, which is pinned in the code: the PCK chain,
+     the quoting enclave, the quote's signature, Intel's revocation lists, and Intel's signed
+     TCB information. A debug TD, a revoked or unlisted TCB, or a forged chain is refused.
+   - The GPU evidence goes to NVIDIA's attestation service. Its ES384-signed verdict must be
+     for our nonce, current, and pass for every GPU (measurements, secure boot, debug off).
+2. **Refuse** evidence relayed for a nonce the relay chose (replayable), no attestation at
+   all (Tinfoil-hosted `TEE/` models; use their `private/` twin), or anything that fails
+   the checks above. Nothing is sent.
+3. **Partial** when nothing failed but something couldn't be checked or isn't current:
+   Intel's collateral or NVIDIA's service out of reach, no GPU evidence offered, or a TCB
+   status other than UpToDate. The top bar shows **🛡 TEE attested (partial)**, and the tooltip
+   names each shortfall.
+4. **Check each reply's signature.** Every reply's completion id is looked up at
+   `/tee/signature/`, and the signer recovered from its EIP-191 signature must be the attested
+   key. Replies are marked ✔ signed, ✖ signature mismatch, unsigned (the provider signs
+   none) or signature unchecked.
+
+What this doesn't prove: which software the enclave runs, or that a reply's text is byte for
+byte what was signed (the signed record hashes the request and reply as NanoGPT's gateway saw
+them). The prompt also passes NanoGPT's gateway in the clear, so TEE models stay out of
+Confidential cases. Verifying contacts NanoGPT, Intel (`api.trustedservices.intel.com`,
+`certificates.trustedservices.intel.com`) and NVIDIA (`nras.attestation.nvidia.com`). Intel's
+collateral and NVIDIA's keys are cached for an hour.
 
 ## SSH, WinRM and RDP
 
@@ -388,7 +422,6 @@ The core lives in `engine.py`; the GUI is `server/` plus `web/`. DAToolkit is GU
   notes, push runbooks). Outbound and read-only respectively, keys in the keyring.
 - Newer guacd (1.5+, built from source or bundled) so guacd itself enforces the pinned
   certificate; session recording of RDP into the case timeline
-- Intel TDX / NVIDIA attestation for `TEE/` models (SealedLore's `tee.py`, `dcap.py`, `nras.py`)
 - IP/hostname pseudonymisation with local reverse mapping
 - Per-client notes library
 - Context compaction for long sessions (the usage indicator is the stop-gap)

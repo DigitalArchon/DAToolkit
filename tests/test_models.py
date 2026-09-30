@@ -151,18 +151,40 @@ async def test_retry_resends_the_stranded_message_with_the_new_model(env):  # no
     await wait_turn(engine)
     assert engine.can_retry and engine.snapshot()["can_retry"]
     assert engine.chat[-1]["retry"] is True
-    engine.select_model("Fake", "TEE/glm-5.3")     # the technician switches model
+    engine.select_model("Fake", "z-ai/glm-5.3")    # the technician switches model
     fake.responses.append(sse(({"role": "assistant", "content": "Let's look."}, "stop")))
     engine.retry()
     await wait_turn(engine)
     req = fake.requests[-1]
-    assert req["model"] == "TEE/glm-5.3"
+    assert req["model"] == "z-ai/glm-5.3"
     users = [m for m in req["messages"] if m["role"] == "user"]
     assert users == [{"role": "user", "content": "VPN is down"}]            # sent once, not twice
     assert engine.chat[-1]["text"] == "Let's look." and not engine.can_retry
     with pytest.raises(UserError, match="nothing to retry"):
         engine.retry()
-    assert "Retrying the last message with TEE/glm-5.3" in [e.get("text") for e in engine.chat if e["kind"] == "note"][-1]
+    assert "Retrying the last message with z-ai/glm-5.3" in [e.get("text") for e in engine.chat if e["kind"] == "note"][-1]
+
+
+async def test_a_setting_the_route_refuses_is_left_out_and_the_request_resent(env):  # noqa: F811
+    engine, fake, _ = env
+    engine.new_case("k", "open")
+    engine.select_model("Fake", "moonshotai/kimi-k3")
+    engine.cfg.settings.generation = {"temperature": 0.3, "top_p": 0.9}
+    fake.refuse["moonshotai/kimi-k3"] = "temperature"
+    fake.responses.append(sse(({"role": "assistant", "content": "Hello."}, "stop")))
+    engine.send("hi")
+    await wait_turn(engine)
+    assert "temperature" in fake.requests[-2] and "temperature" not in fake.requests[-1]
+    assert fake.requests[-1]["top_p"] == 0.9                          # the others are kept
+    assert engine.chat[-1]["text"] == "Hello." and not engine._last_turn_error
+    assert any("doesn't accept the temperature setting" in e.get("text", "") for e in engine.chat if e["kind"] == "note")
+    fake.completions.append("Summary.")                               # remembered for other requests too
+    await engine.ticket_summary()
+    assert "temperature" not in fake.requests[-1]
+    # an error naming no setting the request carried is an ordinary failure, not retried
+    prov = engine.cfg.provider("Fake")
+    assert engine._learn_unsupported(prov, "m", {"top_p": 0.9}, RuntimeError("does not support top_k")) is None
+    assert engine._learn_unsupported(prov, "m", {"top_p": 0.9}, RuntimeError("503 all routes failed")) is None
 
 
 async def test_retry_after_stop_drops_the_partial_reply(env):  # noqa: F811
@@ -209,16 +231,6 @@ def _fake_private_client(engine, fake_api, fail=False):
             self.calls.append("complete")
             return fake_api.completions.pop(0)
     return Fake()
-
-
-async def test_tee_models_say_they_are_not_attested(env):  # noqa: F811
-    engine, fake, _ = env
-    engine.new_case("t", "open")
-    engine.select_model("Fake", "TEE/glm-5.3")
-    assert engine.attestation["status"] == "unattested" and "not attested" in engine.attestation["note"]
-    engine.cfg.providers[0].vision_overrides = {"TEE/glm-5.3": "no", "TEE/kimi-k3": "yes"}
-    engine.save_settings({"vision_model": "Fake|TEE/kimi-k3"})
-    assert engine.helper_attestation["status"] == "unattested" and engine.helper_attestation["model"] == "TEE/kimi-k3"
 
 
 async def test_private_helper_is_attested_before_an_image_is_sealed(env, monkeypatch):  # noqa: F811

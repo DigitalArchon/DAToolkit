@@ -71,6 +71,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 #attest-btn.ok { color: var(--ok); }
 #attest-btn.bad { color: var(--danger); border-color: var(--danger); }
 .sealed { color: #b79bf2; font-size: 11px; }
+.tee-badge { color: #8fb8e8; font-size: 11px; }
+.tee-badge.ok { color: var(--ok); }
+.tee-badge.warn { color: var(--warn); }
+.tee-badge.bad { color: var(--danger); font-weight: 600; }
 .badge.open { color: var(--warn); }
 .badge.confidential { color: var(--tee); }
 .badge.sovereign { color: var(--local); }

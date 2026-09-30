@@ -71,6 +71,7 @@ class TurnResult:
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str | None = None
     usage: dict | None = None
+    id: str | None = None  # the completion's id: a TEE model's reply signature is looked up by it
 
 
 class LLMClient:
@@ -129,6 +130,8 @@ class StreamAccumulator:
 
     def feed(self, chunk) -> list[tuple[str, str]]:
         events: list[tuple[str, str]] = []
+        if getattr(chunk, "id", None) and not self.result.id:
+            self.result.id = chunk.id
         if chunk.usage:
             self.result.usage = chunk.usage.model_dump()
         if not chunk.choices:

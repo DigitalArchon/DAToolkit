@@ -10,6 +10,7 @@ from datoolkit import creds
 from datoolkit.config import Config, Host, Provider
 from datoolkit.engine import Engine, UserError
 from datoolkit.llm.client import LLMClient
+from datoolkit.llm.tee import TeeClient
 
 BASE = "https://fake.example/api/v1"
 
@@ -41,6 +42,7 @@ class FakeAPI:
         self.responses = []   # queued SSE bodies
         self.completions = []  # queued texts for non-streaming requests
         self.requests = []    # captured request JSON
+        self.refuse = {}      # model -> a setting its route rejects with HTTP 400 (as NanoGPT does)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
@@ -51,6 +53,10 @@ class FakeAPI:
         body = json.loads(request.content)
         self.requests.append(body)
         assert request.headers["authorization"] == "Bearer sk-test"
+        setting = self.refuse.get(body["model"])
+        if setting and setting in body:
+            return httpx.Response(400, json={"error": {"message": f"{body['model']} does not support {setting} on the "
+                                                                  "selected route. Omit it or select another model."}})
         if not body.get("stream"):                  # plain completion (write-ups, vision helper)
             return httpx.Response(200, json={"id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
                                              "choices": [{"index": 0, "finish_reason": "stop",
@@ -66,6 +72,10 @@ async def env(tmp_path, monkeypatch):
     engine = Engine(cfg, events.append, tmp_path / "rt", save_config=lambda c: None)
     http = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
     monkeypatch.setattr(engine, "_client", lambda prov, model="": LLMClient(prov.base_url, creds.get_secret("provider", prov.name), http))
+    # TEE attestation never reaches the network in tests: this server offers none (tests/test_tee_engine.py
+    # stands in a real one)
+    engine._tee_factory = lambda base, key, model: TeeClient(
+        base, key, model, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404))))
     creds.set_secret("provider", "Fake", "sk-test")
     await engine.start()
     yield engine, fake, events

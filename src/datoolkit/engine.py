@@ -32,6 +32,7 @@ from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mo
 from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, list_private_models,
                                offers_private_mode, relay_url)
 from .llm import capabilities, websearch
+from .llm import tee as tee_mod
 from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
@@ -46,6 +47,8 @@ from .sessions.askpass import AskpassBridge
 from .sessions.manager import RdpSession, SessionManager
 from .sessions.ssh import ssh_argv, target_label
 
+# A TEE model's attestation is made again, with a fresh nonce, before a send once it is this old.
+TEE_REATTEST_SECONDS = 900
 MAX_TOOL_ROUNDS = 6          # rounds per turn: searches and the no-message nudge each take one
 PROMPT_TIMEOUT = 300
 MAX_SEARCHES_PER_TURN = 4
@@ -159,6 +162,11 @@ class Engine:
         self._caps_http = None                         # httpx client override (tests)
         self._img_desc: dict[str, dict] = {}           # image file -> {"model", "text"} from the vision helper
         self._last_turn_error: str | None = None
+        self._unsupported: dict[tuple[str, str], set[str]] = {}   # generation settings a model's route refused
+        # TEE models (llm/tee.py): (provider, model) -> (attested client, when, attestation shown)
+        self._tee: dict[tuple[str, str], tuple[tee_mod.TeeClient, float, dict]] = {}
+        self._tee_factory: Callable | None = None      # tests: (base_url, key, model) -> TeeClient
+        self._background: set[asyncio.Task] = set()     # reply-signature checks still running
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -167,12 +175,12 @@ class Engine:
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov:
             self._schedule_caps(prov)
-            if detect_tier(self.cfg.active_model, prov.base_url, prov.tier_overrides) == "tee":
-                self.attestation = self._tee_state(self.cfg.active_model)
+            if self.cfg.active_model:
+                self._attestation_for(prov, self.cfg.active_model, "chat")
         self._refresh_helper_attestation()
 
     async def stop(self) -> None:
-        for task in (self._turn, self._attest_task, self._helper_attest_task):
+        for task in (self._turn, self._attest_task, self._helper_attest_task, *self._background):
             if task:
                 task.cancel()
         self.sessions.close_all()
@@ -403,7 +411,35 @@ class Engine:
         return {"mode": "none", "model": model, "why": f"{what} {helper}"}
 
     def _params(self, prov: Provider, model: str) -> dict:
-        return params_mod.for_model(self.cfg.settings.generation or {}, self.caps_for(prov, model))
+        out = params_mod.for_model(self.cfg.settings.generation or {}, self.caps_for(prov, model))
+        for key in self._unsupported.get((prov.name, model), ()):
+            out.pop(key, None)
+        return out
+
+    def _learn_unsupported(self, prov: Provider, model: str, params: dict, err: Exception) -> str | None:
+        """A provider that refuses one of the generation settings for this model (live: "Kimi K3
+        does not support temperature on the selected route"): leave it out for this model from
+        now on, and say so. Returns the setting, or None when the error is something else."""
+        m = re.search(r"(?:does not|doesn't|do not) support (?:the )?[`'\"]?([a-z_]+)", str(err), re.I)
+        key = m.group(1).lower() if m else ""
+        if key not in params:
+            return None
+        self._unsupported.setdefault((prov.name, model), set()).add(key)
+        self.log("setting_unsupported", model=model, setting=key, error=str(err)[:300])
+        self.chat.append({"kind": "note", "text": f"{model} doesn't accept the {key} setting on its current route, "
+                                                  f"so it is left out for this model; the request was sent again without it."})
+        self._changed()
+        return key
+
+    async def _complete(self, client, prov: Provider, model: str, messages: list[dict]) -> str:
+        """A one-off completion with the generation settings, dropping one the provider refuses."""
+        params = self._params(prov, model)
+        try:
+            return await client.complete(model, messages, params)
+        except Exception as e:  # noqa: BLE001
+            if not self._learn_unsupported(prov, model, params, e):
+                raise
+            return await client.complete(model, messages, self._params(prov, model))
 
     def select_model(self, provider_name: str, model: str) -> None:
         prov = self.cfg.provider(provider_name)
@@ -439,33 +475,77 @@ class Engine:
             self.helper_attestation = value
 
     async def _attest(self, prov: Provider, model: str, slot: str = "chat") -> dict:
-        """Attest the enclave a Private Mode model runs in (the chat model, or the vision
-        helper); the result is shown and logged."""
+        """Attest the enclave a model runs in: Private Mode (Tinfoil's verifier) or TEE (Intel
+        TDX + NVIDIA, llm/tee.py). The chat model's and vision helper's results are shown;
+        every result is logged."""
+        tee = not is_private_mode(model)
         try:
-            client = self._client(prov, model)
-            att = await client.attest()
-            result = {"status": "verified", "model": model, **att.to_dict()}
+            if tee:
+                result = {"status": "verified", "kind": "tee", "model": model,
+                          **(await self._attest_tee(prov, model)).to_dict()}
+            else:
+                att = await self._client(prov, model).attest()
+                result = {"status": "verified", "model": model, **att.to_dict()}
             self.log("enclave_attested", role=slot, **result)
         except Exception as e:  # noqa: BLE001
-            result = {"status": "failed", "model": model, "error": str(e)}
+            result = {"status": "failed", "model": model, "error": str(e), **({"kind": "tee"} if tee else {})}
             self.log("enclave_attestation_failed", role=slot, model=model, error=str(e))
-        self._set_attestation(slot, result)
-        self._changed()
+        if slot in ("chat", "helper"):
+            self._set_attestation(slot, result)
+            self._changed()
         return result
 
-    @staticmethod
-    def _tee_state(model: str) -> dict:
-        return {"status": "unattested", "model": model, "kind": "tee",
-                "note": ("TEE models are not attested by DAToolkit yet (Intel TDX / NVIDIA verification is on the "
-                         "roadmap), and their prompts pass NanoGPT's gateway in the clear. Only private/ models are "
-                         "attested and end-to-end encrypted.")}
+    async def _attest_tee(self, prov: Provider, model: str) -> tee_mod.Attestation:
+        """A TEE model's enclave, checked now with a fresh nonce. Raises TeeRefused when it
+        doesn't hold; then nothing may be sent to it."""
+        key = creds.get_secret("provider", prov.name) or ""
+        make = self._tee_factory or tee_mod.TeeClient
+        client = make(prov.base_url, key, model)
+        try:
+            att = await asyncio.to_thread(client.attest)
+        except BaseException:
+            client.close()
+            raise
+        self._tee[(prov.name, model)] = (client, time.monotonic(), att.to_dict())
+        return att
+
+    async def _tee_guard(self, prov: Provider, model: str, slot: str) -> tuple[tee_mod.TeeClient, dict] | None:
+        """Nothing goes to a TEE model whose enclave hasn't attested (as SealedLore). An
+        attestation older than TEE_REATTEST_SECONDS is made again first. Returns the attested
+        client and its attestation, for reply signatures; None for a model that isn't TEE."""
+        if detect_tier(model, prov.base_url, prov.tier_overrides) != "tee":
+            return None
+        hit = self._tee.get((prov.name, model))
+        if hit and time.monotonic() - hit[1] < TEE_REATTEST_SECONDS:
+            return hit[0], hit[2]
+        task = {"chat": self._attest_task, "helper": self._helper_attest_task}.get(slot)
+        shown = {"chat": self.attestation, "helper": self.helper_attestation}.get(slot) or {}
+        if task and not task.done() and shown.get("model") == model:
+            result = await asyncio.shield(task)       # a check already under way for this model
+        else:
+            result = await self._attest(prov, model, slot)
+        if result["status"] != "verified":
+            raise UserError(f"{model}'s TEE attestation didn't hold, so nothing was sent to it: {result['error']}")
+        hit = self._tee[(prov.name, model)]
+        return hit[0], hit[2]
+
+    async def _check_signatures(self, entry: dict, client: tee_mod.TeeClient, ids: list[str]) -> None:
+        """Was each reply of this turn signed by the attested enclave's key (llm/tee.py)?"""
+        outcomes = []
+        for rid in ids:
+            try:
+                outcomes.append("signed" if await asyncio.to_thread(client.verify_reply, rid) else "failed")
+            except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
+                outcomes.append("unsigned" if client.signing_address is None else "unchecked")
+        entry["tee_signature"] = next(o for o in ("failed", "unchecked", "unsigned", "signed") if o in outcomes)
+        self.log("tee_reply_signature", model=entry.get("model"), result=entry["tee_signature"], replies=len(ids))
+        self._changed()
+        self._persist()
 
     def _attestation_for(self, prov: Provider, model: str, slot: str) -> None:
-        """Start whatever attestation fits the model: E2EE → attest; TEE → say it isn't; else none."""
-        if is_private_mode(model):
+        """Start whatever attestation fits the model: E2EE and TEE models are attested; others have none."""
+        if is_private_mode(model) or detect_tier(model, prov.base_url, prov.tier_overrides) == "tee":
             self._start_attestation(prov, model, slot)
-        elif detect_tier(model, prov.base_url, prov.tier_overrides) == "tee":
-            self._set_attestation(slot, self._tee_state(model))
         else:
             self._set_attestation(slot, None)
 
@@ -480,15 +560,19 @@ class Engine:
             return
         self._attestation_for(prov, model, "helper")
 
+    def _attestable(self, prov: Provider | None, model: str) -> bool:
+        return bool(prov and model) and (is_private_mode(model) or
+                                         detect_tier(model, prov.base_url, prov.tier_overrides) == "tee")
+
     async def attest_now(self, slot: str = "chat") -> dict:
         if slot == "helper":
             helper = self._vision_helper()
-            if not isinstance(helper, tuple) or not is_private_mode(helper[1]):
-                raise UserError("The vision helper isn't an end-to-end encrypted (private/) model.")
+            if not isinstance(helper, tuple) or not self._attestable(helper[0], helper[1]):
+                raise UserError("The vision helper isn't an end-to-end encrypted (private/) or TEE model.")
             return await self._attest(helper[0], helper[1], "helper")
         prov = self.cfg.provider(self.cfg.active_provider)
-        if not prov or not is_private_mode(self.cfg.active_model):
-            raise UserError("The active model isn't an end-to-end encrypted (private/) model.")
+        if not self._attestable(prov, self.cfg.active_model):
+            raise UserError("The active model isn't an end-to-end encrypted (private/) or TEE model.")
         return await self._attest(prov, self.cfg.active_model)
 
     def active_tier(self) -> str | None:
@@ -1637,6 +1721,10 @@ class Engine:
                     self.log("enclave_attested", **self.attestation)
                     self._changed()
                 entry["sealed"] = att.summary
+            tee = await self._tee_guard(prov, model, "chat")
+            if tee:
+                entry["tee_attested"] = tee[1]["summary"]
+            reply_ids: list[str] = []
             turn: dict = {}
             nudged = False
             vision = self.vision_status()
@@ -1649,18 +1737,28 @@ class Engine:
                 round_reasoning, round_text = len(entry["reasoning"]), len(entry["text"])
                 in_flight = (system, sent, start, round_reasoning, round_text)
                 result = None
-                async for kind, val in client.stream(model, messages, tools, self._params(prov, model)):
-                    if kind == "text":
-                        entry["text"] += val
-                        self.emit("delta", kind="text", text=val)
-                    elif kind == "reasoning":
-                        entry["reasoning"] += val
-                        self.emit("delta", kind="reasoning", text=val)
-                    elif kind == "tool":
-                        self.emit("delta", kind="tool", name=val)
-                    else:
-                        result = val
+                params = self._params(prov, model)
+                try:
+                    async for kind, val in client.stream(model, messages, tools, params):
+                        if kind == "text":
+                            entry["text"] += val
+                            self.emit("delta", kind="text", text=val)
+                        elif kind == "reasoning":
+                            entry["reasoning"] += val
+                            self.emit("delta", kind="reasoning", text=val)
+                        elif kind == "tool":
+                            self.emit("delta", kind="tool", name=val)
+                        else:
+                            result = val
+                except Exception as e:  # noqa: BLE001
+                    streamed = (len(entry["reasoning"]), len(entry["text"])) != (round_reasoning, round_text)
+                    if streamed or not self._learn_unsupported(prov, model, params, e):
+                        raise
+                    in_flight = None
+                    continue                     # the same round again, without that setting
                 usage = result.usage
+                if tee and result.id:
+                    reply_ids.append(result.id)
                 self._log_request("chat", model, tier, system, sent, {
                     "content": result.content, "reasoning": entry["reasoning"][round_reasoning:],
                     "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls],
@@ -1687,13 +1785,18 @@ class Engine:
             if entry["text"]:
                 self.conv.append({"role": "assistant", "content": entry["text"] + "\n[response stopped by technician]"})
         except Exception as e:  # noqa: BLE001
-            error = f"{type(e).__name__}: {e}"
+            error = f"not sent: {e}" if isinstance(e, UserError) else f"{type(e).__name__}: {e}"
             self._log_failed_round(in_flight, model, tier, entry, error)
         entry["text"] = entry["text"].strip()
         if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches")):
             self.chat.append(entry)
             self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"],
                      questions=entry.get("questions", []))
+            if tee and reply_ids:
+                entry["tee_signature"] = "checking"
+                task = asyncio.create_task(self._check_signatures(entry, tee[0], reply_ids))
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
         self._last_turn_error = error
         if error:
             self.chat.append({"kind": "note", "text": f"AI request {error}", "retry": True})
@@ -1948,12 +2051,17 @@ class Engine:
             self._changed()
             raise UserError(f"The vision helper {hmodel} could not be attested, so the image was not sent: {e}") from e
         try:
-            text = await client.complete(hmodel, messages, self._params(hprov, hmodel))
+            tee = await self._tee_guard(hprov, hmodel, "helper")
+        except UserError as e:
+            raise UserError(f"The vision helper {hmodel} could not be attested, so the image was not sent: {e}") from e
+        try:
+            text = await self._complete(client, hprov, hmodel, messages)
         except Exception as e:  # noqa: BLE001
             self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"error": str(e)})
             raise UserError(f"The vision helper {hmodel} failed: {e}") from e
         self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"content": text})
-        desc = {"model": hmodel, "text": text.strip(), **({"sealed": sealed} if sealed else {})}
+        desc = {"model": hmodel, "text": text.strip(), **({"sealed": sealed} if sealed else {}),
+                **({"tee_attested": tee[1]["summary"]} if tee else {})}
         self._img_desc[name] = desc
         for e in self.chat:
             if e.get("kind") == "user" and name in (e.get("images") or []):
@@ -2032,9 +2140,10 @@ class Engine:
         prov, model, tier = self._require_model()
         messages = [{"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Case: {self.case.name}\n\n" + self._transcript_for_model()}]
+        await self._tee_guard(prov, model, "chat")
         self.log("sent_to_ai", purpose=purpose, provider=prov.name, model=model, tier=tier)
         try:
-            text = await self._client(prov, model).complete(model, messages, self._params(prov, model))
+            text = await self._complete(self._client(prov, model), prov, model, messages)
         except Exception as e:  # noqa: BLE001
             self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)})
             raise UserError(f"{purpose} request failed: {e}") from e
@@ -2084,9 +2193,10 @@ class Engine:
         if p.cuts_session:
             context.append(f"Local rule says: {p.cuts_session}")
         messages = [{"role": "system", "content": prompts.REVIEW_PROMPT}, {"role": "user", "content": "\n\n".join(context)}]
+        await self._tee_guard(prov, model, "reviewer" if different else "chat")
         self.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num)
         try:
-            text = await self._client(prov, model).complete(model, messages, self._params(prov, model))
+            text = await self._complete(self._client(prov, model), prov, model, messages)
         except Exception as e:  # noqa: BLE001
             self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)})
             raise UserError(f"Review request failed: {e}") from e
