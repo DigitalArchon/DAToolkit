@@ -353,7 +353,9 @@ function renderEntry(e, live = false) {
   // assistant (final or streaming)
   const who = h("div", { class: "who" }, "AI", e.model ? ` · ${e.model}` : "",
     e.tier ? h("span", { class: `badge ${e.tier}` }, e.tier) : null,
-    e.sealed ? h("span", { class: "sealed", title: e.sealed }, "🔐 end-to-end encrypted") : null);
+    e.sealed ? h("span", { class: "sealed", title: e.sealed }, "🔐 end-to-end encrypted") : null,
+    !e.streaming && e.text ? h("button", { type: "button", class: "small ghost copy", title: "Copy this message (Markdown)",
+      onclick: () => guarded(async () => { await clipWrite(e.text); toast("Message copied.", "ok", 2000); }) }, "Copy") : null);
   const box = h("div", { class: "msg assistant" }, who);
   if (e.reasoning) {
     const noMessage = !e.streaming && !e.text;

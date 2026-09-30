@@ -312,10 +312,19 @@ is fixed from the user's side.
 """
 
 
+def _describe_target(target: str) -> str:
+    """'root@192.168.1.1:22' -> '192.168.1.1:22, logging in as user `root`'. Written as
+    user@host it reads like a shell prompt, and models took it for one they could see."""
+    if "@" in target:
+        user, where = target.split("@", 1)
+        return f"{where}, logging in as user `{user}`"
+    return target
+
+
 def _session_line(s: dict) -> str:
     desc = f"id `{s['id']}`: {s['kind']}"
     if s.get("target"):
-        desc += f" to {s['target']}"
+        desc += f" to {_describe_target(s['target'])}"
     if s["kind"] == "rdp":
         desc += (", the technician's remote desktop view: you cannot see it; commands proposed for it are "
                  "TYPED into whatever window has focus there; output comes back only as screenshots or "
@@ -328,6 +337,10 @@ def _session_line(s: dict) -> str:
         desc += f", OS/device: {s['os_hint']}"
     if s.get("exited"):
         desc += " (CLOSED - cannot run commands)"
+    if "outputs_seen" in s:
+        n = s["outputs_seen"]
+        desc += (". You have NOT been sent any output from this session yet" if not n
+                 else f". Output from it has been sent to you {n} time(s)")
     return desc
 
 
@@ -338,7 +351,9 @@ def session_roster(sessions: list[dict]) -> str:
     groups: dict[str, list[dict]] = {}
     for s in sessions:
         groups.setdefault(s.get("device") or s["id"], []).append(s)
-    lines = ["Open sessions:"]
+    lines = ["Open sessions. These are connection details, not screen contents: you cannot see any "
+             "terminal or desktop, and know only what the technician has sent you. Never describe a "
+             "prompt, banner or screen you have not been sent."]
     for members in groups.values():
         if len(members) == 1:
             lines.append("- " + _session_line(members[0]))

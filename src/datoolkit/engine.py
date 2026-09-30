@@ -1399,8 +1399,22 @@ class Engine:
         if self.busy:
             self._turn.cancel()
 
+    def _outputs_seen(self) -> dict[str, int]:
+        """How many times output from each session has actually been sent to the model."""
+        seen: dict[str, int] = {}
+        for e in self.chat:
+            if e.get("kind") != "user":
+                continue
+            for r in e.get("results", []):
+                if r.get("status") != "skipped":
+                    seen[r["session_id"]] = seen.get(r["session_id"], 0) + 1
+            for s in e.get("snippets", []):
+                seen[s.get("session_id", "")] = seen.get(s.get("session_id", ""), 0) + 1
+        return seen
+
     def _system_prompt(self) -> str:
-        roster = self.sessions.roster()
+        seen = self._outputs_seen()
+        roster = [{**s, "outputs_seen": seen.get(s["id"], 0)} for s in self.sessions.roster()]
         families = {recipes.os_family(s) for s in roster if not s.get("exited")} or {"linux", "windows"}
         rs = [r for r in recipes.load_all() if r.os == "any" or r.os in families]
         return prompts.build_system(roster, self.case.name, self.case.notes, recipes=recipes.roster_text(rs),

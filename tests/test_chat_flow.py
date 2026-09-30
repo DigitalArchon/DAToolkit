@@ -145,3 +145,25 @@ def test_ui_has_turn_status_and_terminal_screenshot():
     assert "function terminalScreenshot" in js and 'id="tab-shot-btn"' in html and 'id="shot-btn"' in html
     assert "AI finished" in js and "still working" in js
     assert 'role="status"' in html
+
+
+async def test_roster_never_reads_like_a_prompt_and_says_what_was_seen(env):  # noqa: F811
+    """A target written user@host ("root@192.168.1.1") was taken by the model for a shell
+    prompt it could see. The roster now names the login user separately, says it is
+    connection details only, and states per session whether any output has been sent."""
+    engine, fake, _ = env
+    engine.new_case("r", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    engine.sessions.spawn("router1", ["/bin/cat"], {}, name="Router1", kind="ssh", target="root@192.168.1.1",
+                          shell="remote shell/CLI", address="192.168.1.1")
+    text = engine._system_prompt()
+    roster = text.split("Open sessions.")[1].split("\n\n")[0]
+    assert "root@" not in roster and "192.168.1.1, logging in as user `root`" in roster
+    assert "not screen contents" in roster and "NOT been sent any output from this session yet" in roster
+    engine.queue.add("c", [{"session_id": "router1", "command": "uname -a", "risk": "read_only"}])
+    engine.update_item(1, status="ran")
+    fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
+    engine.send("", results=[{"num": 1, "text": "FreeBSD 14.1"}])
+    await wait_turn(engine)
+    assert "Output from it has been sent to you 1 time(s)" in engine._system_prompt()
+    engine.sessions.close_all()
