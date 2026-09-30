@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -76,6 +77,18 @@ class Case:
             out.append(summary)
         out.sort(key=lambda c: c["id"], reverse=True)
         return out
+
+    @staticmethod
+    def delete(case_id: str, root: Path | None = None) -> None:
+        """Remove a case directory and everything in it. Only a direct child of the cases
+        directory that is a case (has case.json or a case_started event) can be removed."""
+        base = (root or data_dir() / "cases").resolve()
+        if not re.fullmatch(r"[\w.-]+", case_id) or case_id in (".", ".."):
+            raise ValueError(f"Bad case id {case_id!r}")
+        d = base / case_id
+        if d.is_symlink() or not d.is_dir() or d.resolve().parent != base or _read_meta(d) is None:
+            raise FileNotFoundError(f"No case {case_id}")
+        shutil.rmtree(d)
 
     def write_meta(self) -> None:
         _write_json(self.dir / "case.json", {"name": self.name, "sensitivity": self.sensitivity,

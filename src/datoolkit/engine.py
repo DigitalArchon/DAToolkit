@@ -696,6 +696,25 @@ class Engine:
     def list_cases(self) -> list[dict]:
         return Case.list_all()
 
+    def delete_cases(self, ids: list[str]) -> dict:
+        """Permanently delete cases from disk. The open case can't be deleted: its sessions
+        are still writing transcripts into it."""
+        deleted, errors = [], []
+        for cid in dict.fromkeys(str(i) for i in ids):
+            if self.case and cid == self.case.id:
+                errors.append(f"{cid}: it is the open case; start or open another case first")
+                continue
+            try:
+                Case.delete(cid)
+                deleted.append(cid)
+            except (OSError, ValueError) as e:
+                errors.append(f"{cid}: {e}")
+        if deleted and any(h["id"] in deleted for h in self._similar):
+            self._similar = [h for h in self._similar if h["id"] not in deleted]
+            self._runbooks = search.runbook_context(self._similar)   # no runbook from a deleted case stays in context
+            self.emit("similar", cases=self.snapshot()["similar_cases"])
+        return {"deleted": deleted, "errors": errors}
+
     def open_case(self, case_id: str) -> None:
         """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
         if self.busy:

@@ -110,6 +110,10 @@ Treat that URL like a password: it grants terminal access.
   it first and can edit it out.
 - **Resume a case**: the case dialog lists earlier cases. Opening one restores the
   conversation, chat and queue; open sessions carry over.
+- **Delete cases**: in the same list, **Delete** removes a case from disk (conversation,
+  queue, audit log, transcripts, request log, images, runbook), or tick several and use
+  **Delete selected**. The filter box narrows the list. The open case can't be deleted;
+  exports saved elsewhere are left alone.
 - The top bar shows `ctx 23k`: the prompt size of the last request. It turns amber past the
   threshold in **Settings → General** (default 100k), which is the cue to export a ticket
   summary and start a fresh case.

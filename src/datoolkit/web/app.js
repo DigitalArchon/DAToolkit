@@ -1959,22 +1959,69 @@ function openCaseModal(first) {
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
     st.case && st.chat.length ? h("div", { class: "muted small" }, "The current case's log stays on disk and can be resumed later. Open sessions carry over; the conversation and queue start fresh.") : null);
   const resumeList = h("div", { class: "case-list" }, h("div", { class: "muted small" }, "Loading…"));
-  const resumeBox = h("details", { class: "resume" }, h("summary", {}, "Resume a previous case"), resumeList);
+  const filter = h("input", { type: "search", placeholder: "Filter by name, notes or date" });
+  const selAll = h("input", { type: "checkbox", title: "Select every case shown" });
+  const delSel = h("button", { type: "button", class: "small danger", disabled: true }, "Delete selected");
+  const tools = h("div", { class: "row case-tools" }, h("label", { class: "check" }, selAll, "All"), filter, delSel);
+  const resumeBox = h("details", { class: "resume" }, h("summary", {}, "Previous cases (resume or delete)"), tools, resumeList);
   body.append(resumeBox);
   let m;
+  let cases = [];
+  const chosen = new Set();
+  const shown = () => {
+    const q = filter.value.trim().toLowerCase();
+    return q ? cases.filter((c) => `${c.name} ${c.notes} ${c.started} ${c.sensitivity}`.toLowerCase().includes(q)) : cases;
+  };
+  const syncBulk = () => {
+    const vis = shown();
+    delSel.disabled = !chosen.size;
+    delSel.textContent = chosen.size ? `Delete selected (${chosen.size})` : "Delete selected";
+    selAll.checked = vis.length > 0 && vis.every((c) => chosen.has(c.id));
+    selAll.indeterminate = !selAll.checked && vis.some((c) => chosen.has(c.id));
+  };
+  const remove = async (list) => {
+    const what = list.length === 1 ? `the case "${list[0].name}"` : `${list.length} cases`;
+    if (!(await confirmModal("Delete cases", h("div", {},
+      h("p", {}, `Permanently delete ${what}? This removes the conversation, command queue, audit log, terminal transcripts, AI request log, images and any runbook from disk.`),
+      list.length > 1 ? h("ul", { class: "small" }, ...list.slice(0, 12).map((c) => h("li", {}, c.name)), list.length > 12 ? h("li", {}, `…and ${list.length - 12} more`) : null) : null,
+      h("p", { class: "muted small" }, "Exports you saved elsewhere are not touched. This can't be undone.")), "Delete", "danger"))) return;
+    const r = await api("POST", "/api/cases/delete", { ids: list.map((c) => c.id) });
+    for (const id of r.deleted) chosen.delete(id);
+    cases = cases.filter((c) => !r.deleted.includes(c.id));
+    draw();
+    if (r.deleted.length) toast(`Deleted ${r.deleted.length} case(s).`, "ok");
+    if (r.errors.length) toast(`Not deleted: ${r.errors.join("; ")}`, "error", 10000);
+  };
+  const draw = () => {
+    const vis = shown();
+    resumeList.replaceChildren(...(vis.length ? vis.map((c) => {
+      const pick = h("input", { type: "checkbox", checked: chosen.has(c.id), title: "Select for deletion",
+        onchange: (e) => { if (e.target.checked) chosen.add(c.id); else chosen.delete(c.id); syncBulk(); } });
+      return h("div", { class: "case-row" },
+        h("label", { class: "case-pick" }, pick,
+          h("div", {}, h("b", {}, c.name), " ", h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity),
+            h("div", { class: "muted small" }, `${(c.started || c.id).replace("T", " ")} · ${c.resumable ? `${c.messages} message(s)` : "log only (no saved conversation)"}`))),
+        h("div", { class: "row" },
+          h("button", { type: "button", class: "small primary", onclick: () => guarded(async () => {
+            await api("POST", "/api/case/open", { id: c.id });
+            m.close();
+            toast(`Resumed ${c.name}.`, "ok");
+          }) }, "Open"),
+          h("button", { type: "button", class: "small ghost danger", title: "Delete this case from disk", onclick: () => guarded(() => remove([c])) }, "Delete")));
+    }) : [h("div", { class: "muted small" }, cases.length ? "No case matches the filter." : "No previous cases.")]));
+    syncBulk();
+  };
+  filter.addEventListener("input", draw);
+  selAll.addEventListener("change", () => {
+    for (const c of shown()) { if (selAll.checked) chosen.add(c.id); else chosen.delete(c.id); }
+    draw();
+  });
+  delSel.addEventListener("click", () => guarded(() => remove(cases.filter((c) => chosen.has(c.id)))));
   resumeBox.addEventListener("toggle", async () => {
     if (!resumeBox.open) return;
     try {
-      const cases = (await api("GET", "/api/cases")).cases.filter((c) => c.id !== st.case?.id);
-      resumeList.replaceChildren(...(cases.length ? cases.slice(0, 40).map((c) => h("div", { class: "case-row" },
-        h("div", {}, h("b", {}, c.name), " ", h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity),
-          h("div", { class: "muted small" }, `${(c.started || c.id).replace("T", " ")} · ${c.resumable ? `${c.messages} message(s)` : "log only (no saved conversation)"}`)),
-        h("button", { class: "small primary", onclick: () => guarded(async () => {
-          await api("POST", "/api/case/open", { id: c.id });
-          m.close();
-          toast(`Resumed ${c.name}.`, "ok");
-        }) }, "Open")))
-        : [h("div", { class: "muted small" }, "No previous cases.")]));
+      cases = (await api("GET", "/api/cases")).cases.filter((c) => c.id !== st.case?.id);
+      draw();
     } catch (e) {
       resumeList.replaceChildren(h("div", { class: "warnbox" }, e.message));
     }

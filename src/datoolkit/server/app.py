@@ -165,6 +165,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def list_cases(e: Engine = Depends(auth)):
         return {"cases": e.list_cases()}
 
+    @app.post("/api/cases/delete")
+    async def delete_cases(body: dict, e: Engine = Depends(auth)):
+        return e.delete_cases([str(i) for i in body.get("ids", [])])
+
     @app.post("/api/case/open")
     async def open_case(body: dict, e: Engine = Depends(auth)):
         e.open_case(str(body.get("id", "")))

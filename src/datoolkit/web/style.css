@@ -256,6 +256,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 details.resume summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .case-list { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow: auto; margin-top: 8px; }
 .case-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.case-pick { display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; cursor: pointer; }
+.case-pick input { margin-top: 3px; }
+.case-tools { margin-top: 8px; align-items: center; }
+.case-tools input[type=search] { flex: 1; }
 
 /* hypothesis board */
 #hyp-board { border-bottom: 1px solid var(--border); background: var(--panel-2); padding: 4px 10px; max-height: 32%; overflow: auto; }
