@@ -34,11 +34,11 @@ class Provider:
 @dataclass
 class Host:
     name: str
-    kind: str  # "ssh" | "winrm"
+    kind: str  # "ssh" | "winrm" | "rdp"
     host: str
     port: int | None = None
     user: str = ""
-    # ssh: "agent" | "key" | "password"; winrm: "ntlm" | "kerberos" | "negotiate" | "basic"
+    # ssh: "agent" | "key" | "password"; winrm: "ntlm" | "kerberos" | "negotiate" | "basic"; rdp: "password"
     auth: str = "agent"
     key_file: str = ""
     jump: str = ""
@@ -46,6 +46,9 @@ class Host:
     winrm_ssl: bool = True
     winrm_cert_validation: bool = True
     os_hint: str = ""
+    # rdp: guacd's "security" (any | nla | nla-ext | tls | rdp) and keyboard layout on the server
+    rdp_security: str = "any"
+    rdp_layout: str = "en-us-qwerty"
 
 
 @dataclass
@@ -63,6 +66,9 @@ class Settings:
     search_provider: str = "kagi"
     # name of the NanoGPT provider whose key pays for searches; empty = the first NanoGPT one
     search_via: str = ""
+    # guacd (apt install guacd) proxies RDP sessions
+    guacd_host: str = "127.0.0.1"
+    guacd_port: int = 4822
 
 
 @dataclass

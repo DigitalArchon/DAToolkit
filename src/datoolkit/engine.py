@@ -1,4 +1,4 @@
-"""Core application logic shared by every frontend (GUI now, TUI later).
+"""Core application logic behind the GUI.
 
 Design rule: the LLM side of this class never touches sessions. The only path from a model
 proposal to a terminal is a technician action in the frontend (Run/Insert), which writes to
@@ -37,8 +37,9 @@ from .safety.dryrun import dry_run
 from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
+from .sessions import rdpcert
 from .sessions.askpass import AskpassBridge
-from .sessions.manager import SessionManager
+from .sessions.manager import RdpSession, SessionManager
 from .sessions.ssh import ssh_argv, target_label
 
 MAX_TOOL_ROUNDS = 6          # rounds per turn: searches and the no-message nudge each take one
@@ -142,6 +143,7 @@ class Engine:
         self._search_reqs: dict[str, tuple[asyncio.Future, dict]] = {}   # web searches awaiting approval
         self._search_ids = itertools.count(1)
         self._search_http = None      # httpx client override (tests)
+        self.pins = rdpcert.PinStore()
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -189,6 +191,9 @@ class Engine:
             p["has_key"] = self._has_secret("provider", p["name"])
         for h in c["hosts"]:
             h["has_password"] = self._has_secret("host", h["name"])
+            if h["kind"] == "rdp":
+                pin = self.pins.get(h["host"], h.get("port") or 3389)
+                h["pinned"] = pin["sha256"] if pin else ""
         return c
 
     @staticmethod
@@ -353,8 +358,10 @@ class Engine:
         name = str(data.get("name", "")).strip()
         if not name or not str(data.get("host", "")).strip():
             raise UserError("Host needs a name and address.")
-        if data.get("kind") not in ("ssh", "winrm"):
-            raise UserError("Host kind must be ssh or winrm.")
+        if data.get("kind") not in ("ssh", "winrm", "rdp"):
+            raise UserError("Host kind must be ssh, winrm or rdp.")
+        if data.get("rdp_security", "any") not in ("any", "nla", "nla-ext", "tls", "rdp"):
+            raise UserError("RDP security must be any, nla, nla-ext, tls or rdp.")
         port = data.get("port")
         host = Host(
             name=name, kind=data["kind"], host=str(data["host"]).strip(),
@@ -365,6 +372,8 @@ class Engine:
             winrm_ssl=bool(data.get("winrm_ssl", True)),
             winrm_cert_validation=bool(data.get("winrm_cert_validation", True)),
             os_hint=str(data.get("os_hint", "")).strip(),
+            rdp_security=str(data.get("rdp_security", "any") or "any"),
+            rdp_layout=str(data.get("rdp_layout", "") or "en-us-qwerty").strip(),
         )
         old = self.cfg.host(original_name or name)
         if original_name and original_name != name and old:
@@ -483,17 +492,19 @@ class Engine:
             shell = os.environ.get("SHELL") or "/bin/bash"
             sid = self.sessions.unique_id("local")
             sess = self.sessions.spawn(sid, [shell], {}, name=sid, kind="local", target="this machine",
-                                       shell=Path(shell).name, os_hint=_local_os())
+                                       shell=Path(shell).name, os_hint=_local_os(), address="localhost")
         else:
             host = self.cfg.host(host_name)
             if not host:
                 raise UserError(f"Unknown host {host_name}")
+            if host.kind == "rdp":
+                raise UserError("RDP hosts open through open_rdp.")
             sid = self.sessions.unique_id(host.name)
             env = self.bridge.env_for(sid)
             if host.kind == "ssh":
                 sess = self.sessions.spawn(sid, ssh_argv(host), env, name=host.name, kind="ssh",
                                            target=target_label(host), shell="remote shell/CLI",
-                                           os_hint=host.os_hint, host_name=host.name)
+                                           os_hint=host.os_hint, host_name=host.name, address=host.host)
             else:
                 env["DATOOLKIT_PSRP"] = json.dumps({
                     "host": host.host, "port": host.port, "user": host.user, "auth": host.auth,
@@ -503,9 +514,122 @@ class Engine:
                 sess = self.sessions.spawn(sid, [sys.executable, "-m", "datoolkit.sessions.psrp_console"], env,
                                            name=host.name, kind="winrm", target=target_label(host),
                                            shell="PowerShell (remoting, single-line)",
-                                           os_hint=host.os_hint or "Windows", host_name=host.name)
+                                           os_hint=host.os_hint or "Windows", host_name=host.name,
+                                           address=host.host)
         self.log("session_opened", **sess.roster())
         return sess.roster()
+
+    # ---------------------------------------------------------------- RDP
+
+    async def _guacd_reachable(self) -> bool:
+        s = self.cfg.settings
+        try:
+            _, w = await asyncio.wait_for(asyncio.open_connection(s.guacd_host, s.guacd_port), 3)
+            w.close()
+            return True
+        except (OSError, asyncio.TimeoutError):
+            return False
+
+    async def open_rdp(self, host_name: str) -> dict:
+        """Check guacd, check the server certificate against its pin (asking the technician
+        the first time), get the password, and register the session. The desktop itself
+        connects when the browser opens the session's tunnel."""
+        self._need_case()
+        host = self.cfg.host(host_name)
+        if not host or host.kind != "rdp":
+            raise UserError(f"Unknown RDP host {host_name}")
+        s = self.cfg.settings
+        if not await self._guacd_reachable():
+            raise UserError(f"guacd is not running on {s.guacd_host}:{s.guacd_port}. Install it with "
+                            "'sudo apt install guacd' (it starts as a service), or set its address in Settings.")
+        sid = self.sessions.unique_id(host.name)
+        port = host.port or 3389
+        try:
+            cert = await rdpcert.fetch(host.host, port, host.user.split("\\")[-1].split("@")[0])
+        except rdpcert.CertError as e:
+            raise UserError(str(e)) from e
+        await self._trust_rdp_cert(sid, host.host, port, cert)
+        user, domain = host.user, ""
+        if "\\" in user:
+            domain, user = user.split("\\", 1)
+        password = self._get_secret_safe("host", host.name)
+        if not password:
+            password = await self.ask_user(sid, f"RDP password for {host.user or 'the user'}@{host.host}",
+                                           secret=True, can_save=True)
+            if password is None:
+                raise UserError("No password given; RDP session not opened.")
+        params = {"hostname": host.host, "port": str(port), "username": user, "password": password,
+                  "domain": domain, "security": host.rdp_security, "ignore-cert": "true",
+                  "server-layout": host.rdp_layout, "resize-method": "display-update",
+                  "disable-audio": "true", "enable-font-smoothing": "true"}
+        sess = self.sessions.add(RdpSession(
+            id=sid, name=host.name, params=params, target=f"{host.user + '@' if host.user else ''}{host.host}:{port}",
+            os_hint=host.os_hint or "Windows", host_name=host.name, address=host.host, cert=cert))
+        self.log("session_opened", **sess.roster())
+        return sess.roster()
+
+    async def _trust_rdp_cert(self, sid: str, host: str, port: int, cert: dict) -> None:
+        where = f"{host}:{port}"
+        if not cert["tls"]:
+            answer = await self.ask_user(sid, (
+                f"{where} only offers legacy RDP security: there is no TLS certificate to check, so this "
+                "connection cannot be verified against a pin and could be intercepted.\nConnect anyway? (yes/no)"),
+                secret=False, can_save=False)
+            self.log("rdp_no_tls", target=where, accepted=answer == "yes")
+            if answer != "yes":
+                raise UserError(f"Not connected to {where}: no TLS.")
+            return
+        pinned = self.pins.get(host, port)
+        if pinned and pinned["sha256"] == cert["sha256"]:
+            return
+        details = (f"Subject: {cert['subject']}\nIssuer: {cert['issuer']}"
+                   f"{' (self-signed)' if cert['self_signed'] else ''}\nValid until: {cert['not_after']}\n"
+                   f"SHA-256: {cert['sha256']}")
+        if pinned:
+            self.log("rdp_cert_mismatch", target=where, pinned=pinned["sha256"], got=cert["sha256"])
+            raise UserError(f"The certificate of {where} has CHANGED since it was pinned on {pinned.get('pinned', '?')}. "
+                            f"Pinned SHA-256: {pinned['sha256']}. Presented: {cert['sha256']}. This can mean the server "
+                            "was rebuilt or its certificate renewed, or that someone is intercepting the connection. "
+                            "Verify with the device owner; if the change is legitimate, remove the pin under "
+                            "Settings → Hosts and connect again.")
+        answer = await self.ask_user(sid, (
+            f"First connection to {where}. It presented this certificate:\n{details}\n\n"
+            "Verify the fingerprint with the device owner or at the console (for Windows: the Remote Desktop "
+            "certificate in certlm.msc). Trust it and pin it for future connections? (yes/no)"),
+            secret=False, can_save=False)
+        if answer != "yes":
+            self.log("rdp_cert_rejected", target=where, sha256=cert["sha256"])
+            raise UserError(f"Certificate of {where} not trusted; RDP session not opened.")
+        self.pins.pin(host, port, cert)
+        self.log("rdp_cert_pinned", target=where, sha256=cert["sha256"])
+
+    def forget_rdp_pin(self, host_name: str) -> bool:
+        host = self.cfg.host(host_name)
+        if not host:
+            raise UserError(f"Unknown host {host_name}")
+        removed = self.pins.forget(host.host, host.port or 3389)
+        self.log("rdp_pin_forgotten", host=host_name, removed=removed)
+        self._changed()
+        return removed
+
+    def rdp_params(self, sid: str) -> dict:
+        sess = self.sessions.sessions.get(sid)
+        if not isinstance(sess, RdpSession) or sess.exited:
+            raise KeyError(sid)
+        return dict(sess.params)
+
+    def rdp_state(self, sid: str, connected: bool, error: str = "") -> None:
+        sess = self.sessions.sessions.get(sid)
+        if isinstance(sess, RdpSession):
+            sess.connected = connected
+            self.log("rdp_connected" if connected else "rdp_disconnected", session_id=sid, error=error)
+            self._sessions_changed()
+
+    def link_session(self, sid: str, to: str | None) -> None:
+        if sid not in self.sessions.sessions or (to and to not in self.sessions.sessions):
+            raise UserError("Unknown session.")
+        self.sessions.link(sid, to)
+        self.log("session_linked" if to else "session_unlinked", session_id=sid, to=to or "")
 
     def close_session(self, sid: str) -> None:
         self.sessions.close(sid)

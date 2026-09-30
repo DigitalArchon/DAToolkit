@@ -17,6 +17,7 @@ const TOKEN = (() => {
 const S = {
   state: null,
   terms: {},          // sid -> {term, fit, host, ws, markers: Map(num -> IMarker)}
+  rdps: {},           // sid -> {client, keyboard, host, view, state, clipboard, typedOk}
   activeSid: null,
   streaming: null,    // {text, reasoning, model, tier}
   promptModals: {},   // prompt id -> modal
@@ -604,21 +605,19 @@ function renderAttachments() {
     h("button", { class: "small ghost", title: "Remove", onclick: () => { pendingImages.splice(i, 1); renderAttachments(); } }, "×"))));
   strip.classList.toggle("hidden", !pendingImages.length);
 }
-function attachPhoto(file) {
+async function attachPhoto(file) {
   if (!file || !file.type.startsWith("image/")) return;
   if (pendingImages.length >= 4) return toast("Up to four photos per message.");
-  const img = new Image();
-  img.onload = () => {
-    const max = 1600, scale = Math.min(1, max / Math.max(img.width, img.height));
-    const c = document.createElement("canvas");
-    c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
-    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-    pendingImages.push(c.toDataURL("image/jpeg", 0.85));
-    URL.revokeObjectURL(img.src);
+  const url = URL.createObjectURL(file);
+  try {
+    const full = await shrinkImage(url, 4000, "image/jpeg", 0.92);      // decode once, at working size
+    const redacted = await redactImage(full, `Photo: black out anything sensitive`);
+    if (!redacted) return;
+    pendingImages.push(await shrinkImage(redacted, 1600, "image/jpeg", 0.85));
     renderAttachments();
-    if (S.state?.case?.sensitivity !== "open" && S.state?.active_tier === "standard") toast("Photos go to the model unredacted. Check nothing sensitive is in frame.", "info", 8000);
-  };
-  img.src = URL.createObjectURL(file);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 async function sendChat(ev) {
@@ -704,9 +703,30 @@ function fitTerm(t, force) {
 function activateTab(sid, focus = true) {
   S.activeSid = sid;
   for (const [id, t] of Object.entries(S.terms)) t.host.style.display = id === sid ? "" : "none";
+  for (const [id, r] of Object.entries(S.rdps)) r.host.style.display = id === sid ? "" : "none";
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.sid === sid);
   const t = S.terms[sid];
   if (t) { fitTerm(t, true); if (focus) t.term.focus(); }
+  const r = S.rdps[sid];
+  if (r) { rdpResize(r); if (focus) r.view.focus(); }
+}
+
+// Sessions on the same device get the same colour; the 🔗 button links or unlinks.
+const DEVICE_COLOURS = ["#a371f7", "#3fb97f", "#e0a93a", "#4f9cf5", "#e5534b", "#39c5cf"];
+
+function linkMenu(s) {
+  const sessions = (S.state.sessions || []).filter((x) => x.id !== s.id && !x.exited);
+  const linkedWith = sessions.filter((x) => x.device === s.device);
+  const choose = (to) => guarded(async () => { await api("POST", `/api/sessions/${encodeURIComponent(s.id)}/link`, { to }); m.close(); });
+  const m = modal({ title: `Device link for ${s.id}`,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, "Linked sessions reach the same machine; the AI is told so, and sends commands to the shell while you look at the desktop. Sessions to the same address link automatically."),
+      h("div", {}, linkedWith.length ? `Linked with: ${linkedWith.map((x) => x.id).join(", ")} (${s.link === "manual" ? "linked by you" : "automatic"})` : "Not linked to any other session."),
+      ...sessions.filter((x) => x.device !== s.device).map((x) =>
+        h("button", { type: "button", onclick: () => choose(x.id) }, `Same machine as ${x.id} (${x.kind} ${x.target})`)),
+      linkedWith.length ? h("button", { type: "button", class: "danger", onclick: () => choose(null) },
+        "Unlink (and don't link it automatically again)") : null),
+    buttons: [{ label: "Close" }] });
 }
 
 function renderSessions() {
@@ -715,13 +735,24 @@ function renderSessions() {
   for (const [id, t] of Object.entries(S.terms)) {
     if (!ids.has(id)) { t.ws?.close(); t.term.dispose(); t.host.remove(); delete S.terms[id]; }
   }
+  for (const [id, r] of Object.entries(S.rdps)) {
+    if (!ids.has(id)) { try { r.client.disconnect(); } catch { /* gone */ } r.host.remove(); delete S.rdps[id]; }
+  }
+  const counts = {};
+  for (const s of sessions) if (!s.exited) counts[s.device] = (counts[s.device] || 0) + 1;
+  const colour = {};
+  for (const d of Object.keys(counts)) if (counts[d] > 1) colour[d] = DEVICE_COLOURS[Object.keys(colour).length % DEVICE_COLOURS.length];
   const list = $("#tab-list");
   list.replaceChildren();
   for (const s of sessions) {
-    ensureTerm(s);
-    const tab = h("div", { class: `tab${s.exited ? " exited" : ""}`, "data-sid": s.id, title: `${s.target} ${s.os_hint || ""}`,
+    if (s.kind === "rdp") ensureRdp(s); else ensureTerm(s);
+    const linked = colour[s.device];
+    const tab = h("div", { class: `tab${s.exited ? " exited" : ""}${linked ? " linked" : ""}${s.kind === "rdp" && !s.connected ? " offline" : ""}`,
+      "data-sid": s.id, title: `${s.target} ${s.os_hint || ""}`, style: linked ? `--dev:${linked}` : null,
       onclick: () => activateTab(s.id) },
       h("span", { class: "dot" }), h("span", { class: "name" }, s.id), h("span", { class: "kind" }, s.kind),
+      h("button", { class: `link${linked ? " on" : ""}`, title: linked ? "Linked to another session on the same machine: click to change" : "Link to another session on the same machine",
+        onclick: (e) => { e.stopPropagation(); linkMenu(s); } }, "🔗"),
       h("button", { class: "close", title: "Close session", onclick: (e) => { e.stopPropagation(); closeSession(s); } }, "×"));
     list.append(tab);
   }
@@ -760,6 +791,9 @@ function renderSessionMenu() {
 // buffer no longer has it (reload, closed session, resumed case) the server slices the
 // transcript file instead.
 async function captureFor(item) {
+  if (S.rdps[item.session_id] || (S.state.sessions || []).find((s) => s.id === item.session_id)?.kind === "rdp") {
+    return { text: "", rdp: true };
+  }
   const local = captureFromBuffer(item);
   if (!local.error) return local;
   try {
@@ -868,17 +902,251 @@ function terminalScreenshot(sid) {
   return canvas.toDataURL("image/png");
 }
 
-function attachTerminalScreenshot() {
+// ------------------------------------------------------------------ RDP (guacd)
+
+// The server does the guacd handshake (the password never reaches this page) and relays the
+// Guacamole protocol; guacamole-common-js draws the desktop and sends mouse and keyboard.
+const RDP_STATES = ["idle", "connecting…", "waiting…", "connected", "disconnecting…", "disconnected"];
+
+function rdpViewSize(r) {
+  const w = r.view.clientWidth || $("#terms").clientWidth || 1280;
+  const hh = r.view.clientHeight || ($("#terms").clientHeight - 34) || 800;
+  return [Math.max(200, Math.floor(w)), Math.max(200, Math.floor(hh))];
+}
+
+function rdpFit(r) {
+  const d = r.client?.getDisplay();
+  if (!d || !d.getWidth() || !r.view.clientWidth) return;
+  const scale = Math.min(r.view.clientWidth / d.getWidth(), r.view.clientHeight / d.getHeight());
+  d.scale(isFinite(scale) && scale > 0 ? scale : 1);
+}
+
+let rdpResizeTimer = null;
+function rdpResize(r) {
+  rdpFit(r);
+  clearTimeout(rdpResizeTimer);
+  rdpResizeTimer = setTimeout(() => {
+    if (r.state === 3) r.client.sendSize(...rdpViewSize(r));   // remote follows (display-update)
+  }, 400);
+}
+
+function ensureRdp(sess) {
+  if (S.rdps[sess.id]) return S.rdps[sess.id];
+  const r = { id: sess.id, state: 0, clipboard: "", typedOk: false };
+  const btn = (label, title, fn) => h("button", { type: "button", class: "small ghost", title, onclick: () => guarded(fn) }, label);
+  r.view = h("div", { class: "rdp-view", tabindex: 0 });
+  r.status = h("span", { class: "rdp-status muted small" }, "connecting…");
+  r.clipBtn = btn("Clipboard → AI", "Send the text last copied in the remote desktop to the AI", () => sendRdpClipboard(r));
+  r.clipBtn.disabled = true;
+  r.bar = h("div", { class: "rdp-bar" },
+    btn("Ctrl+Alt+Del", "Send Ctrl+Alt+Del", () => rdpKeys(r, [0xFFE3, 0xFFE9, 0xFFFF])),
+    btn("Win", "Press the Windows key", () => rdpKeys(r, [0xFFEB])),
+    btn("Win+R", "Open the Run dialog", () => rdpKeys(r, [0xFFEB, 0x72])),
+    btn("Screenshot → chat", "Attach a screenshot of the remote desktop to your next message", attachScreenshot),
+    r.clipBtn,
+    btn("Paste text…", "Put text on the remote clipboard, or type it into the focused window", () => rdpPasteText(r)),
+    btn("Reconnect", "Reconnect the remote desktop", () => rdpConnect(r)),
+    h("span", { class: "spacer" }), r.status);
+  r.host = h("div", { class: "term-host rdp-host" }, r.bar, r.view);
+  $("#terms").append(r.host);
+  r.keyboard = new Guacamole.Keyboard(r.view);
+  r.keyboard.onkeydown = (keysym) => { if (r.state === 3) r.client.sendKeyEvent(1, keysym); return false; };
+  r.keyboard.onkeyup = (keysym) => { if (r.state === 3) r.client.sendKeyEvent(0, keysym); };
+  r.view.addEventListener("blur", () => r.keyboard.reset());
+  r.view.addEventListener("mousedown", () => r.view.focus());
+  S.rdps[sess.id] = r;
+  rdpConnect(r);
+  return r;
+}
+
+function rdpConnect(r) {
+  try { r.client?.disconnect(); } catch { /* already gone */ }
+  const client = new Guacamole.Client(new Guacamole.WebSocketTunnel(`ws://${location.host}/ws/rdp/${encodeURIComponent(r.id)}`));
+  r.client = client;
+  const display = client.getDisplay();
+  r.view.replaceChildren(display.getElement());
+  client.onstatechange = (st) => {
+    if (client !== r.client) return;
+    r.state = st;
+    r.status.textContent = RDP_STATES[st] || "";
+    r.host.classList.toggle("rdp-off", st === 5);
+    if (st === 3) rdpResize(r);
+  };
+  client.onerror = (status) => {
+    r.status.textContent = `error: ${status.message || status.code}`;
+    toast(`RDP ${r.id}: ${status.message || `error ${status.code}`}`, "error", 12000);
+  };
+  client.onclipboard = (stream, mimetype) => {
+    if (!/^text\//.test(mimetype)) return;
+    const reader = new Guacamole.StringReader(stream);
+    let data = "";
+    reader.ontext = (t) => { data += t; };
+    reader.onend = () => { r.clipboard = data; r.clipBtn.disabled = !data.trim(); };
+  };
+  display.onresize = () => rdpFit(r);
+  const mouse = new Guacamole.Mouse(display.getElement());
+  mouse.onEach(["mousedown", "mousemove", "mouseup"], (e) => { if (r.state === 3) client.sendMouseState(e.state, true); });
+  const [w, hh] = rdpViewSize(r);
+  client.connect(`t=${encodeURIComponent(TOKEN)}&width=${w}&height=${hh}&dpi=96`);
+}
+
+function rdpKeys(r, keysyms) {
+  if (r.state !== 3) throw new Error("The remote desktop is not connected.");
+  for (const k of keysyms) r.client.sendKeyEvent(1, k);
+  for (const k of [...keysyms].reverse()) r.client.sendKeyEvent(0, k);
+  r.view.focus();
+}
+
+function keysymFor(ch) {
+  if (ch === "\n") return 0xFF0D;
+  if (ch === "\t") return 0xFF09;
+  const c = ch.codePointAt(0);
+  return (c >= 0x20 && c <= 0x7E) || (c >= 0xA0 && c <= 0xFF) ? c : 0x01000000 | c;
+}
+
+// Type text into whichever window has focus on the remote desktop (Run adds Enter).
+async function rdpType(r, text, enter) {
+  if (r.state !== 3) throw new Error("The remote desktop is not connected.");
+  const chars = [...text.replace(/\r\n?/g, "\n")];
+  for (let i = 0; i < chars.length; i++) {
+    const k = keysymFor(chars[i]);
+    r.client.sendKeyEvent(1, k);
+    r.client.sendKeyEvent(0, k);
+    if (i % 16 === 15) await new Promise((res) => setTimeout(res, 15));   // let the remote app keep up
+  }
+  if (enter) { r.client.sendKeyEvent(1, 0xFF0D); r.client.sendKeyEvent(0, 0xFF0D); }
+}
+
+function rdpPasteText(r) {
+  const ta = h("textarea", { rows: 6, class: "mono", spellcheck: "false", placeholder: "Text to send to the remote desktop" });
+  modal({ title: `Paste into ${r.id}`, body: h("div", { class: "field" }, ta,
+    h("div", { class: "muted small" }, "“Remote clipboard” puts it on the remote clipboard; then press Ctrl+V there. “Type it” types it into the focused window.")),
+    buttons: [{ label: "Cancel" },
+      { label: "Type it", onClick: async () => { await rdpType(r, ta.value, false); } },
+      { label: "Remote clipboard", kind: "primary", onClick: () => {
+        const writer = new Guacamole.StringWriter(r.client.createClipboardStream("text/plain"));
+        writer.sendText(ta.value);
+        writer.sendEnd();
+        toast("On the remote clipboard: press Ctrl+V in the remote desktop.", "ok", 4000);
+        r.view.focus();
+      } }] });
+}
+
+async function sendRdpClipboard(r) {
+  if (!r.clipboard.trim()) return toast("Copy some text in the remote desktop first.");
+  await sendExcerpt(r.id, r.clipboard, `Send copied text from ${r.id}`);
+}
+
+// ------------------------------------------------------------------ screenshots & redaction
+
+// Every image goes through this before it is attached: drag rectangles to black out, then
+// Attach. The pixels are replaced in this page, so the original never leaves it.
+function redactImage(dataUrl, title = "Black out anything sensitive, then attach") {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onerror = () => resolve(null);
+    img.onload = () => {
+      const canvas = h("canvas", { class: "redact-canvas" });
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      const rects = [];
+      let drag = null, result = null;
+      const draw = () => {
+        ctx.drawImage(img, 0, 0);
+        ctx.fillStyle = "#000";
+        for (const b of rects) ctx.fillRect(b.x, b.y, b.w, b.h);
+        if (drag) {
+          ctx.fillRect(drag.x, drag.y, drag.w, drag.h);
+          ctx.strokeStyle = "#e5534b";
+          ctx.lineWidth = Math.max(2, canvas.width / 500);
+          ctx.strokeRect(drag.x, drag.y, drag.w, drag.h);
+        }
+        count.textContent = rects.length ? `${rects.length} area(s) blacked out` : "Nothing blacked out yet";
+      };
+      const pt = (e) => {
+        const b = canvas.getBoundingClientRect();
+        return { x: Math.max(0, Math.min(canvas.width, (e.clientX - b.left) * canvas.width / b.width)),
+          y: Math.max(0, Math.min(canvas.height, (e.clientY - b.top) * canvas.height / b.height)) };
+      };
+      const move = (e) => {
+        if (!drag) return;
+        const p = pt(e);
+        Object.assign(drag, { x: Math.min(drag.x0, p.x), y: Math.min(drag.y0, p.y), w: Math.abs(p.x - drag.x0), h: Math.abs(p.y - drag.y0) });
+        draw();
+      };
+      const up = () => {
+        if (drag && drag.w > 2 && drag.h > 2) rects.push({ x: drag.x, y: drag.y, w: drag.w, h: drag.h });
+        drag = null;
+        draw();
+      };
+      canvas.addEventListener("mousedown", (e) => { e.preventDefault(); const p = pt(e); drag = { x0: p.x, y0: p.y, x: p.x, y: p.y, w: 0, h: 0 }; });
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+      const count = h("span", { class: "muted small" });
+      modal({ title, wide: true,
+        body: h("div", { class: "redact" }, h("div", { class: "muted small" },
+          "Drag over anything that shouldn't reach the AI (names, addresses, keys). Blacked-out areas are replaced with black pixels before the image leaves this window. ", count),
+          h("div", { class: "redact-wrap" }, canvas)),
+        buttons: [
+          { label: "Undo", onClick: () => { rects.pop(); draw(); return true; } },
+          { label: "Clear", onClick: () => { rects.length = 0; draw(); return true; } },
+          { label: "Cancel" },
+          { label: "Attach", kind: "primary", onClick: () => { drag = null; draw(); result = canvas.toDataURL("image/png"); } }],
+        onClose: () => {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+          resolve(result);
+        } });
+      draw();
+    };
+    img.src = dataUrl;
+  });
+}
+
+// Shrink an image to fit `max` px on its long side (models downscale anyway).
+function shrinkImage(dataUrl, max = 1600, type = "image/png", quality = 0.9) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      if (scale === 1 && dataUrl.startsWith(`data:${type}`)) return resolve(dataUrl);
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.naturalWidth * scale);
+      c.height = Math.round(img.naturalHeight * scale);
+      const cx = c.getContext("2d");
+      cx.imageSmoothingQuality = "high";
+      cx.drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL(type, quality));
+    };
+    img.src = dataUrl;
+  });
+}
+
+// Screenshot of the active session (terminal or remote desktop) -> redaction -> attachment.
+async function attachScreenshot() {
   const sess = activeSession();
   if (!sess) return toast("Open and select a session first.");
   if (pendingImages.length >= 4) return toast("Up to four images per message.");
-  pendingImages.push(terminalScreenshot(sess.id));
+  const r = S.rdps[sess.id];
+  let shot;
+  if (r) {
+    if (r.state !== 3) return toast("The remote desktop is not connected.");
+    shot = r.client.getDisplay().flatten().toDataURL("image/png");
+  } else {
+    shot = terminalScreenshot(sess.id);
+  }
+  const redacted = await redactImage(shot, `Screenshot of ${sess.id}: black out anything sensitive`);
+  if (!redacted) return;
+  pendingImages.push(await shrinkImage(redacted));
   renderAttachments();
   const input = $("#chat-input");
-  if (!input.value.trim()) input.value = `This is what I see in the terminal of session \`${sess.id}\` right now (screenshot attached).`;
+  if (!input.value.trim()) {
+    input.value = r ? `This is what I see on the remote desktop of session \`${sess.id}\` right now (screenshot attached).`
+      : `This is what I see in the terminal of session \`${sess.id}\` right now (screenshot attached).`;
+  }
   input.focus();
   input.selectionStart = input.selectionEnd = input.value.length;
-  toast("Screenshot attached. Images are not redacted: check nothing sensitive is on screen.", "info", 6000);
 }
 
 // ------------------------------------------------------------------ queue
@@ -1061,6 +1329,23 @@ async function runItem(num, mode) {
       mode === "run" ? "Run it" : "Insert it", "danger");
     if (!ok) return;
   }
+  const r = S.rdps[sess.id];
+  if (r) {
+    if (r.state !== 3) throw new Error(`The remote desktop ${sess.id} is not connected.`);
+    if (!r.typedOk) {
+      const ok = await confirmModal("Type into the remote desktop", h("div", {},
+        h("p", {}, `This types the command into whichever window has focus on ${sess.id}${mode === "run" ? " and presses Enter" : ""}. Click into the right window first (for example an elevated PowerShell).`),
+        h("pre", { class: "prompt-text" }, item.command),
+        h("p", { class: "muted small" }, "Output isn't captured from a remote desktop: copy it there and use Clipboard → AI, or attach a screenshot. You won't be asked again for this session.")),
+      mode === "run" ? "Type and press Enter" : "Type it", "primary");
+      if (!ok) return;
+      r.typedOk = true;
+    }
+    activateTab(sess.id);
+    await api("POST", `/api/queue/${num}`, { status: mode === "run" ? "ran" : "inserted" });
+    await rdpType(r, item.command, mode === "run");
+    return;
+  }
   activateTab(sess.id);
   const t = S.terms[sess.id];
   if (!t?.ws) throw new Error("Terminal is not connected.");
@@ -1084,11 +1369,13 @@ async function runGroup(group) {
   }
   for (const i of items) {
     const sess = (S.state.sessions || []).find((s) => s.id === i.session_id);
-    if (!sess || sess.exited || !S.terms[sess.id]?.ws) throw new Error(`Session ${i.session_id} is not open.`);
+    const ready = S.rdps[i.session_id] ? S.rdps[i.session_id].state === 3 : S.terms[i.session_id]?.ws;
+    if (!sess || sess.exited || !ready) throw new Error(`Session ${i.session_id} is not open or not connected.`);
   }
   // record all start positions first, then type everything in one go so the starts line up
   await Promise.all(items.map((i) => api("POST", `/api/queue/${i.num}`, { status: "ran" })));
   for (const i of items) {
+    if (S.rdps[i.session_id]) { rdpType(S.rdps[i.session_id], i.command, true); continue; }
     const t = S.terms[i.session_id];
     t.markers.get(i.num)?.dispose();
     t.markers.set(i.num, t.term.registerMarker(0));
@@ -1358,10 +1645,27 @@ async function openSendResults(draft = "") {
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
   const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" } : captureFor(i))));
   const prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text), nums: items.map((i) => i.num) })).items;
+  const images = [];
+  const thumbs = h("div", { class: "thumbs" });
+  const addShot = (sid) => guarded(async () => {
+    const r = S.rdps[sid];
+    if (!r || r.state !== 3) throw new Error(`The remote desktop ${sid} is not connected.`);
+    if (images.length >= 4) throw new Error("Up to four images per message.");
+    const shot = await redactImage(r.client.getDisplay().flatten().toDataURL("image/png"), `Screenshot of ${sid}: black out anything sensitive`);
+    if (!shot) return;
+    images.push(await shrinkImage(shot));
+    thumbs.replaceChildren(...images.map((d) => h("img", { src: d, class: "thumb" })));
+  });
   const blocks = items.map((item, idx) => {
     const include = h("input", { type: "checkbox", checked: true });
     const skipped = item.status === "skipped";
-    const ta = skipped ? null : h("textarea", { spellcheck: "false", value: prev[idx].text });
+    const rdp = !!caps[idx].rdp;
+    const ta = skipped ? null : h("textarea", { spellcheck: "false", value: prev[idx].text,
+      placeholder: rdp ? "Output isn't captured from a remote desktop: paste it here, or attach a screenshot below." : "" });
+    const rdpTools = rdp && !skipped ? h("div", { class: "row" },
+      h("button", { type: "button", class: "small", onclick: () => addShot(item.session_id) }, "📸 Screenshot of the desktop"),
+      h("button", { type: "button", class: "small", title: "Text last copied in the remote desktop",
+        onclick: () => { const r = S.rdps[item.session_id]; if (r?.clipboard) { ta.value = r.clipboard; autosize(ta); } else toast("Copy the output in the remote desktop first."); } }, "Copied text")) : null;
     const note = h("input", { type: "text", placeholder: "Note to the AI (optional)", value: item.note || "" });
     const info = [];
     if (prev[idx].redactions) info.push(`${prev[idx].redactions} redaction(s) applied`);
@@ -1372,7 +1676,7 @@ async function openSendResults(draft = "") {
         h("span", { class: `status ${item.status}` }, item.status.toUpperCase()),
         h("span", { class: "muted" }, item.session_id), h("code", { class: "mono" }, item.command)),
       ...warnList(prev[idx], caps[idx]),
-      ta, info.length ? h("div", { class: "muted small" }, info.join(" · ")) : null, note);
+      ta, rdpTools, info.length ? h("div", { class: "muted small" }, info.join(" · ")) : null, note);
     include.addEventListener("change", () => block.classList.toggle("excluded", !include.checked));
     if (ta) setTimeout(() => autosize(ta), 30);
     return { item, include, ta, note };
@@ -1382,13 +1686,13 @@ async function openSendResults(draft = "") {
     title: "Review results before sending", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "muted small" }, "This exact text is what the AI receives. Edit or untick anything that shouldn't be shared."),
-      ...blocks.map((b) => b.include.closest(".result-block")), h("div", { class: "field" }, h("span", {}, "Message"), message)),
+      ...blocks.map((b) => b.include.closest(".result-block")), thumbs, h("div", { class: "field" }, h("span", {}, "Message"), message)),
     buttons: [{ label: "Cancel" }, {
       label: "Send to AI", kind: "primary", onClick: async () => {
         const results = blocks.filter((b) => b.include.checked)
           .map((b) => ({ num: b.item.num, text: b.ta ? b.ta.value : "", note: b.note.value.trim() }));
         if (!results.length && !message.value.trim()) throw new Error("Nothing selected.");
-        await api("POST", "/api/send", { message: message.value.trim(), results });
+        await api("POST", "/api/send", { message: message.value.trim(), results, images });
         if (draft && $("#chat-input").value === draft) $("#chat-input").value = "";
       },
     }],
@@ -1396,14 +1700,20 @@ async function openSendResults(draft = "") {
 }
 
 async function sendSelection() {
+  const r = S.rdps[S.activeSid];
+  if (r) return sendRdpClipboard(r);
   const t = S.terms[S.activeSid];
   const sel = t?.term.getSelection() || "";
   if (!sel.trim()) return toast("Select some text in the terminal first.");
-  const prev = (await api("POST", "/api/preview", { texts: [sel] })).items[0];
+  await sendExcerpt(S.activeSid, sel, `Send terminal excerpt from ${S.activeSid}`);
+}
+
+async function sendExcerpt(sid, text, title) {
+  const prev = (await api("POST", "/api/preview", { texts: [text] })).items[0];
   const ta = h("textarea", { spellcheck: "false", class: "mono", rows: 12, value: prev.text });
   const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)" });
   modal({
-    title: `Send terminal excerpt from ${S.activeSid}`, wide: true,
+    title, wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       prev.redactions || prev.truncated ? h("div", { class: "muted small" },
         [prev.redactions ? `${prev.redactions} redaction(s) applied` : "", prev.truncated ? "truncated" : ""].filter(Boolean).join(" · ")) : null,
@@ -1411,7 +1721,7 @@ async function sendSelection() {
       ta, h("div", { class: "field" }, h("span", {}, "Message"), message)),
     buttons: [{ label: "Cancel" }, {
       label: "Send to AI", kind: "primary",
-      onClick: () => api("POST", "/api/send", { message: message.value.trim(), snippets: [{ session_id: S.activeSid, text: ta.value }] }),
+      onClick: () => api("POST", "/api/send", { message: message.value.trim(), snippets: [{ session_id: sid, text: ta.value }] }),
     }],
   });
 }
@@ -1432,7 +1742,7 @@ function showCredentialPrompt(p) {
     dismissable: false,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "prompt-text" }, p.text),
-      yesNo ? h("div", { class: "muted small" }, "Verify the fingerprint with the device owner or console before accepting.") : null,
+      yesNo && !/certificate/i.test(p.text) ? h("div", { class: "muted small" }, "Verify the fingerprint with the device owner or console before accepting.") : null,
       input, save ? h("label", { class: "check" }, save, "Save to keyring for this host") : null),
     buttons: yesNo
       ? [{ label: "Reject", onClick: () => answer("no") }, { label: "Accept", kind: "primary", onClick: () => answer("yes") }]
@@ -1655,6 +1965,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "grow" }, h("b", {}, x.name), "  ",
         h("span", { class: "muted small" }, `${x.kind.toUpperCase()} ${x.user ? x.user + "@" : ""}${x.host}${x.port ? ":" + x.port : ""} · ${x.auth}${x.os_hint ? " · " + x.os_hint : ""}`)),
       x.has_password ? h("span", { class: "small" }, "🔑") : null,
+      x.kind === "rdp" ? h("span", { class: "small", title: x.pinned ? `Pinned certificate SHA-256 ${x.pinned}` : "No certificate pinned yet" }, x.pinned ? "📌 cert pinned" : "") : null,
       h("button", { class: "small", onclick: () => pane.replaceChildren(hostForm(x)) }, "Edit"),
       h("button", { class: "small danger", onclick: async () => {
         if (await confirmModal("Delete host", `Delete ${x.name} and any stored password?`, "Delete", "danger")) {
@@ -1665,16 +1976,24 @@ function openSettings(tab = "providers") {
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, list,
       h("div", { class: "row" },
         h("button", { class: "primary", onclick: () => pane.replaceChildren(hostForm({ kind: "ssh", auth: "agent", _new: true })) }, "Add SSH host"),
-        h("button", { onclick: () => pane.replaceChildren(hostForm({ kind: "winrm", auth: "ntlm", winrm_ssl: true, winrm_cert_validation: true, _new: true })) }, "Add WinRM host")));
+        h("button", { onclick: () => pane.replaceChildren(hostForm({ kind: "winrm", auth: "ntlm", winrm_ssl: true, winrm_cert_validation: true, _new: true })) }, "Add WinRM host"),
+        h("button", { title: "Remote desktop through guacd (sudo apt install guacd)",
+          onclick: () => pane.replaceChildren(hostForm({ kind: "rdp", auth: "password", rdp_security: "any", rdp_layout: "en-us-qwerty", _new: true })) }, "Add RDP host")));
   }
 
   function hostForm(x) {
     const ssh = x.kind === "ssh";
+    const rdp = x.kind === "rdp";
+    const layouts = ["en-us-qwerty", "en-gb-qwerty", "de-de-qwertz", "de-ch-qwertz", "fr-fr-azerty", "fr-be-azerty", "fr-ch-qwertz",
+      "it-it-qwerty", "es-es-qwerty", "es-latam-qwerty", "pt-br-qwerty", "sv-se-qwerty", "da-dk-qwerty", "no-no-qwerty", "hu-hu-qwertz", "ja-jp-qwerty", "tr-tr-qwerty", "failsafe"];
     const f = {
       name: h("input", { type: "text", value: x.name || "", placeholder: "e.g. acme-fs01" }),
       host: h("input", { type: "text", value: x.host || "", placeholder: "hostname or IP" }),
-      port: h("input", { type: "number", value: x.port || "", placeholder: ssh ? "22" : (x.winrm_ssl === false ? "5985" : "5986") }),
-      user: h("input", { type: "text", value: x.user || "", placeholder: ssh ? "username" : "DOMAIN\\user or user@domain" }),
+      port: h("input", { type: "number", value: x.port || "", placeholder: ssh ? "22" : rdp ? "3389" : (x.winrm_ssl === false ? "5985" : "5986") }),
+      user: h("input", { type: "text", value: x.user || "", placeholder: ssh ? "username" : rdp ? "DOMAIN\\user or user" : "DOMAIN\\user or user@domain" }),
+      rdp_security: h("select", {}, [["any", "Negotiate (any)"], ["nla", "NLA"], ["nla-ext", "NLA (extended)"], ["tls", "TLS"], ["rdp", "Legacy RDP security"]]
+        .map(([v, l]) => h("option", { value: v, selected: v === (x.rdp_security || "any") }, l))),
+      rdp_layout: h("select", {}, layouts.map((v) => h("option", { value: v, selected: v === (x.rdp_layout || "en-us-qwerty") }, v))),
       auth: h("select", {}, (ssh ? [["agent", "SSH agent / default keys"], ["key", "Key file"], ["password", "Password"]]
         : [["ntlm", "NTLM"], ["kerberos", "Kerberos"], ["negotiate", "Negotiate"], ["basic", "Basic (HTTPS only!)"]])
         .map(([v, l]) => h("option", { value: v, selected: v === x.auth }, l))),
@@ -1691,14 +2010,25 @@ function openSettings(tab = "providers") {
     const field = (label, el, style) => h("label", { class: "field", style }, h("span", {}, label), el);
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "row" }, field("Name", f.name), field("Host", f.host, "flex:2"), field("Port", f.port)),
-      h("div", { class: "row" }, field("User", f.user), field(ssh ? "Authentication" : "Auth method", f.auth)),
+      h("div", { class: "row" }, field("User", f.user), rdp ? field("Security", f.rdp_security) : field(ssh ? "Authentication" : "Auth method", f.auth)),
+      rdp ? field("Keyboard layout on the remote machine", f.rdp_layout) : null,
       field("Password", f.password),
       ssh ? h("div", { class: "row" }, field("Key file", f.key_file), field("Jump host", f.jump)) : null,
       ssh ? field("Extra SSH options", f.ssh_options) : null,
-      ssh ? null : h("div", { class: "row" },
+      ssh || rdp ? null : h("div", { class: "row" },
         h("label", { class: "check" }, f.winrm_ssl, "HTTPS (5986)"),
         h("label", { class: "check" }, f.winrm_cert_validation, "Validate certificate")),
       field("OS / device hint for the AI", f.os_hint),
+      rdp ? h("div", { class: "muted small" }, x.pinned
+        ? `Pinned certificate SHA-256: ${x.pinned}. A different certificate blocks the connection until you forget this pin.`
+        : "No certificate pinned yet: you'll be shown the server's certificate on first connection and asked to trust it.") : null,
+      rdp && x.pinned ? h("button", { class: "small", style: "align-self:flex-start", onclick: () => guarded(async () => {
+        if (!(await confirmModal("Forget pinned certificate", `Forget the pinned certificate for ${x.name}? Only do this if you know why it changed (server rebuilt, certificate renewed).`, "Forget", "danger"))) return;
+        await api("POST", `/api/hosts/${encodeURIComponent(x.name)}/forget-pin`);
+        x.pinned = "";
+        toast("Pin removed. You'll be asked to verify the certificate on the next connection.", "ok");
+        pane.replaceChildren(hostForm(x));
+      }) }, "Forget pinned certificate") : null,
       x.has_password ? h("button", { class: "small", style: "align-self:flex-start", onclick: () => guarded(async () => {
         await api("POST", `/api/hosts/${encodeURIComponent(x.name)}/forget-password`);
         toast("Password removed from keyring.", "ok");
@@ -1709,7 +2039,8 @@ function openSettings(tab = "providers") {
           await api("POST", "/api/hosts", {
             host: {
               name: f.name.value.trim(), kind: x.kind, host: f.host.value.trim(), port: f.port.value ? Number(f.port.value) : null,
-              user: f.user.value.trim(), auth: f.auth.value, key_file: f.key_file.value.trim(), jump: f.jump.value.trim(),
+              user: f.user.value.trim(), auth: rdp ? "password" : f.auth.value, key_file: f.key_file.value.trim(), jump: f.jump.value.trim(),
+              rdp_security: f.rdp_security.value, rdp_layout: f.rdp_layout.value,
               ssh_options: f.ssh_options.value.split("\n"), winrm_ssl: f.winrm_ssl.checked,
               winrm_cert_validation: f.winrm_cert_validation.checked, os_hint: f.os_hint.value.trim(),
             },
@@ -1866,7 +2197,10 @@ function setupSplitters() {
   let pending = null;
   new ResizeObserver(() => {
     clearTimeout(pending);
-    pending = setTimeout(() => fitTerm(S.terms[S.activeSid], true), 60);
+    pending = setTimeout(() => {
+      fitTerm(S.terms[S.activeSid], true);
+      if (S.rdps[S.activeSid]) rdpResize(S.rdps[S.activeSid]);
+    }, 60);
   }).observe($("#terms"));
 }
 
@@ -1878,11 +2212,15 @@ function init() {
     else chatHistoryKey(e);
   });
   document.addEventListener("keydown", globalKeys);
+  // DAToolkit's own shortcuts still work while the remote desktop has the keyboard
+  $("#terms").addEventListener("keydown", (e) => {
+    if (e.target.closest?.(".rdp-view") && isGlobalShortcut(e)) { e.stopPropagation(); globalKeys(e); }
+  }, true);
   setInterval(tickElapsed, 10000);
   setInterval(() => { if (S.state?.busy) renderStatus(); }, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "DAToolkit"; });
-  $("#shot-btn").addEventListener("click", () => guarded(attachTerminalScreenshot));
-  $("#tab-shot-btn").addEventListener("click", () => guarded(attachTerminalScreenshot));
+  $("#shot-btn").addEventListener("click", () => guarded(attachScreenshot));
+  $("#tab-shot-btn").addEventListener("click", () => guarded(attachScreenshot));
   $("#stop-btn").addEventListener("click", () => guarded(() => api("POST", "/api/stop")));
   $("#case-btn").addEventListener("click", () => openCaseModal(false));
   $("#model-btn").addEventListener("click", openModelPicker);
@@ -1911,8 +2249,11 @@ function init() {
     else if (a?.startsWith("baseline-")) guarded(() => baselineAction(a.slice(9)));
   });
   $("#attach-btn").addEventListener("click", () => $("#photo-input").click());
-  $("#photo-input").addEventListener("change", (e) => { for (const f of e.target.files) attachPhoto(f); e.target.value = ""; });
-  $("#chat-input").addEventListener("paste", (e) => { for (const it of e.clipboardData?.items || []) if (it.type.startsWith("image/")) attachPhoto(it.getAsFile()); });
+  $("#photo-input").addEventListener("change", async (e) => { const files = [...e.target.files]; e.target.value = ""; for (const f of files) await guarded(() => attachPhoto(f)); });
+  $("#chat-input").addEventListener("paste", async (e) => {
+    const files = [...(e.clipboardData?.items || [])].filter((it) => it.type.startsWith("image/")).map((it) => it.getAsFile());
+    for (const f of files) await guarded(() => attachPhoto(f));
+  });
   $("#hyp-toggle").addEventListener("click", () => $("#hyp-list").classList.toggle("hidden"));
   $("#send-selection-btn").addEventListener("click", () => guarded(sendSelection));
   $("#show-done").addEventListener("change", renderQueue);

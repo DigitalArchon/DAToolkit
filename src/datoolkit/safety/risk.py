@@ -154,15 +154,28 @@ _NETDEV_CUTS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# Typed into a window on a remote desktop: the network-wide WinRM rules apply, plus the
+# ways to lose the desktop itself.
+_RDP_CUTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(Stop|Restart)-Service\b.*\b(TermService|UmRdpService)\b", _I), "stops Remote Desktop Services, which carries this session"),
+    (re.compile(r"\bnet\s+stop\s+termservice\b|\bsc(\.exe)?\s+stop\s+termservice\b", _I), "stops Remote Desktop Services"),
+    (re.compile(r"\b(logoff|tsdiscon|shutdown\s+/l)\b", _I), "logs off or disconnects this desktop session"),
+    (re.compile(r"fDenyTSConnections\b.*\b1\b", _I), "disables Remote Desktop connections"),
+    (re.compile(r"\b(Disable-NetFirewallRule|Remove-NetFirewallRule)\b.*\b(RemoteDesktop|Remote Desktop|3389)\b", _I), "removes the Remote Desktop firewall rule"),
+] + [r for r in _WINRM_CUTS if "WinRM" not in r[1] and "remoting" not in r[1]]
+
+
 def session_impact(command: str, session_kind: str) -> str | None:
     """Reason this command would cut the session it is run in, or None.
 
-    session_kind is "local", "ssh", "winrm". SSH sessions may reach a network device rather
+    session_kind is "local", "ssh", "winrm", "rdp" (typed into a window on the remote desktop). SSH sessions may reach a network device rather
     than a Linux host, so device rules are checked too."""
     if session_kind == "ssh":
         rules = _SSH_CUTS + _NETDEV_CUTS
     elif session_kind == "winrm":
         rules = _WINRM_CUTS
+    elif session_kind == "rdp":
+        rules = _RDP_CUTS
     else:
         return None
     for pat, why in rules:

@@ -6,7 +6,7 @@ what runs and what output the AI gets to see.
 ```
 ┌──────────────┬──────────────────────────────┐
 │  Chat        │  Terminal tabs               │
-│  (AI)        │  local · SSH · WinRM         │
+│  (AI)        │  local · SSH · WinRM · RDP   │
 ├──────────────┴──────────────────────────────┤
 │  Command queue: Run · Insert · Edit · Skip  │
 └─────────────────────────────────────────────┘
@@ -29,6 +29,7 @@ Licensed under AGPL-3.0-or-later.
 
 ```bash
 sudo apt install python3-venv python3-gi gir1.2-webkit2-4.1   # Debian/Ubuntu/Mint
+sudo apt install guacd                                         # optional: RDP sessions
 git clone <repo> DAToolkit && cd DAToolkit
 python3 -m venv --system-site-packages .venv   # system-site-packages gives access to GTK/WebKit
 .venv/bin/pip install -e .
@@ -164,11 +165,14 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
 
 - **📷** (or paste an image) attaches a photo of a screen, LED panel or label to the next
   message. Photos are resized locally, stored in the case directory and sent to the model
-  unredacted, under the same sensitivity gate as text.
-- **Screenshot → chat** (or 🖥 by the chat box) attaches a picture of the active terminal's
-  screen, drawn from the terminal buffer with its colours. Use it when a login lands on an
-  appliance menu (OPNsense, pfSense, Sophos) rather than a shell: the layout makes that
-  obvious where plain text may not. Like photos, screenshots are not redacted.
+  under the same sensitivity gate as text.
+- **Screenshot → chat** (or 🖥 by the chat box) attaches a picture of the active session:
+  a terminal's screen drawn from its buffer with its colours, or the remote desktop of an
+  RDP session. Use it when a login lands on an appliance menu (OPNsense, pfSense, Sophos)
+  rather than a shell: the layout makes that obvious where plain text may not.
+- **Every image goes through a redaction editor first.** Drag over anything that shouldn't
+  reach the AI and it becomes solid black; Undo and Clear are there, Attach sends. The pixels
+  are replaced in the app window, so the unredacted original is never uploaded or stored.
 - **Export ▾ → Timeline replay** plays the case back: events on the left, the terminal
   transcript on the right, on one slider.
 - **Export ▾ → What the AI knows** shows the exact context the model gets next turn, with a
@@ -259,7 +263,7 @@ Verifying an enclave contacts NanoGPT's relay (for the attestation bundle), Sigs
 GitHub. `TEE/` models aren't attested yet, which is one reason they're excluded from
 Confidential cases.
 
-## SSH and WinRM
+## SSH, WinRM and RDP
 
 - **SSH** uses your system `ssh`, so `~/.ssh/config`, keys, the agent, jump hosts and
   known_hosts all work.
@@ -271,12 +275,35 @@ Confidential cases.
   - Commands are single-line. `Read-Host` and `Get-Credential` prompts and tab completion are
     not supported.
   - Variables persist between commands.
+- **RDP** opens the remote desktop in a tab, through Apache Guacamole's `guacd`
+  (`sudo apt install guacd`; it runs as a local service on 127.0.0.1:4822, which Settings can
+  change). DAToolkit does the connection handshake itself, so the password never reaches the
+  page. Add RDP hosts under Settings → Hosts with the security mode and keyboard layout.
+  - **Certificates are trusted on first use and pinned.** Before every connection DAToolkit
+    reads the server's TLS certificate itself. The first time it shows you the subject,
+    issuer and SHA-256 fingerprint to verify (on Windows: the Remote Desktop certificate in
+    `certlm.msc`); after that, a different certificate blocks the connection until you forget
+    the pin in Settings → Hosts. Servers offering only legacy RDP security have no
+    certificate, so you are warned on every connection. guacd 1.3 cannot enforce a pin
+    itself, so the check and guacd's connection are separate TLS sessions.
+  - The toolbar sends Ctrl+Alt+Del, Win and Win+R (keys the app window can't capture), takes
+    a screenshot to the chat, sends text you copied on the remote desktop to the AI, and puts
+    text on the remote clipboard or types it.
+  - **Run/Insert types a queued command into whichever window has focus** on the remote
+    desktop (confirmed once per session). Output isn't captured; in the Send results dialog,
+    paste it, use "Copied text", or attach a screenshot.
+  - Limits: no smart-card or USB redirection, text-only clipboard, one monitor.
+- **Linked sessions.** Sessions to the same address are linked automatically as one machine
+  (a coloured bar on their tabs); 🔗 links sessions by hand (hostname vs IP, NAT) or unlinks
+  one for good. The AI is told which linked session takes commands and which is your
+  desktop view, so it sends commands to the shell while you watch the GUI.
 
 ## Where things are stored
 
 | What | Where |
 |---|---|
 | Config (no secrets) | `~/.config/datoolkit/config.toml` |
+| Pinned RDP certificates | `~/.config/datoolkit/rdp_pins.json` |
 | Secrets | OS keyring, service `datoolkit` |
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |
 
@@ -308,14 +335,14 @@ switching user (`su`, `sudo -i`).
 .venv/bin/python -m pytest
 ```
 
-The core lives in `engine.py` and is frontend-agnostic. The GUI is `server/` plus `web/`,
-and a Textual/tmux TUI is planned on the same core.
+The core lives in `engine.py`; the GUI is `server/` plus `web/`. DAToolkit is GUI-only.
 
 ## Roadmap
 
 - Connectors: ConnectWise (push ticket notes and transcripts) and Confluence (pull site
   notes, push runbooks). Outbound and read-only respectively, keys in the keyring.
-- TUI (Textual + tmux, Linux)
+- Newer guacd (1.5+, built from source or bundled) so guacd itself enforces the pinned
+  certificate; session recording of RDP into the case timeline
 - Intel TDX / NVIDIA attestation for `TEE/` models (SealedLore's `tee.py`, `dcap.py`, `nras.py`)
 - IP/hostname pseudonymisation with local reverse mapping
 - Per-client notes library

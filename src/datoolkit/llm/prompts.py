@@ -287,6 +287,13 @@ changes your confidence. Say which result moved which hypothesis.
 - Recipes (run_recipe) are pre-written, reviewed procedures; use one when it fits instead of \
 re-deriving the commands. Baseline recipes exist so the technician can diff a host against a \
 known-good snapshot; when a baseline diff is sent to you, treat every changed line as a lead.
+- RDP sessions: the technician sees a remote desktop you cannot see. For a device reached only by \
+RDP, guide them with exact click paths for that Windows version, say what to look for, and ask \
+for a screenshot when the screen answers faster than a command. If you need a command there, \
+propose it for the RDP session: it is typed into the focused window, so first tell them which \
+window to focus (e.g. an elevated PowerShell), keep it to one line, and keep its output short, \
+since it comes back only as a screenshot or copied text. When the same device also has an SSH \
+or WinRM session, send commands there and use RDP to confirm visually.
 - Watch items: for intermittent symptoms, ask the technician to use Watch on a read-only item; \
 you will receive only the iterations that changed.
 - If the technician sends a photo (a screen, an LED panel, a label) or a terminal screenshot, \
@@ -305,21 +312,46 @@ is fixed from the user's side.
 """
 
 
+def _session_line(s: dict) -> str:
+    desc = f"id `{s['id']}`: {s['kind']}"
+    if s.get("target"):
+        desc += f" to {s['target']}"
+    if s["kind"] == "rdp":
+        desc += (", the technician's remote desktop view: you cannot see it; commands proposed for it are "
+                 "TYPED into whatever window has focus there; output comes back only as screenshots or "
+                 "copied text")
+        if not s.get("connected"):
+            desc += " (not connected yet)"
+    elif s.get("shell"):
+        desc += f", shell: {s['shell']}"
+    if s.get("os_hint"):
+        desc += f", OS/device: {s['os_hint']}"
+    if s.get("exited"):
+        desc += " (CLOSED - cannot run commands)"
+    return desc
+
+
 def session_roster(sessions: list[dict]) -> str:
+    """Sessions grouped by device: linked sessions reach the same machine."""
     if not sessions:
-        return "Open sessions: none. Ask the technician to open a session (local shell, SSH or WinRM)."
-    lines = ["Open sessions:"]
+        return "Open sessions: none. Ask the technician to open a session (local shell, SSH, WinRM or RDP)."
+    groups: dict[str, list[dict]] = {}
     for s in sessions:
-        desc = f"- id `{s['id']}`: {s['kind']}"
-        if s.get("target"):
-            desc += f" to {s['target']}"
-        if s.get("shell"):
-            desc += f", shell: {s['shell']}"
-        if s.get("os_hint"):
-            desc += f", OS/device: {s['os_hint']}"
-        if s.get("exited"):
-            desc += " (CLOSED - cannot run commands)"
-        lines.append(desc)
+        groups.setdefault(s.get("device") or s["id"], []).append(s)
+    lines = ["Open sessions:"]
+    for members in groups.values():
+        if len(members) == 1:
+            lines.append("- " + _session_line(members[0]))
+            continue
+        cmd = [m for m in members if m["kind"] != "rdp" and not m.get("exited")]
+        rdp = [m for m in members if m["kind"] == "rdp" and not m.get("exited")]
+        head = f"- One device, reached by {len(members)} linked sessions (the SAME machine):"
+        if cmd and rdp:
+            head += (f" send commands to `{cmd[0]['id']}`; `{rdp[0]['id']}` is what the technician sees, useful "
+                     "for GUI steps and visual checks. After a change made by command, the GUI may need a refresh "
+                     "(F5, reopen the console) before it shows.")
+        lines.append(head)
+        lines += ["  - " + _session_line(m) for m in members]
     return "\n".join(lines)
 
 

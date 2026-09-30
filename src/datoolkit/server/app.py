@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..engine import Engine, UserError
+from ..sessions import guac
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
@@ -140,6 +141,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.delete_host(name)
         return {"ok": True}
 
+    @app.post("/api/hosts/{name}/forget-pin")
+    async def forget_pin(name: str, e: Engine = Depends(auth)):
+        return {"removed": e.forget_rdp_pin(name)}
+
     @app.post("/api/hosts/{name}/forget-password")
     async def forget_password(name: str, e: Engine = Depends(auth)):
         e.forget_host_password(name)
@@ -166,7 +171,14 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/sessions")
     async def open_session(body: dict, e: Engine = Depends(auth)):
+        if body.get("kind") == "rdp":
+            return await e.open_rdp(body.get("host", ""))
         return e.open_session(body.get("kind", "local"), body.get("host", ""))
+
+    @app.post("/api/sessions/{sid}/link")
+    async def link_session(sid: str, body: dict, e: Engine = Depends(auth)):
+        e.link_session(sid, body.get("to") or None)
+        return {"ok": True}
 
     @app.delete("/api/sessions/{sid}")
     async def close_session(sid: str, e: Engine = Depends(auth)):
@@ -389,6 +401,79 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         finally:
             listeners.discard(q)
 
+    @app.websocket("/ws/rdp/{sid}")
+    async def ws_rdp(ws: WebSocket, sid: str):
+        """Browser <-> guacd relay for one RDP session. The server does the handshake, so the
+        connection parameters (password included) never reach the page. One viewer at a time:
+        a new connection replaces the previous one."""
+        engine: Engine = app.state.engine
+        q = ws.query_params
+        if not check(q.get("t")):
+            await ws.close(code=4403)
+            return
+        try:
+            params = engine.rdp_params(sid)
+        except KeyError:
+            await ws.close(code=4404)
+            return
+        await ws.accept(subprotocol="guacamole")
+        sess = engine.sessions.sessions[sid]
+        if sess.relay and sess.relay is not asyncio.current_task():
+            sess.relay.cancel()
+        sess.relay = asyncio.current_task()
+        clamp = lambda v, lo, hi, d: max(lo, min(hi, int(v))) if str(v).isdigit() else d  # noqa: E731
+        width, height = clamp(q.get("width"), 200, 8192, 1280), clamp(q.get("height"), 200, 8192, 800)
+        dpi = clamp(q.get("dpi"), 48, 480, 96)
+        s = engine.cfg.settings
+        writer = None
+        try:
+            try:
+                reader, writer = await asyncio.wait_for(asyncio.open_connection(s.guacd_host, s.guacd_port), 5)
+                _, _, leftover, decoder = await guac.handshake(reader, writer, "rdp", params, width, height, dpi,
+                                                               _local_timezone())
+            except (OSError, asyncio.TimeoutError, guac.GuacError) as e:
+                msg = str(e) or type(e).__name__
+                engine.rdp_state(sid, False, msg)
+                await ws.send_text(guac.tunnel_uuid() + guac.encode("error", f"Could not start RDP via guacd: {msg}", "519"))
+                await ws.close()
+                return
+            engine.rdp_state(sid, True)
+            await ws.send_text(guac.tunnel_uuid() + leftover)
+
+            async def down():            # guacd -> browser
+                while data := await reader.read(65536):
+                    text = decoder.decode(data)
+                    if text:
+                        await ws.send_text(text)
+
+            async def up():              # browser -> guacd; tunnel pings are answered here
+                while True:
+                    msg = await ws.receive_text()
+                    if guac.is_internal(msg):
+                        await ws.send_text(msg)
+                        continue
+                    writer.write(msg.encode())
+                    await writer.drain()
+
+            tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for t in tasks:
+                    t.cancel()
+        except (WebSocketDisconnect, RuntimeError, ConnectionError, asyncio.CancelledError):
+            pass
+        finally:
+            if writer:
+                writer.close()
+            if sess.relay is asyncio.current_task():
+                sess.relay = None
+                engine.rdp_state(sid, False)
+            try:
+                await ws.close()
+            except RuntimeError:
+                pass
+
     @app.websocket("/ws/term/{sid}")
     async def ws_term(ws: WebSocket, sid: str):
         engine: Engine = app.state.engine
@@ -425,6 +510,14 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             engine.sessions.unsubscribe(sid, q)
 
     return app
+
+
+def _local_timezone() -> str:
+    try:
+        return Path("/etc/timezone").read_text().strip()
+    except OSError:
+        link = os.path.realpath("/etc/localtime")
+        return link.split("zoneinfo/", 1)[1] if "zoneinfo/" in link else ""
 
 
 def runtime_dir() -> Path:

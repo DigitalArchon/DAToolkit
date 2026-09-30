@@ -4,3 +4,7 @@ Vendored third-party libraries (served locally so the app works offline):
 - @xterm/addon-fit 0.11.0 (addon-fit.js) - MIT License - https://github.com/xtermjs/xterm.js
 - marked v15.0.12 (marked.min.js) - MIT License - https://github.com/markedjs/marked
 - DOMPurify 3.4.16 (purify.min.js) - Apache-2.0 OR MPL-2.0 - https://github.com/cure53/DOMPurify
+- Apache Guacamole guacamole-common-js 1.5.5 (guacamole-common.js) - Apache License 2.0 -
+  https://github.com/apache/guacamole-client (tag 1.5.5, commit df6f9f33); the modules under
+  guacamole-common-js/src/main/webapp/modules concatenated unmodified, Namespace.js first.
+  Copyright The Apache Software Foundation.

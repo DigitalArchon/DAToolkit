@@ -1,4 +1,9 @@
-"""Terminal sessions. Every session - local, SSH or WinRM - is a program running in a PTY."""
+"""Sessions. Local, SSH and WinRM sessions are programs running in a PTY; RDP sessions are
+remote desktops drawn by guacd (see guac.py) and have no process or transcript here.
+
+Sessions reaching the same machine share a `device` key, so the model can be told that an
+RDP view and a WinRM shell are the same computer. Opening a session links it automatically
+to open sessions with the same address; the technician can link or unlink by hand."""
 
 from __future__ import annotations
 
@@ -84,23 +89,56 @@ class Session:
     subscribers: set = field(default_factory=set)
     transcript: TranscriptWriter = field(default_factory=TranscriptWriter)
     used_stored_password: bool = False
+    address: str = ""          # host address used for automatic device linking
+    device: str = ""           # sessions with the same key reach the same machine
+    link: str = "auto"         # "auto" | "manual" | "unlinked" (never auto-linked again)
 
     def roster(self) -> dict:
         return {"id": self.id, "name": self.name, "kind": self.kind, "target": self.target,
                 "shell": self.shell, "os_hint": self.os_hint, "exited": self.exited,
-                "host_name": self.host_name}
+                "host_name": self.host_name, "device": self.device, "link": self.link}
+
+
+@dataclass
+class RdpSession:
+    """A remote desktop. `params` are guacd connection parameters, password included; they
+    stay in this process and are only ever sent to guacd."""
+    id: str
+    name: str
+    params: dict
+    kind: str = "rdp"
+    target: str = ""
+    shell: str = "remote desktop (keystrokes go to the focused window)"
+    os_hint: str = ""
+    host_name: str = ""
+    exited: bool = False
+    address: str = ""
+    device: str = ""
+    link: str = "auto"
+    cert: dict = field(default_factory=dict)
+    connected: bool = False
+    relay: object = None        # the task relaying the current browser connection
+
+    def roster(self) -> dict:
+        return {"id": self.id, "name": self.name, "kind": self.kind, "target": self.target,
+                "shell": self.shell, "os_hint": self.os_hint, "exited": self.exited,
+                "host_name": self.host_name, "device": self.device, "link": self.link,
+                "connected": self.connected,
+                "cert": {k: self.cert.get(k) for k in ("tls", "sha256", "subject") if k in self.cert}}
 
 
 class SessionManager:
     def __init__(self, on_change: Callable[[], None]):
-        self.sessions: dict[str, Session] = {}
+        self.sessions: dict[str, Session | RdpSession] = {}
         self._on_change = on_change
         self._transcript_dir: Callable[[str], Path | None] = lambda sid: None
+        self._devices = 0
 
     def set_transcript_paths(self, path_for: Callable[[str], Path | None]) -> None:
         self._transcript_dir = path_for
         for s in self.sessions.values():
-            s.transcript.open(path_for(s.id))
+            if isinstance(s, Session):
+                s.transcript.open(path_for(s.id))
 
     def unique_id(self, base: str) -> str:
         base = re.sub(r"[^a-z0-9-]+", "-", base.lower()).strip("-") or "session"
@@ -116,10 +154,48 @@ class SessionManager:
         proc = PtyProcess.spawn(argv, env=full_env, cwd=os.path.expanduser("~"), dimensions=(30, 100))
         sess = Session(id=sid, proc=proc, **meta)
         sess.transcript.open(self._transcript_dir(sid))
+        self._auto_link(sess)
         self.sessions[sid] = sess
         asyncio.get_running_loop().add_reader(proc.fd, self._on_readable, sess)
         self._on_change()
         return sess
+
+    def add(self, sess: RdpSession) -> RdpSession:
+        self._auto_link(sess)
+        self.sessions[sess.id] = sess
+        self._on_change()
+        return sess
+
+    # ---------------------------------------------------------------- device links
+
+    def _new_device(self) -> str:
+        self._devices += 1
+        return f"dev{self._devices}"
+
+    def _auto_link(self, sess) -> None:
+        addr = sess.address.strip().lower()
+        for other in self.sessions.values():
+            if (addr and not other.exited and other.link != "unlinked"
+                    and other.address.strip().lower() == addr):
+                sess.device = other.device
+                return
+        sess.device = self._new_device()
+
+    def link(self, sid: str, to: str | None) -> None:
+        """Link `sid` to the device of `to`, or unlink it (to=None) for good."""
+        sess = self.sessions[sid]
+        if to:
+            if to == sid:
+                return
+            sess.device, sess.link = self.sessions[to].device, "manual"
+        else:
+            sess.device, sess.link = self._new_device(), "unlinked"
+        self._on_change()
+
+    def device_of(self, sid: str) -> list:
+        """Every open session on the same device as `sid`, itself included."""
+        dev = self.sessions[sid].device
+        return [s for s in self.sessions.values() if s.device == dev and not s.exited]
 
     def _on_readable(self, sess: Session) -> None:
         try:
@@ -175,6 +251,12 @@ class SessionManager:
     def close(self, sid: str) -> None:
         sess = self.sessions.pop(sid, None)
         if sess is None:
+            return
+        if isinstance(sess, RdpSession):
+            sess.exited = True
+            if sess.relay:
+                sess.relay.cancel()
+            self._on_change()
             return
         if not sess.exited:
             try:
