@@ -163,6 +163,10 @@ function handleEvent(ev) {
   switch (ev.type) {
     case "state":
       S.state = ev.state;
+      if (S.state.busy && S.state.search_requests?.length && !S.streaming) {
+        S.streaming = { text: "", reasoning: "", phase: "tool", tool: "web_search", startAt: Date.now(), lastAt: Date.now(),
+          searches: S.state.search_requests };
+      }
       renderAll();
       break;
     case "sessions":
@@ -210,6 +214,17 @@ function handleEvent(ev) {
       renderChat(true);
       renderUsage();
       if (ev.error && ev.error !== "stopped") toast(`AI request failed: ${ev.error}`, "error", 12000);
+      break;
+    case "search":
+      if (!S.streaming) break;
+      S.streaming.searches = S.streaming.searches || [];
+      {
+        const i = S.streaming.searches.findIndex((r) => r.id === ev.search.id);
+        if (i >= 0) S.streaming.searches[i] = ev.search; else S.streaming.searches.push(ev.search);
+      }
+      S.streaming.lastAt = Date.now();
+      scheduleStreamRender();
+      renderStatus();
       break;
     case "toast":
       toast(ev.text, ev.level || "info", 10000);
@@ -340,10 +355,17 @@ function renderEntry(e, live = false) {
     e.sealed ? h("span", { class: "sealed", title: e.sealed }, "🔐 end-to-end encrypted") : null);
   const box = h("div", { class: "msg assistant" }, who);
   if (e.reasoning) {
-    box.append(h("details", { open: e.streaming && !e.text ? true : false },
-      h("summary", {}, "Reasoning"), h("div", { class: "reasoning" }, e.reasoning)));
+    const noMessage = !e.streaming && !e.text;
+    box.append(h("details", { open: !e.text ? true : false },
+      h("summary", {}, noMessage ? "Reasoning (the AI wrote no message this turn)" : "Reasoning"), h("div", { class: "reasoning" }, e.reasoning)));
   }
   box.append(h("div", { class: "body", html: md(e.text) }));
+  if (e.searches?.length) box.append(h("div", { class: "scards" }, e.searches.map((r) => searchCard(r))));
+  if (e.withdrawn?.length || e.reordered?.length) {
+    box.append(h("div", { class: "revisions small" },
+      ...(e.withdrawn || []).map((w) => h("div", {}, h("span", { class: "chip", onclick: () => flashQueueItem(w.num) }, `#${w.num}`), " withdrawn", w.reason ? `: ${w.reason}` : "")),
+      e.reordered?.length ? h("div", {}, "Reordered pending: ", e.reordered.map((n) => `#${n}`).join(" → ")) : null));
+  }
   if (e.questions?.length) box.append(questionBlock(e.questions, live));
   if (e.hyp_changes?.length) box.append(hypChanges(e.hyp_changes));
   if (e.proposals?.length) box.append(h("div", { class: "pcards" }, e.proposals.map(proposalCard)));
@@ -383,6 +405,37 @@ function hypChanges(list) {
     list.map((c) => h("span", { class: `hc ${c.kind}`, title: `${c.text}${c.kind === "dropped" ? " (dropped)" : c.kind === "ruled_out" ? " (ruled out)" : ""}` }, label(c))));
 }
 
+// A web search the AI asked for. While it awaits approval the query is editable; the search
+// runs only when the technician clicks Search (or the mode is auto on an Open case).
+const SEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval", running: "searching…",
+  declined: "skipped by you", cancelled: "cancelled" };
+
+function searchCard(rec) {
+  const state = rec.status === "done" ? `${rec.results.length} result${rec.results.length === 1 ? "" : "s"}${rec.edited_by_technician ? " · query edited by you" : ""}`
+    : rec.status === "failed" || rec.status === "unavailable" ? `not run: ${rec.error}` : SEARCH_STATE[rec.status] || rec.status;
+  const el = h("div", { class: `scard s-${rec.status}` },
+    h("div", { class: "phead" }, h("span", {}, "🔎 Web search"), h("span", { class: "muted small" }, rec.provider),
+      h("span", { class: "spacer" }), h("span", { class: "small sstate" }, state)));
+  if (rec.status === "awaiting") {
+    const q = h("input", { type: "text", value: rec.query, spellcheck: "false" });
+    const answer = (approve) => guarded(async () => { await api("POST", `/api/web-search/${rec.id}`, { approve, query: q.value }); });
+    q.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); answer(true); } });
+    el.append(q, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
+      h("div", { class: "muted small" }, "The query goes to the search provider through NanoGPT, in the clear. Edit out anything that identifies the client."),
+      h("div", { class: "pactions" }, h("button", { type: "button", class: "small primary", onclick: () => answer(true) }, "Search"),
+        h("button", { type: "button", class: "small", onclick: () => answer(false) }, "Skip")));
+  } else {
+    el.append(h("div", { class: "pcmd" }, rec.query), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null);
+  }
+  if (rec.status === "done" && rec.results.length) {
+    el.append(h("details", {}, h("summary", {}, "Results"), h("ol", { class: "sresults" }, rec.results.map((r) =>
+      h("li", {}, r.url ? h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.title || r.url) : (r.title || "(untitled)"),
+        r.date ? h("span", { class: "muted small" }, ` · ${r.date}`) : null,
+        r.url ? h("div", { class: "muted small surl" }, r.url) : null)))));
+  }
+  return el;
+}
+
 // A proposal inside the AI's message: a live view of its queue item, updated in place on
 // every queue change. Run goes through runItem, the same technician action as the queue.
 function proposalCard(num) {
@@ -410,6 +463,9 @@ function fillProposalCard(el) {
     actions = h("div", { class: "pactions" }, run,
       btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
       btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"));
+  } else if (item.status === "withdrawn") {
+    actions = h("div", { class: "pactions" },
+      btn("Restore", () => api("POST", `/api/queue/${num}`, { status: "pending", note: "" }), "ghost", "Put it back in the queue as pending"));
   }
   el.replaceChildren(...[
     h("div", { class: "phead" },
@@ -475,7 +531,8 @@ function scheduleStreamRender() {
 // the phase and flags silence (tool-call arguments stream without visible text), and once the
 // reply is complete it says so and lists what is waiting for the technician.
 const TOOL_PHASE = { propose_commands: "Preparing commands", update_hypotheses: "Updating hypotheses",
-  ask_technician: "Writing questions", run_recipe: "Queuing a recipe" };
+  ask_technician: "Writing questions", run_recipe: "Queuing a recipe", revise_queue: "Revising the queue",
+  web_search: "Searching the web" };
 
 function clock(secs) { return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; }
 
@@ -485,6 +542,11 @@ function renderStatus() {
   if (S.state.busy) {
     const st = S.streaming || { phase: "waiting", startAt: Date.now(), lastAt: Date.now() };
     const now = Date.now(), total = Math.round((now - st.startAt) / 1000), quiet = Math.round((now - st.lastAt) / 1000);
+    if ((st.searches || []).some((r) => r.status === "awaiting")) {
+      bar.className = "waiting";
+      text.textContent = `Waiting for you: approve or skip the web search in the AI's message  ·  ${clock(total)}`;
+      return;
+    }
     let msg = { waiting: "Waiting for the model", reasoning: "Thinking", writing: "Writing",
       tool: TOOL_PHASE[st.tool] || "Working" }[st.phase] || "Working";
     if (st.phase === "waiting" && total >= 8) msg += " (slow to start; still waiting)";
@@ -502,7 +564,7 @@ function renderStatus() {
     text.textContent = S.lastTurn.error === "stopped" ? "■ Stopped. Your turn." : "✕ The AI request failed. Your turn: send again or change model.";
     return;
   }
-  const pending = (last.proposals || []).filter((n) => S.state.queue.find((i) => i.num === n)?.status === "pending").length;
+  const pending = S.state.queue.filter((i) => i.status === "pending").length;
   const ready = readyItems().length;
   const todo = [];
   if (pending) todo.push(`${pending} command${pending > 1 ? "s" : ""} to run or skip`);
@@ -820,7 +882,8 @@ function attachTerminalScreenshot() {
 
 // ------------------------------------------------------------------ queue
 
-const STATUS_LABEL = { pending: "pending", ran: "ran", inserted: "inserted", skipped: "skipped", sent: "sent to AI" };
+const STATUS_LABEL = { pending: "pending", ran: "ran", inserted: "inserted", skipped: "skipped", sent: "sent to AI", withdrawn: "withdrawn by AI" };
+const HIDDEN_WHEN_DONE = ["sent", "withdrawn"];
 
 const readyItems = () => (S.state?.queue || []).filter((i) => ["ran", "inserted", "skipped"].includes(i.status));
 
@@ -836,7 +899,7 @@ function sessionOptions(item) {
 function renderQueue() {
   if (!S.state) return;
   const showDone = $("#show-done").checked;
-  const items = S.state.queue.filter((i) => showDone || i.status !== "sent");
+  const items = S.state.queue.filter((i) => showDone || !HIDDEN_WHEN_DONE.includes(i.status));
   const list = $("#queue-list");
   const keep = new Set(items.map((i) => i.num));
   for (const [num, row] of S.rows) if (!keep.has(num)) { row.remove(); S.rows.delete(num); }
@@ -906,7 +969,7 @@ function tickElapsed() {
 
 function updateRow(row, item) {
   const pending = item.status === "pending";
-  row.className = `qitem risk-${item.risk}${item.status === "sent" ? " done" : ""}`;
+  row.className = `qitem risk-${item.risk}${HIDDEN_WHEN_DONE.includes(item.status) ? " done" : ""}${item.status === "withdrawn" ? " withdrawn" : ""}`;
   const cmd = $(".cmd", row);
   if (document.activeElement !== cmd) cmd.value = item.command;
   cmd.readOnly = !pending;
@@ -953,13 +1016,15 @@ function updateRow(row, item) {
     btns.push(btn("Preview", () => previewCapture(item)), btn("Reset", () => set("pending"), "ghost", "Back to pending"));
   } else if (item.status === "skipped") {
     btns.push(btn("Unskip", () => set("pending", { note: "" }), "ghost"));
+  } else if (item.status === "withdrawn") {
+    btns.push(btn("Restore", () => set("pending", { note: "" }), "ghost", "Put it back in the queue as pending"));
   }
   btns.push(btn("Copy", async () => { await clipWrite(item.command); toast("Command copied.", "ok", 2000); }, "ghost", "Copy the command text"));
   actions.replaceChildren(...btns);
 }
 
 function flashQueueItem(num) {
-  if (!$("#show-done").checked && S.state.queue.find((i) => i.num === num)?.status === "sent") {
+  if (!$("#show-done").checked && HIDDEN_WHEN_DONE.includes(S.state.queue.find((i) => i.num === num)?.status)) {
     $("#show-done").checked = true;
     renderQueue();
   }
@@ -1692,6 +1757,15 @@ function openSettings(tab = "providers") {
     const review = h("input", { type: "text", value: s.review_model || "", placeholder: "provider|model  e.g. NanoGPT|private/glm-5-3" });
     const f = { capture_max_lines: num(s.capture_max_lines), capture_max_chars: num(s.capture_max_chars),
       scrollback: num(s.scrollback), font_size: num(s.font_size), context_warn_tokens: num(s.context_warn_tokens || 100000) };
+    const sel = (value, opts) => h("select", {}, opts.map(([v, l]) => h("option", { value: v, selected: v === value }, l)));
+    const nanos = S.state.config.providers.filter((p) => /(^|\.)nano-gpt\.com$/.test((() => { try { return new URL(p.base_url).hostname; } catch { return ""; } })()));
+    const search = {
+      search_mode: sel(s.search_mode || "ask", [["ask", "Ask me before each search"], ["auto", "Search without asking (Open cases only)"], ["off", "Off"]]),
+      search_provider: sel(s.search_provider || "kagi", ["kagi", "perplexity", "linkup", "tavily", "exa", "brave", "valyu"].map((x) => [x, x])),
+      search_via: sel(s.search_via || "", [["", nanos.length ? `First NanoGPT provider (${nanos[0].name})` : "No NanoGPT provider configured"], ...nanos.map((p) => [p.name, p.name])]),
+    };
+    const testQ = h("input", { type: "text", placeholder: "Test query, e.g. OPNsense 25.1 release notes" });
+    const testOut = h("div", { class: "muted small" });
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "Max lines per result"), f.capture_max_lines),
@@ -1703,10 +1777,26 @@ function openSettings(tab = "providers") {
         h("label", { class: "field" }, h("span", {}, "Warn when prompt tokens exceed"), f.context_warn_tokens),
         h("label", { class: "field" }, h("span", {}, "Second-opinion reviewer (provider|model)"), review)),
       h("div", { class: "muted small" }, "The reviewer sees only the command and case notes, never the proposer's reasoning. It must be allowed by the case sensitivity. Leave empty to use the active model."),
+      h("h3", {}, "Web search"),
+      h("div", { class: "row" },
+        h("label", { class: "field" }, h("span", {}, "AI web searches"), search.search_mode),
+        h("label", { class: "field" }, h("span", {}, "Search provider"), search.search_provider),
+        h("label", { class: "field" }, h("span", {}, "Paid with the key of"), search.search_via)),
+      h("div", { class: "muted small" }, "Searches go through NanoGPT to the provider in the clear, whatever the chat model's tier, and are billed to that NanoGPT key. Sovereign cases never search; Confidential cases always ask. Each query is redacted first and you can edit it before it runs."),
+      h("div", { class: "row" }, testQ, h("button", { type: "button", onclick: () => guarded(async () => {
+        testOut.textContent = "Searching…";
+        await api("POST", "/api/settings", Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])));
+        try {
+          const r = await api("POST", "/api/web-search-test", { query: testQ.value });
+          testOut.replaceChildren(`✓ ${r.provider}: ${r.count} result(s). `, ...r.results.map((x) => h("div", {}, `· ${x.title || "(untitled)"} ${x.url}`)));
+        } catch (e) { testOut.textContent = `✗ ${e.message}`; }
+      }) }, "Save & test search")),
+      testOut,
       h("div", { class: "muted small" }, "Shortcuts: Alt+1…9 switch terminal tabs · Ctrl+Shift+Enter runs the next pending read-only command · Ctrl+Shift+K focuses the chat · Ctrl+Shift+C/V copy/paste in the terminal."),
       h("div", { class: "muted small" }, `Case logs are stored under ${S.state.case ? S.state.case.dir.replace(/\/[^/]+$/, "") : "~/.local/share/datoolkit/cases"}.`),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
-        await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])), review_model: review.value.trim() });
+        await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])), review_model: review.value.trim(),
+          ...Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])) });
         toast("Settings saved.", "ok");
       }) }, "Save")));
   }

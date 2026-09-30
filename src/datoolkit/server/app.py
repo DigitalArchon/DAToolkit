@@ -202,6 +202,15 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.send(body.get("message", ""), body.get("results"), body.get("snippets"), body.get("images"))
         return {"ok": True}
 
+    @app.post("/api/web-search/{sid}")
+    async def answer_search(sid: str, body: dict, e: Engine = Depends(auth)):
+        e.answer_search(sid, bool(body.get("approve")), body.get("query"))
+        return {"ok": True}
+
+    @app.post("/api/web-search-test")
+    async def test_search(body: dict, e: Engine = Depends(auth)):
+        return await e.test_search(str(body.get("query", "")))
+
     # queue helpers
     @app.post("/api/queue/{num}/dry-run")
     async def dry_run(num: int, e: Engine = Depends(auth)):

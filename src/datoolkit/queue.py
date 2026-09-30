@@ -7,8 +7,8 @@ from dataclasses import asdict, dataclass, field, fields
 
 from .safety import risk
 
-# pending -> ran | inserted | skipped -> sent
-STATUSES = ("pending", "ran", "inserted", "skipped", "sent")
+# pending -> ran | inserted | skipped -> sent; pending -> withdrawn (the AI took it back)
+STATUSES = ("pending", "ran", "inserted", "skipped", "sent", "withdrawn")
 
 
 @dataclass
@@ -131,6 +131,22 @@ class Queue:
         if note is not None:
             p.note = note
         return p
+
+    def reorder(self, nums: list[int]) -> list[int]:
+        """Put the listed pending items in the given order, in the slots those items occupy
+        now; everything else stays where it is. Returns the numbers actually reordered."""
+        chosen = []
+        for n in nums:
+            try:
+                p = self.get(int(n))
+            except (KeyError, ValueError, TypeError):
+                continue
+            if p.status == "pending" and p not in chosen:
+                chosen.append(p)
+        slots = sorted(self.items.index(p) for p in chosen)
+        for slot, p in zip(slots, chosen):
+            self.items[slot] = p
+        return [p.num for p in chosen]
 
     def move(self, num: int, delta: int) -> None:
         i = self.items.index(self.get(num))

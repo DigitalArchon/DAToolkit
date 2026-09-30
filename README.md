@@ -61,6 +61,18 @@ Treat that URL like a password: it grants terminal access.
   Its questions come with quick-reply buttons that fill your reply; press Enter to send.
   Each proposal also appears as a card in the AI's message, with Run / Skip… / Force skip,
   and hypothesis moves (▲ ▼ ✓ ✕) are shown inline.
+- The AI can change its mind: it withdraws pending commands it no longer wants (wrong syntax
+  for the shell, superseded) and reorders the rest. Withdrawn items leave the queue (tick
+  **show done** to see them) and **Restore** puts one back. The AI sees the queue, so it
+  knows what is still pending and what has run but not been sent.
+- If a model replies with commands but no message (thinking models sometimes go straight from
+  reasoning to tool calls), DAToolkit asks it once for the message.
+- **Web search**: the AI can search the web through NanoGPT (Kagi by default; Perplexity,
+  Linkup, Tavily, Exa, Brave or Valyu in Settings → General) for advisories, release notes
+  and exact syntax. By default each query appears in the AI's message for you to edit,
+  approve or skip; "search without asking" applies to Open cases only, Confidential cases
+  always ask, and Sovereign cases never search, because queries reach the search provider in
+  the clear. Searches are billed to the NanoGPT key.
 - The line above the chat box always says whose turn it is: *AI is responding* (with the
   phase, e.g. "Preparing commands", and a note if no text has arrived for a few seconds) or
   *✓ AI finished. Your turn*, with what is waiting for you.

@@ -36,7 +36,7 @@ function render(st) {
   $("#hyp-list").replaceChildren(...hyps.map((x) => h("div", { class: "hyp" },
     h("span", { class: `badge ${x.status === "ruled_out" ? "" : x.status === "supported" ? "read_only" : "modifying"}` }, x.status.replace("_", " ")),
     h("span", { style: "flex:2" }, x.text), h("div", { class: "bar" }, h("div", { style: `width:${Math.round(x.confidence * 100)}%` })))));
-  const items = (st.queue || []).filter((i) => i.status !== "sent");
+  const items = (st.queue || []).filter((i) => i.status !== "sent" && i.status !== "withdrawn");
   $("#queue").replaceChildren(...(items.length ? items.map((i) => h("div", { class: `card risk-${i.risk}` },
     h("div", { class: "row" }, h("b", {}, `#${i.num}`), h("span", { class: `badge risk ${i.risk}` }, i.risk.replace("_", " ")),
       h("span", { class: "muted small" }, i.session_id), h("span", { class: "spacer" }), h("span", { class: `status ${i.status}` }, i.status)),

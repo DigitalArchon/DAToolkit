@@ -58,6 +58,11 @@ class Settings:
     context_warn_tokens: int = 100000
     # "provider|model" used for second opinions on disruptive commands; empty = the active model
     review_model: str = ""
+    # AI web searches through NanoGPT: "ask" (approve each), "auto" (Open cases only), "off"
+    search_mode: str = "ask"
+    search_provider: str = "kagi"
+    # name of the NanoGPT provider whose key pays for searches; empty = the first NanoGPT one
+    search_via: str = ""
 
 
 @dataclass

@@ -140,6 +140,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 #chat-status.busy { border-left-color: var(--accent); color: var(--text); }
 #chat-status.done { border-left-color: var(--ok); color: var(--ok); }
 #chat-status.failed { border-left-color: var(--danger); color: var(--danger); }
+#chat-status.waiting { border-left-color: var(--warn); color: var(--warn); font-weight: 600; }
 #chat-status:not(.busy) .spinner { display: none; }
 .msg.streaming { box-shadow: inset 3px 0 0 var(--accent); }
 .caret { display: inline-block; width: 7px; height: 1em; margin-left: 2px; vertical-align: text-bottom; background: var(--accent); animation: blink 1s steps(1) infinite; }
@@ -318,3 +319,21 @@ p.small.warn { color: var(--warn); }
 .hyp-changes .hc.down { color: var(--warn); }
 .hyp-changes .hc.ruled_out, .hyp-changes .hc.dropped { color: var(--muted); text-decoration: line-through; }
 .hyp-changes .hc.new { color: var(--accent); }
+
+/* the AI revising its queue, and web searches */
+.qitem.withdrawn .cmd, .pcard.st-withdrawn .pcmd { text-decoration: line-through; }
+.pcard.st-withdrawn { opacity: .55; }
+.revisions { margin-top: 6px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+.scards { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.scard { background: var(--bg); border: 1px solid var(--border); border-left: 3px solid var(--tee); border-radius: 6px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+.scard .phead { display: flex; gap: 6px; align-items: center; }
+.scard .pcmd { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; }
+.scard.s-awaiting { border-color: var(--warn); border-left-color: var(--warn); }
+.scard.s-awaiting .sstate { color: var(--warn); font-weight: 600; }
+.scard.s-failed .sstate, .scard.s-unavailable .sstate { color: var(--danger); }
+.scard.s-done .sstate { color: var(--ok); }
+.scard.s-declined, .scard.s-cancelled { opacity: .6; }
+.scard .pactions { display: flex; gap: 4px; }
+.sresults { margin: 4px 0; padding-left: 20px; font-size: 12.5px; }
+.sresults a { color: var(--accent); }
+.surl { overflow-wrap: anywhere; }
