@@ -130,6 +130,9 @@ class Case:
                     out += [f"![photo]({img})", ""]
             elif kind == "assistant":
                 out += [f"### AI ({entry.get('model', '')}, {entry.get('tier', '')})", "", entry.get("text", ""), ""]
+                for q in entry.get("questions", []):
+                    opts = f" ({' / '.join(q['options'])})" if q.get("options") else ""
+                    out += [f"> **Question:** {q['question']}{opts}", ""]
                 if entry.get("proposals"):
                     out += ["Proposed: " + ", ".join(f"#{n}" for n in entry["proposals"]), ""]
             elif kind == "note":

@@ -7,7 +7,10 @@ Actions taken: journalctl --vacuum-size=500M; restarted rsyslog to release the d
 Outcome / next steps: / at 41%; set SystemMaxUse in journald.conf to keep it bounded."""
 
 [[turn]]
-say = "Let's confirm which filesystem is full and where the space went. I'll start read-only."
+say = "Disk-full problems usually come down to logs, a deleted file something still holds open, or containers. Let's confirm which filesystem is full and where the space went; I'll start read-only. While those run, one question for you."
+ask = [
+  { question = "Are services on this box already failing (e.g. can't write logs, won't start)?", options = ["Yes", "No", "Not sure"] },
+]
 hypotheses = [
   { id = "logs", text = "Logs (journald or /var/log) have grown unbounded", confidence = 0.5, status = "open" },
   { id = "deleted-open", text = "A deleted file is still held open by a process", confidence = 0.3, status = "open" },

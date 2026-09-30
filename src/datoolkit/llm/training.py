@@ -94,6 +94,11 @@ class TrainingClient:
         if hyps and tools and any(t["function"]["name"] == "update_hypotheses" for t in tools):
             result.tool_calls.append(ToolCall(id=f"trainh_{n_user}", name="update_hypotheses",
                                               arguments=json.dumps({"items": hyps})))
+        asks = turn.get("ask") if not finished else None
+        if asks and tools and any(t["function"]["name"] == "ask_technician" for t in tools):
+            result.tool_calls.append(ToolCall(id=f"traina_{n_user}", name="ask_technician",
+                                              arguments=json.dumps({"questions": asks})))
+            result.finish_reason = "tool_calls"
         result.usage = {"prompt_tokens": 500 * n_user, "completion_tokens": len(text) // 4, "total_tokens": 500 * n_user + len(text) // 4}
         yield "done", result
 

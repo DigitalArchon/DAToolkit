@@ -180,20 +180,32 @@ function handleEvent(ev) {
       break;
     case "turn_start":
       S.state.busy = true;
-      S.streaming = { text: "", reasoning: "", model: ev.model, tier: ev.tier };
+      S.streaming = { text: "", reasoning: "", model: ev.model, tier: ev.tier, phase: "waiting", tool: "",
+        startAt: Date.now(), lastAt: Date.now() };
+      S.lastTurn = null;
       renderBusy();
       renderChat(true);
       break;
     case "delta":
       if (!S.streaming) break;
+      S.streaming.lastAt = Date.now();
+      if (ev.kind === "tool") {
+        S.streaming.phase = "tool";
+        S.streaming.tool = ev.name;
+        renderStatus();
+        break;
+      }
+      S.streaming.phase = ev.kind === "text" ? "writing" : "reasoning";
       S.streaming[ev.kind === "text" ? "text" : "reasoning"] += ev.text;
       scheduleStreamRender();
       break;
     case "turn_end":
       S.state.busy = false;
+      S.lastTurn = { error: ev.error, secs: S.streaming ? Math.round((Date.now() - S.streaming.startAt) / 1000) : null };
       S.streaming = null;
       S.state.chat = ev.chat;
       if (ev.usage) S.state.last_usage = ev.usage;
+      if (document.hidden) document.title = ev.error ? "✕ DAToolkit" : "✓ DAToolkit: your turn";
       renderBusy();
       renderChat(true);
       renderUsage();
@@ -297,7 +309,7 @@ function renderHypotheses() {
 
 function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
 
-function renderEntry(e) {
+function renderEntry(e, live = false) {
   if (e.kind === "note") return h("div", { class: "msg note" }, e.text);
   if (e.kind === "user") {
     const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You"));
@@ -332,21 +344,106 @@ function renderEntry(e) {
       h("summary", {}, "Reasoning"), h("div", { class: "reasoning" }, e.reasoning)));
   }
   box.append(h("div", { class: "body", html: md(e.text) }));
-  if (e.proposals?.length) {
-    box.append(h("div", { class: "chips" }, e.proposals.map((n) =>
-      h("span", { class: "chip", title: "Show in queue", onclick: () => flashQueueItem(n) }, `#${n}`))));
-  }
+  if (e.questions?.length) box.append(questionBlock(e.questions, live));
+  if (e.hyp_changes?.length) box.append(hypChanges(e.hyp_changes));
+  if (e.proposals?.length) box.append(h("div", { class: "pcards" }, e.proposals.map(proposalCard)));
   return box;
+}
+
+// Questions from ask_technician. Quick replies on the latest AI message fill the draft; the
+// technician still presses Enter, so they can add context or answer several at once.
+function questionBlock(questions, live) {
+  return h("div", { class: "questions" }, questions.map((q) => h("div", { class: "question" },
+    h("div", { class: "q" }, q.question),
+    live && q.options?.length ? h("div", { class: "qopts" }, q.options.map((o) =>
+      h("button", { type: "button", class: "small", title: "Add this answer to your reply",
+        onclick: (ev) => {
+          for (const b of ev.target.parentElement.children) b.classList.toggle("on", b === ev.target);
+          answerQuestion(q.question, o);
+        } }, o))) : null)));
+}
+
+function answerQuestion(question, answer) {
+  const input = $("#chat-input");
+  const prefix = `Q: ${question} — `;
+  const lines = input.value ? input.value.split("\n") : [];
+  const i = lines.findIndex((l) => l.startsWith(prefix));
+  if (i >= 0) lines[i] = prefix + answer; else lines.push(prefix + answer);
+  input.value = lines.join("\n");
+  input.focus();
+  input.selectionStart = input.selectionEnd = input.value.length;
+}
+
+function hypChanges(list) {
+  const pct = (x) => `${Math.round((x || 0) * 100)}%`;
+  const label = (c) => ({ new: `+ ${c.id} ${pct(c.to)}`, up: `▲ ${c.id} ${pct(c.from)}→${pct(c.to)}`,
+    down: `▼ ${c.id} ${pct(c.from)}→${pct(c.to)}`, supported: `✓ ${c.id} ${pct(c.to)}`,
+    ruled_out: `✕ ${c.id}`, dropped: `${c.id}` })[c.kind] || c.id;
+  return h("div", { class: "hyp-changes" }, h("span", { class: "muted" }, "Hypotheses"),
+    list.map((c) => h("span", { class: `hc ${c.kind}`, title: `${c.text}${c.kind === "dropped" ? " (dropped)" : c.kind === "ruled_out" ? " (ruled out)" : ""}` }, label(c))));
+}
+
+// A proposal inside the AI's message: a live view of its queue item, updated in place on
+// every queue change. Run goes through runItem, the same technician action as the queue.
+function proposalCard(num) {
+  const el = h("div", { class: "pcard", "data-num": num });
+  fillProposalCard(el);
+  return el;
+}
+
+function fillProposalCard(el) {
+  const num = Number(el.dataset.num);
+  const item = (S.state?.queue || []).find((i) => i.num === num);
+  if (!item) {
+    el.className = "pcard st-sent";
+    el.replaceChildren(h("span", { class: "muted small" }, `#${num} is no longer in the queue`));
+    return;
+  }
+  el.className = `pcard risk-${item.risk} st-${item.status}`;
+  const pending = item.status === "pending";
+  const btn = (label, fn, kind = "", title = "") => h("button", { type: "button", class: `small ${kind}`, title, onclick: () => guarded(fn) }, label);
+  const sessOpen = (S.state.sessions || []).some((s) => s.id === item.session_id && !s.exited);
+  let actions = null;
+  if (pending) {
+    const run = btn("Run", () => runItem(num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
+    run.disabled = !sessOpen;
+    actions = h("div", { class: "pactions" }, run,
+      btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
+      btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"));
+  }
+  el.replaceChildren(...[
+    h("div", { class: "phead" },
+      h("span", { class: "chip", title: "Show in queue", onclick: () => flashQueueItem(num) }, `#${num}`),
+      h("span", { class: `badge risk ${item.risk}` }, item.risk.replace("_", " ")),
+      h("span", { class: "muted small" }, item.session_id),
+      h("span", { class: "spacer" }),
+      h("span", { class: `status ${item.status}` }, STATUS_LABEL[item.status] + (item.status === "skipped" && !item.note ? " (no reason)" : ""))),
+    h("div", { class: "pcmd" }, item.command),
+    item.purpose ? h("div", { class: "muted small" }, item.purpose) : null,
+    item.cuts_session ? h("div", { class: "cuts small" }, `⚠ Cuts this session: ${item.cuts_session}`) : null,
+    item.note ? h("div", { class: "small warn" }, `Note: ${item.note}`) : null,
+    actions].filter(Boolean));
+}
+
+function updateProposalCards() {
+  for (const el of document.querySelectorAll("#chat-log .pcard")) fillProposalCard(el);
 }
 
 function renderChat(scroll) {
   const log = $("#chat-log");
   const stick = scroll || nearBottom(log);
-  log.replaceChildren(...(S.state.chat || []).map(renderEntry));
+  const chat = S.state.chat || [];
+  // quick replies only on the newest AI message that the technician hasn't answered yet
+  let live = -1;
+  for (let i = chat.length - 1; i >= 0; i--) {
+    if (chat[i].kind === "user") break;
+    if (chat[i].kind === "assistant") { live = i; break; }
+  }
+  log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
   if (S.streaming) log.append(streamingBubble());
-  if (!S.state.chat?.length && !S.streaming) {
+  if (!chat.length && !S.streaming) {
     log.append(h("div", { class: "empty" },
-      "Describe the problem. The AI will propose commands into the queue below; nothing runs until you click Run."));
+      "Describe the problem as you would to a colleague. The AI will talk it through with you, ask what it needs to know, and propose commands; nothing runs until you click Run."));
   }
   if (stick) log.scrollTop = log.scrollHeight;
 }
@@ -354,6 +451,8 @@ function renderChat(scroll) {
 function streamingBubble() {
   const el = renderEntry({ ...S.streaming, streaming: true });
   el.id = "streaming";
+  el.classList.add("streaming");
+  (el.querySelector(".body > :last-child") || el.querySelector(".body")).append(h("span", { class: "caret" }));
   return el;
 }
 
@@ -372,12 +471,54 @@ function scheduleStreamRender() {
   });
 }
 
+// The status line under the chat always says whose turn it is: while the AI works it names
+// the phase and flags silence (tool-call arguments stream without visible text), and once the
+// reply is complete it says so and lists what is waiting for the technician.
+const TOOL_PHASE = { propose_commands: "Preparing commands", update_hypotheses: "Updating hypotheses",
+  ask_technician: "Writing questions", run_recipe: "Queuing a recipe" };
+
+function clock(secs) { return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; }
+
+function renderStatus() {
+  const bar = $("#chat-status"), text = $("#chat-status-text");
+  if (!S.state) return;
+  if (S.state.busy) {
+    const st = S.streaming || { phase: "waiting", startAt: Date.now(), lastAt: Date.now() };
+    const now = Date.now(), total = Math.round((now - st.startAt) / 1000), quiet = Math.round((now - st.lastAt) / 1000);
+    let msg = { waiting: "Waiting for the model", reasoning: "Thinking", writing: "Writing",
+      tool: TOOL_PHASE[st.tool] || "Working" }[st.phase] || "Working";
+    if (st.phase === "waiting" && total >= 8) msg += " (slow to start; still waiting)";
+    else if (st.phase !== "tool" && st.phase !== "waiting" && quiet >= 5) msg += `… still working, no new text for ${quiet}s`;
+    else msg += "…";
+    bar.className = "busy";
+    text.textContent = `AI is responding: ${msg}  ·  ${clock(total)}`;
+    return;
+  }
+  const chat = S.state.chat || [];
+  const last = [...chat].reverse().find((e) => e.kind === "assistant" || e.kind === "user");
+  if (!last || last.kind !== "assistant") { bar.className = "hidden"; return; }
+  if (S.lastTurn?.error) {
+    bar.className = "failed";
+    text.textContent = S.lastTurn.error === "stopped" ? "■ Stopped. Your turn." : "✕ The AI request failed. Your turn: send again or change model.";
+    return;
+  }
+  const pending = (last.proposals || []).filter((n) => S.state.queue.find((i) => i.num === n)?.status === "pending").length;
+  const ready = readyItems().length;
+  const todo = [];
+  if (pending) todo.push(`${pending} command${pending > 1 ? "s" : ""} to run or skip`);
+  if (ready) todo.push(`${ready} result${ready > 1 ? "s" : ""} ready to send`);
+  if (last.questions?.length) todo.push(`${last.questions.length} question${last.questions.length > 1 ? "s" : ""} to answer`);
+  bar.className = "done";
+  text.textContent = `✓ AI finished${S.lastTurn?.secs ? ` (${clock(S.lastTurn.secs)})` : ""}. Your turn${todo.length ? ": " + todo.join(" · ") : "."}`;
+}
+
 function renderBusy() {
   const busy = !!S.state.busy;
-  $("#chat-status").classList.toggle("hidden", !busy);
+  renderStatus();
   $("#stop-btn").classList.toggle("hidden", !busy);
   $("#send-btn").disabled = busy;
   $("#send-results-btn").disabled = busy || readyItems().length === 0;
+  renderChatResults();
 }
 
 const imageCache = new Map();
@@ -590,7 +731,96 @@ function captureFromBuffer(item) {
   return { text: lines.join("\n") };
 }
 
+// ------------------------------------------------------------------ terminal screenshot
+
+// Appliance logins (OPNsense, pfSense, Sophos, switch consoles) often land on a menu, not a
+// shell; as plain text the model can miss that. This draws the visible screen, colours and
+// inverse video included, from xterm's buffer onto a canvas (the DOM renderer has no canvas
+// to copy, and the CSP rightly blocks screenshot libraries).
+const ANSI16 = ["#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf",
+  "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
+
+function paletteColor(n) {
+  if (n < 16) return ANSI16[n];
+  if (n < 232) {
+    const v = [0, 95, 135, 175, 215, 255], i = n - 16;
+    return `rgb(${v[Math.floor(i / 36)]},${v[Math.floor(i / 6) % 6]},${v[i % 6]})`;
+  }
+  const g = 8 + (n - 232) * 10;
+  return `rgb(${g},${g},${g})`;
+}
+
+function cellColor(cell, fg, fallback) {
+  if (fg ? cell.isFgDefault() : cell.isBgDefault()) return fallback;
+  const c = fg ? cell.getFgColor() : cell.getBgColor();
+  if (fg ? cell.isFgRGB() : cell.isBgRGB()) return `#${c.toString(16).padStart(6, "0")}`;
+  return paletteColor(c);
+}
+
+function terminalScreenshot(sid) {
+  const t = S.terms[sid];
+  if (!t) throw new Error("No terminal open.");
+  const term = t.term, buf = term.buffer.active;
+  const theme = term.options.theme || {};
+  const bg0 = theme.background || "#000000", fg0 = theme.foreground || "#ffffff";
+  const size = term.options.fontSize || 13, family = term.options.fontFamily || "monospace";
+  const ctx0 = document.createElement("canvas").getContext("2d");
+  ctx0.font = `${size}px ${family}`;
+  const cw = ctx0.measureText("W").width, ch = Math.ceil(size * 1.25), pad = 8;
+  const scale = Math.min(2, 1600 / (term.cols * cw + pad * 2));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil((term.cols * cw + pad * 2) * scale);
+  canvas.height = Math.ceil((term.rows * ch + pad * 2) * scale);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+  ctx.fillStyle = bg0;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textBaseline = "middle";
+  const cell = buf.getNullCell();
+  for (let row = 0; row < term.rows; row++) {
+    const line = buf.getLine(buf.viewportY + row);
+    if (!line) continue;
+    const y = pad + row * ch;
+    for (let col = 0; col < term.cols; col++) {
+      if (!line.getCell(col, cell) || cell.getWidth() === 0) continue;   // right half of a wide char
+      let fg = cellColor(cell, true, fg0), bg = cellColor(cell, false, null);
+      if (cell.isInverse()) [fg, bg] = [bg || bg0, fg];
+      if (cell.isBold() && !cell.isFgDefault() && cell.isFgPalette() && cell.getFgColor() < 8) fg = ANSI16[cell.getFgColor() + 8];
+      const x = pad + col * cw, w = cw * cell.getWidth();
+      if (bg) { ctx.fillStyle = bg; ctx.fillRect(x, y, w + 0.5, ch); }
+      const chars = cell.getChars();
+      if (!chars || chars === " " || cell.isInvisible()) continue;
+      ctx.font = `${cell.isItalic() ? "italic " : ""}${cell.isBold() ? "bold " : ""}${size}px ${family}`;
+      ctx.globalAlpha = cell.isDim() ? 0.6 : 1;
+      ctx.fillStyle = fg;
+      ctx.fillText(chars, x, y + ch / 2);
+      if (cell.isUnderline()) ctx.fillRect(x, y + ch - 2, w, 1);
+      ctx.globalAlpha = 1;
+    }
+  }
+  if (buf.viewportY === buf.baseY) {           // cursor, when the screen isn't scrolled back
+    ctx.strokeStyle = fg0;
+    ctx.strokeRect(pad + buf.cursorX * cw + 0.5, pad + buf.cursorY * ch + 0.5, cw - 1, ch - 1);
+  }
+  return canvas.toDataURL("image/png");
+}
+
+function attachTerminalScreenshot() {
+  const sess = activeSession();
+  if (!sess) return toast("Open and select a session first.");
+  if (pendingImages.length >= 4) return toast("Up to four images per message.");
+  pendingImages.push(terminalScreenshot(sess.id));
+  renderAttachments();
+  const input = $("#chat-input");
+  if (!input.value.trim()) input.value = `This is what I see in the terminal of session \`${sess.id}\` right now (screenshot attached).`;
+  input.focus();
+  input.selectionStart = input.selectionEnd = input.value.length;
+  toast("Screenshot attached. Images are not redacted: check nothing sensitive is on screen.", "info", 6000);
+}
+
 // ------------------------------------------------------------------ queue
+
+const STATUS_LABEL = { pending: "pending", ran: "ran", inserted: "inserted", skipped: "skipped", sent: "sent to AI" };
 
 const readyItems = () => (S.state?.queue || []).filter((i) => ["ran", "inserted", "skipped"].includes(i.status));
 
@@ -624,6 +854,17 @@ function renderQueue() {
   $("#queue-count").textContent = `${pending} pending · ${ready} ready to send`;
   $("#send-results-btn").textContent = ready ? `Send results (${ready})` : "Send results";
   $("#send-results-btn").disabled = !!S.state.busy || ready === 0;
+  renderChatResults();
+  updateProposalCards();
+  if (!S.state.busy) renderStatus();
+}
+
+function renderChatResults() {
+  const b = $("#chat-results-btn");
+  const ready = readyItems().length;
+  b.classList.toggle("hidden", !ready);
+  b.textContent = `Results (${ready})`;
+  b.disabled = !!S.state?.busy;
 }
 
 function autosize(ta) { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; }
@@ -687,7 +928,7 @@ function updateRow(row, item) {
   badge.title = [`Model said: ${item.model_risk}`, ...item.risk_reasons.map((r) => `Local rule: ${r}`)].join("\n");
   const status = $(".status", row);
   status.className = `status ${item.status}`;
-  status.textContent = { pending: "pending", ran: "ran", inserted: "inserted", skipped: "skipped", sent: "sent to AI" }[item.status];
+  status.textContent = STATUS_LABEL[item.status];
   if (item.ran_at && (item.status === "ran" || item.status === "inserted")) status.textContent += ` · ${elapsed(item.ran_at)} ago`;
 
   const actions = $(".actions", row);
@@ -704,7 +945,8 @@ function updateRow(row, item) {
     if (item.risk !== "read_only" && !item.dry_run_of) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", "Queue the rehearsal form of this command first"));
     if (item.risk === "read_only" && !item.watch) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
     if (item.risk !== "read_only") btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what could go wrong"));
-    btns.push(btn("Skip", () => skipItem(item)),
+    btns.push(btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
+      btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"),
       btn("↑", () => api("POST", `/api/queue/${item.num}/move`, { delta: -1 }), "ghost", "Move up"),
       btn("↓", () => api("POST", `/api/queue/${item.num}/move`, { delta: 1 }), "ghost", "Move down"));
   } else if (item.status === "ran" || item.status === "inserted") {
@@ -1021,6 +1263,11 @@ function skipItem(item) {
   });
 }
 
+// One click, no dialog: the AI is told the technician chose not to run it (see Engine.send).
+function forceSkip(item) {
+  return api("POST", `/api/queue/${item.num}`, { status: "skipped", note: "" });
+}
+
 function warnList(prev, cap) {
   const out = [];
   if (cap?.error) out.push(h("div", { class: "warnbox" }, `${cap.error}; paste the output manually.`));
@@ -1040,7 +1287,7 @@ async function previewCapture(item) {
   });
 }
 
-async function openSendResults() {
+async function openSendResults(draft = "") {
   const items = readyItems();
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
   const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" } : captureFor(i))));
@@ -1064,7 +1311,7 @@ async function openSendResults() {
     if (ta) setTimeout(() => autosize(ta), 30);
     return { item, include, ta, note };
   });
-  const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)" });
+  const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)", value: draft });
   modal({
     title: "Review results before sending", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
@@ -1076,6 +1323,7 @@ async function openSendResults() {
           .map((b) => ({ num: b.item.num, text: b.ta ? b.ta.value : "", note: b.note.value.trim() }));
         if (!results.length && !message.value.trim()) throw new Error("Nothing selected.");
         await api("POST", "/api/send", { message: message.value.trim(), results });
+        if (draft && $("#chat-input").value === draft) $("#chat-input").value = "";
       },
     }],
   });
@@ -1539,6 +1787,10 @@ function init() {
   });
   document.addEventListener("keydown", globalKeys);
   setInterval(tickElapsed, 10000);
+  setInterval(() => { if (S.state?.busy) renderStatus(); }, 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "DAToolkit"; });
+  $("#shot-btn").addEventListener("click", () => guarded(attachTerminalScreenshot));
+  $("#tab-shot-btn").addEventListener("click", () => guarded(attachTerminalScreenshot));
   $("#stop-btn").addEventListener("click", () => guarded(() => api("POST", "/api/stop")));
   $("#case-btn").addEventListener("click", () => openCaseModal(false));
   $("#model-btn").addEventListener("click", openModelPicker);
@@ -1556,7 +1808,9 @@ function init() {
     toggleMenu($("#session-menu"));
   });
   document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) hideMenus(); });
-  $("#send-results-btn").addEventListener("click", () => guarded(openSendResults));
+  $("#send-results-btn").addEventListener("click", () => guarded(() => openSendResults()));
+  // from the composer: whatever is typed becomes the message sent with the results
+  $("#chat-results-btn").addEventListener("click", () => guarded(() => openSendResults($("#chat-input").value.trim() ? $("#chat-input").value : "")));
   $("#tools-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#tools-menu")); });
   $("#tools-menu").addEventListener("click", (e) => {
     const a = e.target.closest("button")?.dataset.act;

@@ -56,12 +56,21 @@ Treat that URL like a password: it grants terminal access.
 
 ## Workflow
 
+- The chat is a conversation: the AI says what it makes of each result, what it wants to check
+  next and why, and asks you what no command can tell it (when it started, what changed).
+  Its questions come with quick-reply buttons that fill your reply; press Enter to send.
+  Each proposal also appears as a card in the AI's message, with Run / Skip… / Force skip,
+  and hypothesis moves (▲ ▼ ✓ ✕) are shown inline.
+- The line above the chat box always says whose turn it is: *AI is responding* (with the
+  phase, e.g. "Preparing commands", and a note if no text has arrived for a few seconds) or
+  *✓ AI finished. Your turn*, with what is waiting for you.
 - Proposed commands appear in the queue with a risk badge (read only / modifying /
   disruptive). Local rules can raise the AI's own risk label but never lower it. Disruptive
   commands need a second confirmation.
 - **Run** types the command and presses Enter. **Insert** types it without Enter, so you can
   finish editing it in the shell. You can edit the command text in the queue before either.
-- **Skip** takes an optional note that is passed to the AI (e.g. "not allowed on prod").
+- **Skip…** takes an optional note that is passed to the AI (e.g. "not allowed on prod").
+  **Force skip** skips in one click; the AI is told you chose not to run it, with no reason.
 - **Send results** collects each command's output from the terminal (from where you ran it
   to where the next one starts), redacts and truncates it, and shows it for review. The AI
   receives only what you send.
@@ -141,6 +150,10 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
 - **📷** (or paste an image) attaches a photo of a screen, LED panel or label to the next
   message. Photos are resized locally, stored in the case directory and sent to the model
   unredacted, under the same sensitivity gate as text.
+- **Screenshot → chat** (or 🖥 by the chat box) attaches a picture of the active terminal's
+  screen, drawn from the terminal buffer with its colours. Use it when a login lands on an
+  appliance menu (OPNsense, pfSense, Sophos) rather than a shell: the layout makes that
+  obvious where plain text may not. Like photos, screenshots are not redacted.
 - **Export ▾ → Timeline replay** plays the case back: events on the left, the terminal
   transcript on the right, on one slider.
 - **Export ▾ → What the AI knows** shows the exact context the model gets next turn, with a

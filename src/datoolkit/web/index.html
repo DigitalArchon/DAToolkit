@@ -46,13 +46,15 @@
       <div id="hyp-list"></div>
     </div>
     <div id="chat-log"></div>
-    <div id="chat-status" class="hidden"><span class="spinner"></span><span id="chat-status-text">Thinking…</span></div>
+    <div id="chat-status" class="hidden" role="status" aria-live="polite"><span class="spinner"></span><span id="chat-status-text"></span></div>
     <form id="chat-form">
-      <textarea id="chat-input" rows="3" placeholder="Describe the problem, or reply to the AI…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
+      <textarea id="chat-input" rows="3" placeholder="Describe the problem, answer the AI, or tell it what you think…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
       <div id="attachments" class="hidden"></div>
       <div class="chat-actions">
         <button type="button" id="attach-btn" class="ghost" title="Attach a photo (screen, LED panel, label). Sent to the model unredacted.">📷</button>
         <input type="file" id="photo-input" accept="image/*" multiple class="hidden">
+        <button type="button" id="shot-btn" class="ghost" title="Attach a screenshot of the active terminal (useful for appliance menus). Not redacted.">🖥</button>
+        <button type="button" id="chat-results-btn" class="hidden" title="Review the results of commands you ran or skipped and send them with this message">Results</button>
         <button type="button" id="stop-btn" class="danger hidden">Stop</button>
         <button type="submit" id="send-btn" class="primary">Send</button>
       </div>
@@ -63,7 +65,8 @@
     <div id="tabs">
       <div id="tab-list"></div>
       <div class="menu-wrap">
-        <button id="new-session-btn" class="ghost" title="Open a session">+ Session</button>
+<button id="tab-shot-btn" class="ghost" title="Attach a screenshot of this terminal to your next chat message, e.g. when a login lands on a menu instead of a shell">Screenshot → chat</button>
+                <button id="new-session-btn" class="ghost" title="Open a session">+ Session</button>
         <div id="session-menu" class="menu hidden"></div>
       </div>
     </div>

@@ -58,6 +58,42 @@ def _local_os() -> str:
     return platform.platform()
 
 
+def _questions(raw) -> list[dict]:
+    """Validated ask_technician questions: [{question, options}]."""
+    if not isinstance(raw, list):
+        raise TypeError("questions must be an array")
+    out = []
+    for q in raw[:3]:
+        if isinstance(q, str):
+            q = {"question": q}
+        text = str(q.get("question", "") if isinstance(q, dict) else "").strip()
+        if not text:
+            continue
+        opts = q.get("options") or []
+        opts = [str(o).strip()[:60] for o in opts if str(o).strip()][:5] if isinstance(opts, list) else []
+        out.append({"question": text[:300], "options": opts})
+    return out
+
+
+def hypothesis_changes(old: dict[str, dict], new: list[dict]) -> list[dict]:
+    """What moved between two boards: new entries, status changes, confidence shifts of 5+
+    points, and entries dropped from the board."""
+    out = []
+    for h in new:
+        before = old.get(h["id"])
+        base = {"id": h["id"], "text": h["text"], "to": h["confidence"]}
+        if before is None:
+            out.append({**base, "kind": "new"})
+        elif h["status"] != before.get("status") and h["status"] in ("ruled_out", "supported"):
+            out.append({**base, "kind": h["status"], "from": before.get("confidence", 0)})
+        elif abs(h["confidence"] - before.get("confidence", 0)) >= 0.05:
+            out.append({**base, "kind": "up" if h["confidence"] > before.get("confidence", 0) else "down",
+                        "from": before.get("confidence", 0)})
+    ids = {h["id"] for h in new}
+    out += [{"id": i, "text": h.get("text", ""), "kind": "dropped"} for i, h in old.items() if i not in ids]
+    return out
+
+
 class Engine:
     def __init__(self, cfg: Config, emit: Callable[[dict], None], runtime_dir: Path,
                  save_config: Callable[[Config], None] = config_mod.save):
@@ -662,7 +698,9 @@ class Engine:
 
     # ---------------------------------------------------------------- hypotheses
 
-    def _set_hypotheses(self, items: list[dict]) -> None:
+    def _set_hypotheses(self, items: list[dict]) -> list[dict]:
+        """Replace the board; returns what changed (shown inline in the chat)."""
+        old = {h["id"]: h for h in self.hypotheses}
         marks = {h.get("id"): h.get("tech_mark") for h in self.hypotheses if h.get("tech_mark")}
         new = []
         for it in items:
@@ -679,6 +717,7 @@ class Engine:
         self.log("hypotheses", items=new)
         self.emit("hypotheses", items=new)
         self._persist()
+        return hypothesis_changes(old, new)
 
     def mark_hypothesis(self, hid: str, mark: str) -> None:
         if mark not in ("", "pinned", "ruled_out"):
@@ -988,6 +1027,8 @@ class Engine:
             block = [head]
             if note:
                 block.append(f"Technician's note: {note}")
+            elif status == "skipped":
+                block.append("The technician chose not to run this and gave no reason.")
             if status != "skipped":
                 block.append(fence(text) if text.strip() else "(no output captured)")
             parts.append("\n".join(block))
@@ -1093,6 +1134,8 @@ class Engine:
                     elif kind == "reasoning":
                         entry["reasoning"] += val
                         self.emit("delta", kind="reasoning", text=val)
+                    elif kind == "tool":
+                        self.emit("delta", kind="tool", name=val)
                     else:
                         result = val
                 usage = result.usage
@@ -1107,9 +1150,10 @@ class Engine:
         except Exception as e:  # noqa: BLE001
             error = f"{type(e).__name__}: {e}"
         entry["text"] = entry["text"].strip()
-        if entry["text"] or entry["proposals"] or entry["reasoning"]:
+        if entry["text"] or entry["proposals"] or entry["reasoning"] or entry.get("questions") or entry.get("hyp_changes"):
             self.chat.append(entry)
-            self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"])
+            self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"],
+                     questions=entry.get("questions", []))
         if error:
             self.chat.append({"kind": "note", "text": f"AI request {error}"})
             self.log("turn_error", error=error)
@@ -1137,7 +1181,7 @@ class Engine:
                     items = call.parsed()["items"]
                     if not isinstance(items, list):
                         raise TypeError("items must be an array")
-                    self._set_hypotheses(items)
+                    entry.setdefault("hyp_changes", []).extend(self._set_hypotheses(items))
                     reply = f"Hypothesis board updated ({len(self.hypotheses)} items)."
                 except Exception as e:  # noqa: BLE001
                     reply = f"Invalid update_hypotheses arguments ({e}); board unchanged."
@@ -1156,6 +1200,16 @@ class Engine:
                              "Results will arrive in a later message.")
                 except (UserError, ValueError, KeyError, TypeError) as e:
                     reply = f"run_recipe failed: {e}. Use a recipe id from the list, or propose_commands."
+            elif call.name == "ask_technician":
+                try:
+                    questions = _questions(call.parsed().get("questions"))
+                    if not questions:
+                        raise ValueError("no questions")
+                    entry.setdefault("questions", []).extend(questions)
+                    reply = ("Questions shown to the technician with the quick replies. Their answers will "
+                             "arrive in a later message.")
+                except Exception as e:  # noqa: BLE001
+                    reply = f"Invalid ask_technician arguments ({e}). Ask in your message text instead."
             elif call.name != prompts.PROPOSE_TOOL["function"]["name"]:
                 reply, retry = f"Unknown tool {call.name}. Use propose_commands.", True
             else:

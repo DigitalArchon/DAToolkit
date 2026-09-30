@@ -86,7 +86,8 @@ class LLMClient:
     async def stream(
         self, model: str, messages: list[dict], tools: list[dict] | None = None
     ) -> AsyncIterator[tuple[str, object]]:
-        """Yield ("text"|"reasoning", str) deltas, then ("done", TurnResult)."""
+        """Yield ("text"|"reasoning", str) deltas and ("tool", name) as each tool call starts,
+        then ("done", TurnResult)."""
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
         kwargs: dict = {"model": model, "messages": messages, "stream": True,
@@ -141,6 +142,9 @@ class StreamAccumulator:
                 call.id = tc.id
             if tc.function:
                 if tc.function.name:
+                    if not call.name:
+                        # arguments stream silently; this tells the UI the model is still working
+                        events.append(("tool", tc.function.name))
                     call.name += tc.function.name
                 if tc.function.arguments:
                     call.arguments += tc.function.arguments
