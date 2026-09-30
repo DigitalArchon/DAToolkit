@@ -405,3 +405,18 @@ button[data-needs-vision]:disabled { opacity: .35; }
 .model-setting { display: flex; gap: 8px; align-items: center; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 #vision-btn.att-bad { color: var(--danger); }
 #attest-btn.warn { color: var(--warn); border-color: var(--warn); }
+
+/* phone companion pairing */
+#phone-btn.on { border-color: var(--accent); }
+.phone { display: flex; flex-direction: column; gap: 10px; }
+.phone h3 { margin: 6px 0 0; }
+.phone-step { display: flex; gap: 18px; align-items: flex-start; }
+.phone-step > div:last-child { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.phone-step p { margin: 0; }
+.qr { display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: 260px; }
+.qr img { width: 240px; height: 240px; image-rendering: pixelated; background: #fff; border-radius: 6px; }
+.qr > div { text-align: center; }
+.qr .url { word-break: break-all; }
+.fingerprint { font-family: var(--mono); font-size: 15px; letter-spacing: 0.5px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; line-height: 1.6; user-select: all; }
+@media (max-width: 700px) { .phone-step { flex-direction: column; align-items: center; } }

@@ -648,6 +648,14 @@ class Engine:
                 if value <= 0:
                     raise UserError(f"{key} must be positive.")
                 setattr(s, key, value)
+        if "companion_port" in data:
+            try:
+                port = int(data["companion_port"])
+            except (TypeError, ValueError):
+                port = 0
+            if not 1024 <= port <= 65535:
+                raise UserError("The companion port must be between 1024 and 65535.")
+            s.companion_port = port
         if "review_model" in data:
             s.review_model = str(data["review_model"] or "").strip()
         if "auto_review" in data:

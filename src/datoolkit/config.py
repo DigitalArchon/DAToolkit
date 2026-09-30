@@ -78,6 +78,8 @@ class Settings:
     generation: dict = field(default_factory=lambda: {"temperature": 0.3, "reasoning_effort": "low"})
     # "provider|model" that describes images for a chat model without vision; empty = none
     vision_model: str = ""
+    # the phone companion's HTTPS port, fixed so a firewall can open just this one
+    companion_port: int = 48443
 
 
 @dataclass

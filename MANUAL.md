@@ -214,20 +214,44 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
 
 ### Companion view
 
-`datoolkit --companion` also serves a phone-sized, read-mostly page on the LAN and prints
-its URL: the AI's last message (optionally read aloud), the hypothesis board and the queue,
-with "I ran it" and "Skip". Use it when you are typing commands at a console away from the
-laptop (a server room, a switch's serial port) and want the next step in your hand.
+**📱** in the top bar serves a phone-sized, read-mostly page on the LAN: the AI's last message
+(optionally read aloud), the hypothesis board and the queue, with "I ran it" and "Skip". Use it
+when you are typing commands at a console away from the laptop (a server room, a switch's
+serial port) and want the next step in your hand.
 
-- The companion token only reaches a filtered view: the case name, the last 30 chat messages,
-  the queue, the hypothesis board and the list of open sessions. It can mark queue items ran,
-  skipped or pending (with a note) and mark hypotheses. It cannot reach a terminal, open or
-  close sessions, see settings, prompts or credential dialogs, or send anything to the AI.
-- The server binds all interfaces while this flag is on, so the main URL is reachable on the
-  LAN too. It still needs its own token, which never leaves this machine.
-- The page is plain HTTP. Anyone who can see the network traffic can read what the companion
-  shows and reuse its token, so use it only on a network you trust, and not for cases whose
-  chat you wouldn't want on that network.
+**Port and firewall.** The companion always listens on the same port, 48443 unless you change
+it in **Settings → General**, so with a firewall on you only open that one
+(`sudo ufw allow 48443/tcp`). The main window stays on 127.0.0.1 and is never on the LAN.
+
+**Pairing takes two scans**, so that nothing secret crosses the network before you have
+checked who the phone is talking to:
+
+1. **Check the certificate.** Press **Start** and scan the first code. It opens a page with
+   no secret on it. The browser warns that the connection isn't private: DAToolkit uses a
+   self-signed certificate made for this install. Accept the warning, open the certificate
+   details (Android Chrome: the icon left of the address → Certificate information; iPhone
+   Safari: Show Details → view the certificate → More Details) and compare its **SHA-256
+   fingerprint** with the one in the dialog, every pair of it. If anything differs, press
+   **It doesn't match: stop**: someone may be intercepting traffic on that network.
+2. **Connect.** Press **Fingerprint matches** and scan the second code in the same browser.
+   It carries the token. The browser has already accepted this exact certificate, so it must
+   not warn again; if it does, a different certificate is being offered: stop and pair again.
+
+The certificate is kept (`~/.config/datoolkit/companion-cert.pem`, key readable only by you),
+so its fingerprint stays the same and you check it once per phone; after that, go straight to
+step 2 until the browser forgets its exception. **New certificate** makes a new one (every
+phone checks again); a new one is also made when it expires, after about two years.
+
+- The token changes every time the companion starts. **New code** disconnects phones paired
+  with the old one; **Stop** disconnects all of them. The button shows how many are connected.
+- The token is only in the second code's `#` fragment, which the browser never sends in a
+  request, and the page removes it from the address bar and history.
+- The companion's port serves only the phone's page and its API: the case name, the last 30
+  chat messages, the queue, the hypothesis board and the list of open sessions. It can mark
+  queue items ran, skipped or pending (with a note) and mark hypotheses. It cannot reach a
+  terminal, open or close sessions, see settings, prompts or credential dialogs, or send
+  anything to the AI.
+- The chat does go to the phone, so think twice before pairing on a Confidential case.
 
 ### Tool cache
 
@@ -385,6 +409,7 @@ collateral and NVIDIA's keys are cached for an hour.
 |---|---|
 | Config (no secrets) | `~/.config/datoolkit/config.toml` |
 | Pinned RDP certificates | `~/.config/datoolkit/rdp_pins.json` |
+| Companion certificate and key | `~/.config/datoolkit/companion-cert.pem`, `companion-key.pem` (0600) |
 | Secrets | OS keyring, service `datoolkit` |
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |
 

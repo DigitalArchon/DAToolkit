@@ -1,6 +1,15 @@
 "use strict";
 /* Phone companion: read the chat and queue, mark items done or skipped. No terminal access. */
-const TOKEN = new URLSearchParams(location.search).get("t");
+// The pairing code puts the token in the fragment (never sent in a request line); keep it for
+// reloads in this tab only, and take it out of the address bar and history.
+const TOKEN = (() => {
+  const fromHash = new URLSearchParams(location.hash.slice(1)).get("t");
+  try {
+    if (fromHash) sessionStorage.setItem("dat-companion", fromHash);
+    history.replaceState(null, "", "/companion");
+    return fromHash || sessionStorage.getItem("dat-companion");
+  } catch { return fromHash; }
+})();
 const $ = (s) => document.querySelector(s);
 let lastSpoken = "";
 
@@ -55,7 +64,18 @@ async function mark(num, status) {
 function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/events?t=${encodeURIComponent(TOKEN)}`);
   ws.onmessage = (m) => { const ev = JSON.parse(m.data); if (ev.type === "state") render(ev.state); };
-  ws.onclose = () => setTimeout(connect, 2000);
+  ws.onclose = (e) => {
+    if (e.code === 4403) { toast("Disconnected: DAToolkit stopped the companion or issued a new code. Scan the connect code again."); return; }
+    setTimeout(reconnect, 2000);
+  };
 }
-api("GET", "/api/companion/state").then(render).catch((e) => toast(e.message));
-connect();
+// After a drop, only reconnect while the token is still good (a restarted companion has a new one).
+async function reconnect() {
+  try { render(await api("GET", "/api/companion/state")); connect(); }
+  catch (e) {
+    if (e instanceof TypeError) setTimeout(reconnect, 3000);  // unreachable for now: keep trying
+    else toast("Disconnected: DAToolkit stopped the companion or issued a new code. Scan the connect code again.");
+  }
+}
+if (!TOKEN) toast("No pairing token. Scan the connect code on the DAToolkit screen.");
+else { api("GET", "/api/companion/state").then(render).catch((e) => toast(e.message)); connect(); }

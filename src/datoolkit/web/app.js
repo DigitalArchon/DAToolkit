@@ -179,6 +179,11 @@ function handleEvent(ev) {
       }
       renderAll();
       break;
+    case "companion":
+      S.phones = ev.phones;
+      renderPhoneBtn();
+      S.phoneDialog?.refresh();
+      break;
     case "sessions":
       S.state.sessions = ev.sessions;
       renderSessions();
@@ -2453,7 +2458,8 @@ function openSettings(tab = "providers") {
     const s = S.state.config.settings;
     const num = (v) => h("input", { type: "number", value: v });
     const f = { capture_max_lines: num(s.capture_max_lines), capture_max_chars: num(s.capture_max_chars),
-      scrollback: num(s.scrollback), font_size: num(s.font_size), context_warn_tokens: num(s.context_warn_tokens || 100000) };
+      scrollback: num(s.scrollback), font_size: num(s.font_size), context_warn_tokens: num(s.context_warn_tokens || 100000),
+      companion_port: num(s.companion_port || 48443) };
     const sel = (value, opts) => h("select", {}, opts.map(([v, l]) => h("option", { value: v, selected: v === value }, l)));
     const nanos = S.state.config.providers.filter((p) => /(^|\.)nano-gpt\.com$/.test((() => { try { return new URL(p.base_url).hostname; } catch { return ""; } })()));
     const search = {
@@ -2472,7 +2478,8 @@ function openSettings(tab = "providers") {
         h("label", { class: "field" }, h("span", {}, "Terminal font size (new sessions)"), f.font_size)),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "Warn when prompt tokens exceed"), f.context_warn_tokens),
-        h("span", { class: "field" })),
+        h("label", { class: "field" }, h("span", {}, "Phone companion port (HTTPS)"), f.companion_port)),
+      h("div", { class: "muted small" }, "The phone companion always uses this port, so a firewall only needs this one open (e.g. sudo ufw allow <port>/tcp). Changing it while the companion runs restarts it, and phones pair again."),
       h("h3", {}, "Web search"),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "AI web searches"), search.search_mode),
@@ -2497,6 +2504,75 @@ function openSettings(tab = "providers") {
         toast("Settings saved.", "ok");
       }) }, "Save")));
   }
+}
+
+// ------------------------------------------------------------------ phone companion
+
+function renderPhoneBtn() {
+  const b = $("#phone-btn");
+  b.textContent = S.phoneRunning ? (S.phones ? `📱 ${S.phones}` : "📱 on") : "📱";
+  b.classList.toggle("on", !!S.phoneRunning);
+}
+
+// Pairing takes two scans (see companion.py): the first opens a page with no secret so the
+// certificate's fingerprint can be checked on the phone; only then is the code with the token shown.
+async function openPhone() {
+  let info = await api("GET", "/api/phone");
+  let step = 1;
+  const body = h("div", { class: "phone" });
+  const act = (action, confirmText) => guarded(async () => {
+    if (confirmText && !(await confirmModal("Phone companion", confirmText, "Continue", "danger"))) return;
+    info = await api("POST", `/api/phone/${action}`);
+    if (action !== "token") step = 1;
+    render();
+  });
+  const fp = () => {
+    const pairs = (info.fingerprint || "").split(":");
+    const rows = [];
+    for (let i = 0; i < pairs.length; i += 8) rows.push(pairs.slice(i, i + 8).join(":"));
+    return h("div", { class: "fingerprint" }, rows.map((r) => h("div", {}, r)));
+  };
+  const qr = (src, caption, isUrl = true) => h("div", { class: "qr" }, h("img", { src, alt: "QR code" }),
+    h("div", { class: `small muted${isUrl ? " mono url" : ""}` }, caption));
+  function render() {
+    S.phoneRunning = info.running; S.phones = info.phones; renderPhoneBtn();
+    if (!info.running) {
+      body.replaceChildren(h("div", { class: "phone" },
+        h("p", {}, "Follow the case on your phone: the AI's last message, the hypotheses and the queue, with \"I ran it\" and \"Skip\" for commands you type at a console away from this machine. The phone can't reach a terminal, change settings or send anything to the AI."),
+        h("p", {}, `It is served over HTTPS on port ${info.port} of this machine (change it in Settings → General). With a firewall on, open that port once, e.g. `, h("code", {}, `sudo ufw allow ${info.port}/tcp`), "."),
+        info.fingerprint ? h("div", {}, h("div", { class: "small muted" }, `This install's certificate (SHA-256, expires ${info.expires}):`), fp()) : null,
+        h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => act("start") }, "Start"))));
+      return;
+    }
+    const head = h("div", { class: "row small" }, h("span", {}, `Serving on ${info.ip}:${info.port}`), h("span", { class: "muted" },
+      info.phones ? ` · ${info.phones} phone${info.phones > 1 ? "s" : ""} connected` : " · no phone connected"), h("span", { class: "spacer" }),
+      h("button", { class: "small", title: "Disconnect paired phones; they scan the connect code again", onclick: () => act("token") }, "New code"),
+      h("button", { class: "small", title: "Make a new certificate; every phone checks the new fingerprint again",
+        onclick: () => act("certificate", "Make a new certificate? Every phone will have to accept it and check its fingerprint again.") }, "New certificate"),
+      h("button", { class: "small danger", onclick: () => act("stop") }, "Stop"));
+    if (step === 1) {
+      body.replaceChildren(head,
+        h("h3", {}, "Step 1 of 2: check the certificate"),
+        h("div", { class: "phone-step" }, qr(info.pair_qr, info.pair_url), h("div", {},
+          h("p", {}, "Scan this with the phone. The browser warns that the connection isn't private: accept it, then open the certificate details (the page on the phone says where) and compare its SHA-256 fingerprint with this one:"),
+          fp(),
+          h("p", { class: "small" }, "Check every pair, not just the first and last few: someone in the middle can make a certificate whose ends match."),
+          h("p", { class: "small muted" }, "Checked this certificate on this phone before? The browser remembers it for a while: go straight to step 2."),
+          h("div", { class: "row" }, h("button", { class: "danger", onclick: () => act("stop") }, "It doesn't match: stop"),
+            h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => { step = 2; render(); } }, "Fingerprint matches")))));
+    } else {
+      body.replaceChildren(head,
+        h("h3", {}, "Step 2 of 2: connect"),
+        h("div", { class: "phone-step" }, qr(info.connect_qr, "Contains this session's token: don't share or photograph it", false), h("div", {},
+          h("p", {}, "Scan this with the same phone and open it in the same browser."),
+          h("div", { class: "warnbox" }, "The browser must NOT warn about the certificate at this step. If it does, don't continue: close the page, press Stop, and pair again from step 1."),
+          h("p", { class: "small muted" }, "The code changes every time the companion starts. New code disconnects phones paired with the old one."),
+          h("div", { class: "row" }, h("button", { onclick: () => { step = 1; render(); } }, "Back to step 1")))));
+    }
+  }
+  render();
+  S.phoneDialog = { refresh: async () => { info = await api("GET", "/api/phone"); render(); } };
+  modal({ title: "Phone companion", body, wide: true, buttons: [{ label: "Close" }], onClose: () => { S.phoneDialog = null; } });
 }
 
 // ------------------------------------------------------------------ export
@@ -2639,6 +2715,8 @@ function init() {
     toast(r.status === "verified" ? `${r.kind === "tee" ? "TEE" : "Enclave"} attested: ${r.summary}` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
   }));
   $("#settings-btn").addEventListener("click", () => openSettings());
+  $("#phone-btn").addEventListener("click", () => guarded(openPhone));
+  api("GET", "/api/phone").then((i) => { S.phoneRunning = i.running; S.phones = i.phones; renderPhoneBtn(); }).catch(() => {});
   $("#vision-btn").addEventListener("click", () => openSettings("model"));
   $("#export-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#export-menu")); });
   $("#export-menu").addEventListener("click", (e) => { const a = e.target.closest("button")?.dataset.act; if (a) doExport(a); });

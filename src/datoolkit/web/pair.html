@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+<title>DAToolkit companion: check the certificate</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body { display: block; overflow: auto; padding: 16px; font-size: 16px; line-height: 1.45; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  h2 { font-size: 16px; margin: 18px 0 6px; }
+  ol { padding-left: 22px; margin: 6px 0; }
+  li { margin: 4px 0; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
+</style>
+</head>
+<body>
+<!-- Step 1 of pairing. Deliberately holds no secret and no script: until the certificate is
+     checked, this page may have come from someone in the middle. -->
+<h1>Step 1 of 2: check the certificate</h1>
+<p>Before connecting, make sure this phone is talking to your DAToolkit and not to something
+in between. Compare the certificate's <b>SHA-256 fingerprint</b> with the one shown on the
+DAToolkit screen.</p>
+
+<div class="card">
+<b>Compare with the DAToolkit screen, never with anything on this page.</b> This page can't
+prove where it came from; only the certificate can.
+</div>
+
+<h2>Android (Chrome)</h2>
+<ol>
+  <li>Tap the icon at the left of the address bar ("Not secure").</li>
+  <li>Tap <b>Certificate is not valid</b> (or <b>Connection is not secure</b>), then
+    <b>Certificate information</b> / <b>Certificate details</b>.</li>
+  <li>Find the <b>SHA-256 fingerprint</b>.</li>
+</ol>
+
+<h2>iPhone (Safari)</h2>
+<ol>
+  <li>On the "This connection is not private" warning, tap <b>Show Details</b>, then
+    <b>view the certificate</b>.</li>
+  <li>Tap <b>More Details</b> and scroll to <b>Fingerprints → SHA-256</b>.</li>
+</ol>
+
+<h2>Then</h2>
+<ol>
+  <li><b>Every pair matches:</b> tap <b>Fingerprint matches</b> in DAToolkit and scan the
+    second code.</li>
+  <li><b>Anything differs:</b> stop. Don't scan the second code. Someone may be intercepting
+    traffic on this network.</li>
+</ol>
+<p class="muted small">After scanning the second code, the browser must not warn about the
+certificate again. If it does, stop and pair again from step 1.</p>
+</body>
+</html>

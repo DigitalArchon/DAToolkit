@@ -1,4 +1,5 @@
-"""Local HTTP/WebSocket server for the GUI. Bound to 127.0.0.1 and gated by a per-launch token."""
+"""Local HTTP/WebSocket server for the GUI, bound to 127.0.0.1 and gated by a per-launch token,
+and the phone companion's app, served over TLS on its own port (see companion.py)."""
 
 from __future__ import annotations
 
@@ -12,20 +13,26 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .. import config
+from ..companion import CompanionServer
 from ..engine import Engine, UserError
 from ..sessions import guac
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+COMPANION_FILES = {"style.css", "companion.js"}
 
 
 def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
-               companion_token: str | None = None, desktop=None) -> FastAPI:
-    """`companion_token` gates the read-mostly phone view: it can see chat, queue and hypotheses
-    and mark items done/skipped, and nothing else. It never reaches a terminal.
-    `desktop` (app.Desktop, only in the app window) serves the clipboard and the Save dialog."""
+               desktop=None, companion_dir: Path | None = None) -> FastAPI:
+    """The GUI's app, for 127.0.0.1 only. It also builds the phone companion's app, which
+    app.state.companion (companion.CompanionServer) serves on its own port over TLS when the
+    technician starts it: that one can see chat, queue and hypotheses and mark items
+    done/skipped, and nothing else. It never reaches a terminal.
+    `desktop` (app.Desktop, only in the app window) serves the clipboard and the Save dialog.
+    `companion_dir` holds the companion's certificate (default: the config directory)."""
     listeners: set[asyncio.Queue] = set()
 
     def emit(event: dict) -> None:
@@ -39,15 +46,16 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         try:
             yield
         finally:
+            await app.state.companion.stop()
             await app.state.engine.stop()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    comp = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    companion = CompanionServer(comp, companion_dir or config.config_dir())
+    app.state.companion = companion
 
     def check(t: str | None) -> bool:
         return t is not None and hmac.compare_digest(t, token)
-
-    def check_companion(t: str | None) -> bool:
-        return bool(companion_token) and t is not None and hmac.compare_digest(t, companion_token)
 
     def auth(request: Request) -> Engine:
         if not check(request.headers.get("x-token")):
@@ -55,9 +63,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         return request.app.state.engine
 
     def auth_companion(request: Request) -> Engine:
-        if not check_companion(request.headers.get("x-token")):
+        if not companion.check(request.headers.get("x-token")):
             raise HTTPException(403, "bad token")
-        return request.app.state.engine
+        return app.state.engine
 
     def companion_view(e: Engine) -> dict:
         snap = e.snapshot()
@@ -65,30 +73,46 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                 "hypotheses": snap["hypotheses"], "sessions": [{k: s[k] for k in ("id", "kind", "target", "exited")}
                                                                for s in snap["sessions"]]}
 
-    @app.exception_handler(UserError)
     async def user_error(_: Request, exc: UserError):
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    @app.exception_handler(KeyError)
     async def key_error(_: Request, exc: KeyError):
         # an unknown queue number, session id or prompt id is a stale client, not a crash
         return JSONResponse({"error": f"Not found: {exc.args[0] if exc.args else exc}"}, status_code=400)
+
+    for a in (app, comp):
+        a.add_exception_handler(UserError, user_error)
+        a.add_exception_handler(KeyError, key_error)
 
     @app.get("/")
     async def index():
         return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
-    @app.get("/companion")
-    async def companion_page():
-        if not companion_token:
-            raise HTTPException(404)
+    # ------------------------------------------------------------ phone companion (its own port, TLS)
+
+    @comp.get("/")
+    async def comp_root():
+        return RedirectResponse("/pair")
+
+    @comp.get("/pair")
+    async def comp_pair():
+        return FileResponse(WEB_DIR / "pair.html", headers={"Cache-Control": "no-store"})
+
+    @comp.get("/companion")
+    async def comp_page():
         return FileResponse(WEB_DIR / "companion.html", headers={"Cache-Control": "no-store"})
 
-    @app.get("/api/companion/state")
+    @comp.get("/static/{name}")
+    async def comp_static(name: str):
+        if name not in COMPANION_FILES:  # the phone gets its page and nothing else of the GUI
+            raise HTTPException(404)
+        return FileResponse(WEB_DIR / name)
+
+    @comp.get("/api/companion/state")
     async def companion_state(e: Engine = Depends(auth_companion)):
         return companion_view(e)
 
-    @app.post("/api/companion/queue/{num}")
+    @comp.post("/api/companion/queue/{num}")
     async def companion_mark(num: int, body: dict, e: Engine = Depends(auth_companion)):
         status = body.get("status")
         if status not in ("ran", "skipped", "pending"):
@@ -96,10 +120,69 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.update_item(num, status=status, note=str(body.get("note", ""))[:200])
         return {"ok": True}
 
-    @app.post("/api/companion/hypotheses/{hid}")
+    @comp.post("/api/companion/hypotheses/{hid}")
     async def companion_mark_h(hid: str, body: dict, e: Engine = Depends(auth_companion)):
         e.mark_hypothesis(hid, str(body.get("mark", "")))
         return {"ok": True}
+
+    @comp.websocket("/ws/events")
+    async def comp_events(ws: WebSocket):
+        if not companion.check(ws.query_params.get("t")):
+            await ws.close(code=4403)
+            return
+        await ws.accept()
+        companion.sockets.add(ws)
+        q: asyncio.Queue = asyncio.Queue()
+        listeners.add(q)
+        try:
+            await ws.send_text(json.dumps({"type": "state", "state": companion_view(app.state.engine)}))
+            await _changed_phones()
+            receiver = asyncio.create_task(ws.receive_text())
+            while True:
+                getter = asyncio.create_task(q.get())
+                done, _ = await asyncio.wait({getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
+                if receiver in done:
+                    getter.cancel()
+                    receiver.result()  # raises on disconnect
+                    receiver = asyncio.create_task(ws.receive_text())
+                    continue
+                # the phone never gets config, prompts or credential dialogs: just a refresh cue
+                if getter.result().get("type") in ("state", "queue", "chat", "turn_end", "hypotheses", "turn_start", "sessions"):
+                    await ws.send_text(json.dumps({"type": "state", "state": companion_view(app.state.engine)}))
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            listeners.discard(q)
+            companion.sockets.discard(ws)
+            await _changed_phones()
+
+    async def _changed_phones() -> None:
+        emit({"type": "companion", "phones": len(companion.sockets)})
+
+    # control from the GUI (main token)
+
+    def companion_port() -> int:
+        return app.state.engine.cfg.settings.companion_port
+
+    @app.get("/api/phone")
+    async def phone_info(e: Engine = Depends(auth)):
+        return companion.info(companion_port())
+
+    @app.post("/api/phone/{action}")
+    async def phone_action(action: str, e: Engine = Depends(auth)):
+        if action == "start":
+            await companion.start(companion_port())
+        elif action == "stop":
+            await companion.stop()
+        elif action == "token":
+            await companion.rotate()
+        elif action == "certificate":
+            await companion.renew_cert(companion_port())
+        else:
+            raise HTTPException(404)
+        e.log("companion", action=action, port=companion.port if companion.running else None)
+        emit({"type": "companion", "phones": len(companion.sockets)})
+        return companion.info(companion_port())
 
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
@@ -169,6 +252,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.post("/api/settings")
     async def save_settings(body: dict, e: Engine = Depends(auth)):
         e.save_settings(body)
+        if "companion_port" in body and companion.running and companion.port != companion_port():
+            await companion.start(companion_port())  # phones pair again on the new port
         return {"ok": True}
 
     @app.post("/api/case")
@@ -398,19 +483,14 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.websocket("/ws/events")
     async def ws_events(ws: WebSocket):
-        t = ws.query_params.get("t")
-        companion = not check(t)
-        if companion and not check_companion(t):
+        if not check(ws.query_params.get("t")):
             await ws.close(code=4403)
             return
         await ws.accept()
         q: asyncio.Queue = asyncio.Queue()
         listeners.add(q)
         try:
-            if companion:
-                await ws.send_text(json.dumps({"type": "state", "state": companion_view(app.state.engine)}))
-            else:
-                await ws.send_text(json.dumps({"type": "state", "state": app.state.engine.snapshot()}))
+            await ws.send_text(json.dumps({"type": "state", "state": app.state.engine.snapshot()}))
             receiver = asyncio.create_task(ws.receive_text())
             while True:
                 getter = asyncio.create_task(q.get())
@@ -420,13 +500,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                     receiver.result()  # raises on disconnect
                     receiver = asyncio.create_task(ws.receive_text())
                     continue
-                ev = getter.result()
-                if companion:
-                    # the phone never gets config, prompts or credential dialogs: just a refresh cue
-                    if ev.get("type") in ("state", "queue", "chat", "turn_end", "hypotheses", "turn_start", "sessions"):
-                        await ws.send_text(json.dumps({"type": "state", "state": companion_view(app.state.engine)}))
-                    continue
-                await ws.send_text(json.dumps(ev, default=str))
+                await ws.send_text(json.dumps(getter.result(), default=str))
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:

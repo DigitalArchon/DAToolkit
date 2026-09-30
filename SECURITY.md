@@ -20,7 +20,8 @@ Anything that breaks one of DAToolkit's promises, for example:
 - data from a Confidential or Sovereign case reaching a model or service its tier forbids;
 - secrets surviving redaction, or reaching config files, logs or exports that shouldn't hold them;
 - flaws in TEE attestation, reply-signature checks or the end-to-end encrypted Private Mode path;
-- bypassing the local server's tokens, or the companion view reaching more than it should;
+- bypassing the local server's tokens, the companion reaching more than it should, or a way
+  around its pairing (the certificate check before the token is sent);
 - RDP certificate pinning being bypassed;
 - a model reply that makes the page load remote resources or run script.
 

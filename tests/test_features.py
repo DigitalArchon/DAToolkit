@@ -385,26 +385,36 @@ async def test_second_opinion_uses_reviewer_and_respects_tier(env, monkeypatch):
 
 # ---------------------------------------------------------------- companion API
 
-async def test_companion_token_is_read_mostly(env):  # noqa: F811
+async def test_companion_token_is_read_mostly(env, tmp_path):  # noqa: F811
     engine, _, _ = env
     engine.new_case("comp", "open")
     engine.open_session("local")
     sid = engine.sessions.roster()[0]["id"]
     engine.queue.add("c", [{"session_id": sid, "command": "uptime", "purpose": "p", "risk": "read_only"}])
-    app: FastAPI = create_app("main", lambda emit: engine, companion_token="phone")
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
     app.state.engine = engine
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+    app.state.companion.token = "phone"              # as if started (tests/test_companion.py starts it for real)
+    phone = app.state.companion.app
+    async with (httpx.AsyncClient(transport=httpx.ASGITransport(app=phone), base_url="http://t") as c,
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as gui):
         ph = {"x-token": "phone"}
         r = await c.get("/api/companion/state", headers=ph)
         assert r.status_code == 200 and r.json()["queue"][0]["command"] == "uptime" and "config" not in r.json()
-        assert (await c.get("/api/state", headers=ph)).status_code == 403
-        assert (await c.post("/api/send", json={"message": "hi"}, headers=ph)).status_code == 403
-        assert (await c.post("/api/sessions", json={"kind": "local"}, headers=ph)).status_code == 403
+        # the phone's app has no GUI routes at all, whatever the token
+        for tok in ("phone", "main"):
+            assert (await c.get("/api/state", headers={"x-token": tok})).status_code == 404
+            assert (await c.post("/api/send", json={"message": "hi"}, headers={"x-token": tok})).status_code == 404
+            assert (await c.post("/api/sessions", json={"kind": "local"}, headers={"x-token": tok})).status_code == 404
+        assert (await c.get("/static/app.js")).status_code == 404       # only its own page's files
+        assert (await c.get("/static/companion.js")).status_code == 200
         r = await c.post("/api/companion/queue/1", json={"status": "ran"}, headers=ph)
         assert r.status_code == 200 and engine.queue.items[0].status == "ran"
         assert (await c.post("/api/companion/queue/1", json={"status": "sent"}, headers=ph)).status_code == 400
-        assert (await c.get("/companion")).status_code == 200
+        assert (await c.get("/companion")).status_code == 200 and (await c.get("/pair")).status_code == 200
         assert (await c.get("/api/companion/state", headers={"x-token": "main"})).status_code == 403
+        # and the GUI's app, on 127.0.0.1, no longer serves the phone
+        assert (await gui.get("/companion")).status_code == 404
+        assert (await gui.get("/api/companion/state", headers=ph)).status_code == 404
 
 
 async def test_desktop_endpoints_need_the_main_token_and_the_app_window(env):  # noqa: F811
@@ -424,7 +434,7 @@ async def test_desktop_endpoints_need_the_main_token_and_the_app_window(env):  #
             return "/chosen/" + name
 
     desk = FakeDesktop()
-    app: FastAPI = create_app("main", lambda emit: engine, companion_token="phone", desktop=desk)
+    app: FastAPI = create_app("main", lambda emit: engine, desktop=desk)
     app.state.engine = engine
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         m = {"x-token": "main"}
@@ -432,7 +442,7 @@ async def test_desktop_endpoints_need_the_main_token_and_the_app_window(env):  #
         assert (await c.get("/api/desktop/clipboard", headers=m)).json() == {"text": "uptime"}
         r = await c.post("/api/desktop/save?name=a.zip", content=b"PK", headers=m)
         assert r.json() == {"path": "/chosen/a.zip"} and desk.saved == ("a.zip", b"PK")
-        for h in ({"x-token": "phone"}, {}):              # the companion token, or none, reaches nothing
+        for h in ({"x-token": "phone"}, {}):              # any other token, or none, reaches nothing
             assert (await c.get("/api/desktop/clipboard", headers=h)).status_code == 403
             assert (await c.post("/api/desktop/save?name=b", content=b"x", headers=h)).status_code == 403
     browser: FastAPI = create_app("main", lambda emit: engine)  # --browser: no desktop, no endpoints
