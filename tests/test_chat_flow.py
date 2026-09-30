@@ -55,7 +55,7 @@ async def test_ask_technician_and_hypothesis_moves_land_on_the_message(env):  # 
     await wait_turn(engine)
     moves = {c["id"]: c["kind"] for c in engine.chat[-1]["hyp_changes"]}
     assert moves == {"dns": "supported", "disk": "dropped"}
-    assert "**Question:** When did it start? (Today / This week)" in Path(engine.export_markdown()).read_text()
+    assert "**Question:** When did it start? (Today / This week)" in Path(engine.export_markdown()["path"]).read_text()
 
 
 async def test_bad_questions_are_answered_not_retried(env):  # noqa: F811

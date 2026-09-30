@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import difflib
+import hashlib
 import itertools
 import json
 import os
@@ -23,6 +24,7 @@ from typing import Callable
 
 from . import config as config_mod
 from . import creds, recipes, search, tools_cache
+from . import export as export_mod
 from .case import Case, _slug, fence
 from .config import Config, Host, Provider, data_dir
 from .llm import prompts
@@ -145,6 +147,10 @@ class Engine:
         self._search_ids = itertools.count(1)
         self._search_http = None      # httpx client override (tests)
         self.pins = rdpcert.PinStore()
+        # model-request log (requests.jsonl): what was sent and what came back, per request
+        self._req_system_sha = ""     # system prompt of the last logged request (logged again only when it changes)
+        self._req_conv_len = 0        # conversation messages already logged
+        self._img_names: dict[str, str] = {}   # sha256 of image bytes -> case file name
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -465,6 +471,7 @@ class Engine:
 
     def _attach_case(self) -> None:
         self.sessions.set_transcript_paths(self.case.transcript_path)
+        self._req_system_sha, self._req_conv_len, self._img_names = "", 0, {}
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov and self.cfg.active_model:
             try:
@@ -1426,6 +1433,7 @@ class Engine:
         entry = {"kind": "assistant", "text": "", "reasoning": "", "proposals": [], "model": model, "tier": tier}
         usage = None
         error = None
+        in_flight = None      # (system, messages sent, ...) of the request being streamed, for the log
         try:
             client = self._client(prov, model)
             if isinstance(client, PrivateModeClient):
@@ -1438,8 +1446,13 @@ class Engine:
             turn: dict = {}
             nudged = False
             for _ in range(MAX_TOOL_ROUNDS):
-                messages = [{"role": "system", "content": self._system_prompt()}] + self.conv
+                system = self._system_prompt()
+                messages = [{"role": "system", "content": system}] + self.conv
                 tools = prompts.tools(search=self.search_status()["mode"] != "off")
+                start = self._req_conv_len if self._req_conv_len <= len(self.conv) else 0   # 0: context was trimmed
+                sent = self.conv[start:]
+                round_reasoning, round_text = len(entry["reasoning"]), len(entry["text"])
+                in_flight = (system, sent, start, round_reasoning, round_text)
                 result = None
                 async for kind, val in client.stream(model, messages, tools):
                     if kind == "text":
@@ -1453,6 +1466,12 @@ class Engine:
                     else:
                         result = val
                 usage = result.usage
+                self._log_request("chat", model, tier, system, sent, {
+                    "content": result.content, "reasoning": entry["reasoning"][round_reasoning:],
+                    "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls],
+                    "finish_reason": result.finish_reason, "usage": result.usage}, conv_index=start)
+                self._req_conv_len = len(self.conv)
+                in_flight = None
                 retry = await self._record_assistant(result, entry, turn)
                 if not retry and result.tool_calls and not entry["text"].strip() and not nudged:
                     # Models that think before acting sometimes go straight from reasoning to tool
@@ -1466,6 +1485,7 @@ class Engine:
                 entry["text"] += "\n\n"
         except asyncio.CancelledError:
             error = "stopped"
+            self._log_failed_round(in_flight, model, tier, entry, error)
             for rec in entry.get("searches", []):
                 if rec["status"] in ("awaiting", "running", "pending"):
                     rec["status"] = "cancelled"
@@ -1473,6 +1493,7 @@ class Engine:
                 self.conv.append({"role": "assistant", "content": entry["text"] + "\n[response stopped by technician]"})
         except Exception as e:  # noqa: BLE001
             error = f"{type(e).__name__}: {e}"
+            self._log_failed_round(in_flight, model, tier, entry, error)
         entry["text"] = entry["text"].strip()
         if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches")):
             self.chat.append(entry)
@@ -1620,14 +1641,100 @@ class Engine:
             parts.append("Not changed: " + "; ".join(refused) + ".")
         return " ".join(parts) or "Nothing changed: give withdraw items or an order of pending numbers."
 
+    # ---------------------------------------------------------------- request log
+
+    def _image_name(self, data_url: str) -> str:
+        """Case file name of an image sent as a data URL (matched by content)."""
+        try:
+            digest = hashlib.sha256(base64.b64decode(data_url.split(",", 1)[1])).hexdigest()
+        except (IndexError, ValueError):
+            return "image"
+        if digest not in self._img_names and self.case:
+            for f in self.case.dir.glob("img-*"):
+                self._img_names.setdefault(hashlib.sha256(f.read_bytes()).hexdigest(), f.name)
+        return self._img_names.get(digest, "image")
+
+    def scrub_messages(self, messages: list[dict]) -> list[dict]:
+        """Messages as sent, with each image's data replaced by its case file name."""
+        out = []
+        for m in messages:
+            c = m.get("content")
+            if isinstance(c, list):
+                parts = []
+                for part in c:
+                    if part.get("type") == "image_url":
+                        parts.append({"type": "image", "file": self._image_name(part["image_url"]["url"])})
+                    else:
+                        parts.append(part)
+                m = {**m, "content": parts}
+            out.append(m)
+        return out
+
+    def _log_request(self, purpose: str, model: str, tier: str, system: str, messages: list[dict],
+                     response: dict, conv_index: int | None = None) -> None:
+        """Append one model request to requests.jsonl: the system prompt when it changed, the
+        messages sent that were not in the previous logged request, and the full response
+        including reasoning and tool calls. This is what the full export is built from."""
+        if not self.case:
+            return
+        sha = hashlib.sha256(system.encode()).hexdigest()
+        rec = {"ts": time.time(), "purpose": purpose, "model": model, "tier": tier, "system_sha256": sha[:16]}
+        if purpose != "chat" or sha != self._req_system_sha:
+            rec["system"] = system
+        if purpose == "chat":
+            self._req_system_sha = sha
+        if conv_index is not None:
+            rec["conv_index"] = conv_index
+        rec["messages"] = self.scrub_messages(messages)
+        rec["response"] = response
+        try:
+            with (self.case.dir / "requests.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError as e:
+            self.emit("toast", level="error", text=f"Could not write the request log: {e}")
+
+    def _log_failed_round(self, in_flight, model: str, tier: str, entry: dict, error: str) -> None:
+        if not in_flight:
+            return
+        system, sent, start, r0, t0 = in_flight
+        self._log_request("chat", model, tier, system, sent, {
+            "content": entry["text"][t0:], "reasoning": entry["reasoning"][r0:], "tool_calls": [],
+            "error": error}, conv_index=start)
+        self._req_conv_len = len(self.conv)
+
     # ---------------------------------------------------------------- export
 
-    def export_markdown(self) -> str:
+    def export_markdown(self) -> dict:
+        """Write transcript.md into the case folder and return it for saving elsewhere."""
         if not self.case:
             raise UserError("No case to export.")
         path = self.case.export_markdown(self.chat, self.queue.to_list(), self.hypotheses)
         self.log("exported_markdown", path=str(path))
-        return str(path)
+        return {"path": str(path), "filename": f"{self.case.id}-transcript.md",
+                "content": path.read_text(encoding="utf-8")}
+
+    def _requests(self) -> list[dict]:
+        path = self.case.dir / "requests.jsonl"
+        out = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+        return out
+
+    def export_full(self, include_terminals: bool = False) -> tuple[str, bytes]:
+        """(file name, ZIP bytes): every model request with its prompt, reasoning and reply,
+        the images the model received, and the raw case data. See export.py."""
+        case = self._need_case()
+        md = case.export_markdown(self.chat, self.queue.to_list(), self.hypotheses).read_text(encoding="utf-8")
+        requests_ = self._requests()
+        data = export_mod.build_zip(case.to_dict() | {"id": case.id}, case.dir, requests_,
+                                    self.scrub_messages(self.conv), self.chat, self.queue.to_list(),
+                                    self.hypotheses, self._system_prompt(), md, include_terminals)
+        self.log("exported_full", requests=len(requests_), terminals=include_terminals, bytes=len(data))
+        return f"{case.id}-full-export.zip", data
 
     def _transcript_for_model(self) -> str:
         transcript = []
@@ -1657,7 +1764,9 @@ class Engine:
         try:
             text = await self._client(prov, model).complete(model, messages)
         except Exception as e:  # noqa: BLE001
+            self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)})
             raise UserError(f"{purpose} request failed: {e}") from e
+        self._log_request(purpose, model, tier, system_prompt, messages[1:], {"content": text})
         path = self.case.dir / filename
         path.write_text(text + "\n", encoding="utf-8")
         self.log(purpose, path=str(path), text=text)
@@ -1707,7 +1816,9 @@ class Engine:
         try:
             text = await self._client(prov, model).complete(model, messages)
         except Exception as e:  # noqa: BLE001
+            self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)})
             raise UserError(f"Review request failed: {e}") from e
+        self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"content": text})
         verdict = re.search(r"VERDICT:\s*(.+)$", text, re.I | re.M)
         out = {"num": num, "model": model, "tier": tier, "different_model": different, "text": text.strip(),
                "verdict": verdict.group(1).strip() if verdict else ""}

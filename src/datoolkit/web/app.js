@@ -2148,11 +2148,57 @@ function openSettings(tab = "providers") {
 
 // ------------------------------------------------------------------ export
 
+// Save a file where the technician chooses: the native Save dialog in the app window, the
+// browser's download otherwise. Returns the path (app window), "downloaded", or null.
+async function saveFile(name, blob) {
+  if (window.pywebview?.api?.save_file) {
+    const b64 = await new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result).split(",", 2)[1] || "");
+      fr.onerror = () => rej(fr.error);
+      fr.readAsDataURL(blob);
+    });
+    const path = await window.pywebview.api.save_file(name, b64);
+    if (path) toast(`Saved: ${path}`, "ok", 8000);
+    return path || null;
+  }
+  const url = URL.createObjectURL(blob);
+  const a = h("a", { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return "downloaded";
+}
+
+function openFullExport() {
+  const terms = h("input", { type: "checkbox" });
+  modal({ title: "Full export",
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", {}, "A ZIP with everything the AI was sent and everything it returned:"),
+      h("ul", { class: "small" },
+        h("li", {}, "every model request, in order: the system prompt (in full whenever it changed), the messages sent, the model's reasoning and its reply with tool calls"),
+        h("li", {}, "the images exactly as the model received them"),
+        h("li", {}, "the Markdown transcript and any ticket summary, client update or runbook"),
+        h("li", {}, "raw data: request log, conversation, chat, queue, hypotheses and the audit log")),
+      h("label", { class: "check" }, terms, "Also include the raw terminal transcripts (unredacted: everything the terminals showed)"),
+      h("div", { class: "muted small" }, "Cases started before this version have no request log; their earlier conversation is reconstructed and marked as such.")),
+    buttons: [{ label: "Cancel" }, { label: "Export…", kind: "primary", onClick: async () => {
+      const r = await fetch(`/api/export/full?terminals=${terms.checked}`, { headers: { "X-Token": TOKEN } });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status} ${r.statusText}`);
+      const name = (r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/)?.[1] || "full-export.zip";
+      const where = await saveFile(name, await r.blob());
+      if (!where) return true;          // cancelled: keep the dialog open
+    } }] });
+}
+
 async function doExport(act) {
   hideMenus();
   if (act === "markdown") {
     const r = await guarded(() => api("POST", "/api/export/markdown"));
-    if (r) toast(`Transcript saved: ${r.path}`, "ok", 10000);
+    if (r) await guarded(() => saveFile(r.filename, new Blob([r.content], { type: "text/markdown" })));
+  } else if (act === "full") {
+    openFullExport();
   } else if (act === "folder") {
     await guarded(() => api("POST", "/api/open-folder"));
   } else if (act === "timeline") {
@@ -2167,8 +2213,11 @@ async function doExport(act) {
     try {
       const r = await api("POST", `/api/export/${act}`);
       const ta = h("textarea", { rows: 18, value: r.text });
-      m.box.querySelector(".content").replaceChildren(ta, h("div", { class: "muted small" }, `Saved to ${r.path}`),
-        h("button", { class: "primary", style: "align-self:flex-start", onclick: () => { clipWrite(ta.value); toast("Copied.", "ok"); } }, "Copy"));
+      const file = { summary: "ticket-summary", client: "client-update", runbook: "runbook" }[act];
+      m.box.querySelector(".content").replaceChildren(ta, h("div", { class: "muted small" }, `A copy is in the case folder: ${r.path}`),
+        h("div", { class: "row" },
+          h("button", { class: "primary", onclick: () => { clipWrite(ta.value); toast("Copied.", "ok"); } }, "Copy"),
+          h("button", { onclick: () => guarded(() => saveFile(`${S.state.case.id}-${file}.md`, new Blob([ta.value], { type: "text/markdown" }))) }, "Save as…")));
     } catch (e) {
       m.box.querySelector(".content").replaceChildren(h("div", { class: "warnbox" }, e.message));
     }

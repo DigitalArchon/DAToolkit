@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import os
 import secrets
 import signal
 import socket
 import threading
 import time
+from pathlib import Path
 
 import uvicorn
 
@@ -33,7 +36,24 @@ def _free_port() -> int:
 
 class JsApi:
     """Exposed to the page as window.pywebview.api. WebKitGTK's async clipboard API is
-    unreliable, so terminal copy/paste goes through GTK on the main thread instead."""
+    unreliable, so terminal copy/paste goes through GTK on the main thread instead. Exports
+    are saved through the native Save dialog. (Underscore attributes are not exposed.)"""
+
+    _window = None
+
+    def save_file(self, name: str, data_b64: str):
+        """Ask where to save `name` and write the bytes there; returns the path, or None if
+        the technician cancelled."""
+        import webview
+
+        name = os.path.basename(str(name)) or "export"
+        chosen = self._window.create_file_dialog(webview.FileDialog.SAVE, directory=os.path.expanduser("~"),
+                                                 save_filename=name)
+        if not chosen:
+            return None
+        path = chosen if isinstance(chosen, str) else chosen[0]
+        Path(path).write_bytes(base64.b64decode(data_b64))
+        return path
 
     @staticmethod
     def _on_main(fn, timeout: float = 5.0):
@@ -105,8 +125,10 @@ def main(argv: list[str] | None = None) -> None:
         else:
             import webview
 
+            api = JsApi()
             window = webview.create_window("DAToolkit", url, width=1500, height=950, min_size=(900, 600),
-                                           js_api=JsApi())
+                                           js_api=api)
+            api._window = window
 
             def on_started():
                 from gi.repository import GLib

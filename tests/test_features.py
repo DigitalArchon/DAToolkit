@@ -189,7 +189,7 @@ async def test_hypotheses_rollback_and_cuts(env):  # noqa: F811
     # marks survive the model's next update; export includes the board
     engine._set_hypotheses([{"id": "disk", "text": "Disk full", "confidence": 0.1, "status": "ruled_out"}])
     assert engine.hypotheses[0]["tech_mark"] == "ruled_out"
-    md = Path(engine.export_markdown()).read_text()
+    md = Path(engine.export_markdown()["path"]).read_text()
     assert "## Hypotheses" in md and "Rollback" in md
     # persisted and restored
     cid = engine.case.id

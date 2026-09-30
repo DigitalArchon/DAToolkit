@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..engine import Engine, UserError
@@ -343,7 +343,13 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/export/markdown")
     async def export_md(e: Engine = Depends(auth)):
-        return {"path": e.export_markdown()}
+        return e.export_markdown()
+
+    @app.get("/api/export/full")
+    async def export_full(terminals: bool = False, e: Engine = Depends(auth)):
+        name, data = e.export_full(terminals)
+        return Response(data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
 
     @app.post("/api/export/summary")
     async def export_summary(e: Engine = Depends(auth)):

@@ -179,6 +179,17 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
   ICC profiles, PNG text chunks, JPEG comments, extra APNG frames and bytes appended after the
   image are all dropped, whatever the page sent. Only that cleaned image is stored (as a
   generic `img-N.png` / `img-N.jpg`) and sent; the original file name never leaves the page.
+- **Exports are saved where you choose**: the app window opens the system Save dialog (in
+  `--browser` mode the browser downloads the file). A copy still goes into the case folder.
+  - **Export transcript (Markdown)** is the readable case record.
+  - **Full export** is a ZIP with every request DAToolkit made to a model, in order: the
+    system prompt (in full whenever it changed), the messages sent, the model's reasoning as
+    the provider returned it, and its reply with tool calls (`full-transcript.md`); the images
+    exactly as the model received them; the AI-written documents; and the raw data (request
+    log, conversation, chat, queue, hypotheses, audit log). Raw terminal transcripts are
+    optional because they are unredacted. Cases started before request logging existed get
+    their earlier conversation reconstructed, marked as such.
+  - Ticket summary, client update and runbook have **Save as…** next to Copy.
 - **Export ▾ → Timeline replay** plays the case back: events on the left, the terminal
   transcript on the right, on one slider.
 - **Export ▾ → What the AI knows** shows the exact context the model gets next turn, with a
@@ -315,7 +326,9 @@ Confidential cases.
 
 Inside a case directory: `case.json` (name, sensitivity, notes), `events.jsonl` (audit log),
 `state.json` (conversation, chat and queue, rewritten on every change so the case can be
-resumed), `term-<session>.log` (transcripts), `transcript.md` and `ticket-summary.md` (exports).
+resumed), `requests.jsonl` (every model request: prompt, messages, reasoning, reply),
+`img-N.png/jpg` (images as sent), `term-<session>.log` (transcripts), `transcript.md` and
+`ticket-summary.md` (exports).
 
 ## Untrusted output
 
