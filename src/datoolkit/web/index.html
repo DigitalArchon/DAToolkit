@@ -18,6 +18,7 @@
   <span class="spacer"></span>
   <button id="model-btn" class="ghost" title="Choose model"><span id="model-name">Choose model</span> <span id="tier-badge" class="badge"></span></button>
   <button id="attest-btn" class="ghost small hidden" title="Re-check the enclave's attestation"></button>
+  <button id="vision-btn" class="ghost small" title=""></button>
   <span id="usage" class="muted small"></span>
   <div class="menu-wrap">
     <button id="export-btn" class="ghost">Export ▾</button>
@@ -52,9 +53,9 @@
       <textarea id="chat-input" rows="3" placeholder="Describe the problem, answer the AI, or tell it what you think…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
       <div id="attachments" class="hidden"></div>
       <div class="chat-actions">
-        <button type="button" id="attach-btn" class="ghost" title="Attach a photo (screen, LED panel, label). Sent to the model unredacted.">📷</button>
+        <button type="button" id="attach-btn" class="ghost" data-needs-vision title="Attach a photo (screen, LED panel, label). You can black out parts before it's sent.">📷</button>
         <input type="file" id="photo-input" accept="image/*" multiple class="hidden">
-        <button type="button" id="shot-btn" class="ghost" title="Attach a screenshot of the active terminal (useful for appliance menus). Not redacted.">🖥</button>
+        <button type="button" id="shot-btn" class="ghost" data-needs-vision title="Attach a screenshot of the active session (useful for appliance menus). You can black out parts before it's sent.">🖥</button>
         <button type="button" id="chat-results-btn" class="hidden" title="Review the results of commands you ran or skipped and send them with this message">Results</button>
         <button type="button" id="stop-btn" class="danger hidden">Stop</button>
         <button type="submit" id="send-btn" class="primary">Send</button>
@@ -66,7 +67,7 @@
     <div id="tabs">
       <div id="tab-list"></div>
       <div class="menu-wrap">
-<button id="tab-shot-btn" class="ghost" title="Attach a screenshot of this terminal to your next chat message, e.g. when a login lands on a menu instead of a shell">Screenshot → chat</button>
+<button id="tab-shot-btn" class="ghost" data-needs-vision title="Attach a screenshot of this terminal to your next chat message, e.g. when a login lands on a menu instead of a shell">Screenshot → chat</button>
                 <button id="new-session-btn" class="ghost" title="Open a session">+ Session</button>
         <div id="session-menu" class="menu hidden"></div>
       </div>

@@ -363,7 +363,7 @@ async def test_second_opinion_uses_reviewer_and_respects_tier(env, monkeypatch):
     seen = {}
 
     class Reviewer:
-        async def complete(self, model, messages):
+        async def complete(self, model, messages, params=None):
             seen["model"] = model
             seen["text"] = messages[1]["content"]
             return "It reboots the box.\nVERDICT: proceed with care"

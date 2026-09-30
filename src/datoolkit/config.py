@@ -29,6 +29,8 @@ class Provider:
     default_model: str = ""
     # model id -> "standard" | "tee" | "local"; overrides automatic detection
     tier_overrides: dict[str, str] = field(default_factory=dict)
+    # model id -> "yes" | "no": can it read images (overrides what the provider reports)
+    vision_overrides: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,6 +71,10 @@ class Settings:
     # guacd (apt install guacd) proxies RDP sessions
     guacd_host: str = "127.0.0.1"
     guacd_port: int = 4822
+    # generation parameters sent with every request; a missing key means "the model's default"
+    generation: dict = field(default_factory=lambda: {"temperature": 0.3, "reasoning_effort": "low"})
+    # "provider|model" that describes images for a chat model without vision; empty = none
+    vision_model: str = ""
 
 
 @dataclass

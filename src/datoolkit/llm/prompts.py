@@ -427,6 +427,14 @@ def build_system(sessions: list[dict], case_name: str, case_notes: str = "", rec
     return "\n\n".join(parts)
 
 
+VISION_PROMPT = """\
+You describe images for an IT diagnostic assistant that cannot see them. First transcribe \
+every piece of visible text exactly, keeping the layout where it matters (menus and their \
+numbers, prompts, error dialogs, tables, version strings, addresses, labels). Then describe \
+what else is visible: which application, device or screen it is, the state of controls, what \
+is selected or highlighted, icons, and colours that carry meaning (status LEDs, red/green \
+indicators). Say plainly what you cannot make out. Do not guess causes or give advice."""
+
 REVIEW_PROMPT = """\
 You are a second, independent reviewer. A technician is about to run ONE command on a live system \
 as part of a troubleshooting case. You are not the model that proposed it. In at most 120 words: \

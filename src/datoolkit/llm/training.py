@@ -70,8 +70,8 @@ class TrainingClient:
     async def attest(self):  # pragma: no cover - never called: training is not private mode
         raise RuntimeError("training provider has no enclave")
 
-    async def stream(self, model: str, messages: list[dict], tools: list[dict] | None = None
-                     ) -> AsyncIterator[tuple[str, object]]:
+    async def stream(self, model: str, messages: list[dict], tools: list[dict] | None = None,
+                     params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
         n_user = sum(1 for m in messages if m.get("role") == "user")
         turns = self.scenario.get("turn", [])
         turn = turns[min(n_user, len(turns)) - 1] if turns else {}
@@ -102,7 +102,7 @@ class TrainingClient:
         result.usage = {"prompt_tokens": 500 * n_user, "completion_tokens": len(text) // 4, "total_tokens": 500 * n_user + len(text) // 4}
         yield "done", result
 
-    async def complete(self, model: str, messages: list[dict]) -> str:
+    async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         return self.scenario.get("summary", "Training scenario: no summary available.")
 
 

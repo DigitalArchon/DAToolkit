@@ -353,8 +353,11 @@ p.small.warn { color: var(--warn); }
 
 /* redact-before-send editor */
 .redact { display: flex; flex-direction: column; gap: 8px; }
-.redact-wrap { overflow: auto; max-height: 68vh; text-align: center; background: var(--bg); border-radius: 6px; }
-.redact-canvas { max-width: 100%; max-height: 66vh; cursor: crosshair; user-select: none; }
+.modal.xl { width: min(1500px, 97vw); max-height: 94vh; }
+.redact-wrap { overflow: auto; max-height: 72vh; background: var(--bg); border-radius: 6px; }
+/* actual size by default: scaled-down text is what made screenshots hard to read here */
+.redact-canvas { display: block; margin: 0 auto; cursor: crosshair; user-select: none; image-rendering: auto; }
+.redact-canvas.fit { max-width: 100%; max-height: 70vh; }
 
 /* pywebview's window injects body { user-select: none } (its text_select=False default), so
    text a technician may want to copy is made selectable explicitly. Buttons stay unselectable. */
@@ -365,3 +368,15 @@ p.small.warn { color: var(--warn); }
 #chat-log button, #chat-log .chip, .pcard button, .scard button { -webkit-user-select: none; user-select: none; }
 .msg .who .copy { margin-left: auto; opacity: .5; }
 .msg:hover .who .copy { opacity: 1; }
+
+/* vision: what the current model can do with images */
+#vision-btn.native { color: var(--ok); }
+#vision-btn.helper { color: var(--warn); }
+#vision-btn.none { color: var(--muted); text-decoration: line-through; }
+.model-row .cap { font-size: 11px; color: var(--muted); font-family: system-ui, sans-serif; }
+.model-row .cap.off { opacity: .6; }
+.vision-now { font-size: 13px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); }
+.vision-now.native { border-color: var(--ok); }
+.vision-now.helper { border-color: var(--warn); }
+.vision-now.none { border-color: var(--danger); }
+button[data-needs-vision]:disabled { opacity: .35; }

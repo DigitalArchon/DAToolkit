@@ -331,6 +331,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
         return {"scenarios": scenarios()}
 
+    @app.post("/api/retry")
+    async def retry(e: Engine = Depends(auth)):
+        e.retry()
+        return {"ok": True}
+
     @app.post("/api/stop")
     async def stop(e: Engine = Depends(auth)):
         e.stop_turn()

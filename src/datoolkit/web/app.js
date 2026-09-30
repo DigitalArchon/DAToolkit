@@ -209,6 +209,8 @@ function handleEvent(ev) {
       S.lastTurn = { error: ev.error, secs: S.streaming ? Math.round((Date.now() - S.streaming.startAt) / 1000) : null };
       S.streaming = null;
       S.state.chat = ev.chat;
+      S.state.can_retry = !!ev.can_retry;
+      S.state.last_error = ev.error || null;
       if (ev.usage) S.state.last_usage = ev.usage;
       if (document.hidden) document.title = ev.error ? "✕ DAToolkit" : "✓ DAToolkit: your turn";
       renderBusy();
@@ -275,6 +277,35 @@ function renderTop() {
   banner.classList.toggle("hidden", !st.keyring_error);
 }
 
+// Can images be used with the current model? native: it reads them; helper: a vision model
+// describes them first (slower); none: image features are disabled, with the reason.
+function visionState() { return S.state?.vision || { mode: "none", why: "Choose a model first." }; }
+
+function renderVision() {
+  const v = visionState();
+  const b = $("#vision-btn");
+  b.textContent = { native: "👁", helper: `👁 via ${v.helper}`, none: "no images" }[v.mode];
+  b.className = `ghost small vision ${v.mode}`;
+  b.title = v.mode === "native" ? `${v.model} reads images directly.`
+    : v.mode === "helper" ? `${v.model} can't read images: ${v.helper} describes each image first and ${v.model} gets the description. Replies with images take longer. Change in Settings → Model.`
+    : `${v.why}\nImage features are off. Choose a vision model, or set a vision helper in Settings → Model.`;
+  for (const el of document.querySelectorAll("[data-needs-vision]")) {
+    if (!el.dataset.title) el.dataset.title = el.title;
+    el.disabled = v.mode === "none";
+    el.title = v.mode === "none" ? `Not available: ${v.why}` : v.mode === "helper"
+      ? `${el.dataset.title}\n(${v.helper} will describe it for ${v.model}; this takes a little longer.)` : el.dataset.title;
+  }
+}
+
+function needVision() {
+  const v = visionState();
+  if (v.mode === "none") throw new Error(`${v.why} Choose a vision model, or set a vision helper in Settings → Model.`);
+  if (v.mode === "helper" && !S.helperNoticeShown) {
+    S.helperNoticeShown = true;
+    toast(`${v.model} can't see images, so ${v.helper} will describe them first. Replies with images take longer.`, "info", 9000);
+  }
+}
+
 function fmtTokens(n) { return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n); }
 
 function renderUsage() {
@@ -291,6 +322,7 @@ function renderUsage() {
 
 function renderAll() {
   renderTop();
+  renderVision();
   renderUsage();
   renderHypotheses();
   renderChat(true);
@@ -326,7 +358,10 @@ function renderHypotheses() {
 function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
 
 function renderEntry(e, live = false) {
-  if (e.kind === "note") return h("div", { class: "msg note" }, e.text);
+  if (e.kind === "note") {
+    const last = S.state.chat[S.state.chat.length - 1] === e;
+    return h("div", { class: "msg note" }, e.text, e.retry && last && S.state.can_retry && !S.state.busy ? h("span", {}, " ", retryButton()) : null);
+  }
   if (e.kind === "user") {
     const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You"));
     if (e.text) box.append(h("div", { class: "body", html: md(e.text) }));
@@ -347,6 +382,9 @@ function renderEntry(e, live = false) {
         strip.append(img);
       }
       box.append(strip);
+      for (const [name, d] of Object.entries(e.image_notes || {})) {
+        box.append(h("details", {}, h("summary", {}, `👁 ${name} as described by ${d.model} for the chat model`), h("pre", {}, d.text)));
+      }
     }
     return box;
   }
@@ -536,7 +574,7 @@ function scheduleStreamRender() {
 // reply is complete it says so and lists what is waiting for the technician.
 const TOOL_PHASE = { propose_commands: "Preparing commands", update_hypotheses: "Updating hypotheses",
   ask_technician: "Writing questions", run_recipe: "Queuing a recipe", revise_queue: "Revising the queue",
-  web_search: "Searching the web" };
+  web_search: "Searching the web", describe_image: "Vision helper is reading the image (this adds a step)" };
 
 function clock(secs) { return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; }
 
@@ -560,14 +598,17 @@ function renderStatus() {
     text.textContent = `AI is responding: ${msg}  ·  ${clock(total)}`;
     return;
   }
+  // checked first: after a failed request the last chat entry is the technician's own message
+  if (S.state.can_retry) {
+    bar.className = "failed";
+    const err = S.lastTurn?.error || S.state.last_error;
+    text.replaceChildren(err === "stopped" ? "■ Stopped. " : "✕ The last message got no answer. ",
+      retryButton(), h("span", { class: "muted" }, " or change the model first, or type a new message."));
+    return;
+  }
   const chat = S.state.chat || [];
   const last = [...chat].reverse().find((e) => e.kind === "assistant" || e.kind === "user");
   if (!last || last.kind !== "assistant") { bar.className = "hidden"; return; }
-  if (S.lastTurn?.error) {
-    bar.className = "failed";
-    text.textContent = S.lastTurn.error === "stopped" ? "■ Stopped. Your turn." : "✕ The AI request failed. Your turn: send again or change model.";
-    return;
-  }
   const pending = S.state.queue.filter((i) => i.status === "pending").length;
   const ready = readyItems().length;
   const todo = [];
@@ -576,6 +617,11 @@ function renderStatus() {
   if (last.questions?.length) todo.push(`${last.questions.length} question${last.questions.length > 1 ? "s" : ""} to answer`);
   bar.className = "done";
   text.textContent = `✓ AI finished${S.lastTurn?.secs ? ` (${clock(S.lastTurn.secs)})` : ""}. Your turn${todo.length ? ": " + todo.join(" · ") : "."}`;
+}
+
+function retryButton() {
+  return h("button", { type: "button", class: "small primary", title: "Send the last message again, with the model selected now",
+    onclick: () => guarded(() => api("POST", "/api/retry")) }, `Retry with ${S.state.config.active_model || "the selected model"}`);
 }
 
 function renderBusy() {
@@ -609,13 +655,14 @@ function renderAttachments() {
 }
 async function attachPhoto(file) {
   if (!file || !file.type.startsWith("image/")) return;
+  needVision();
   if (pendingImages.length >= 4) return toast("Up to four photos per message.");
   const url = URL.createObjectURL(file);
   try {
     const full = await shrinkImage(url, 4000, "image/jpeg", 0.92);      // decode once, at working size
     const redacted = await redactImage(full, `Photo: black out anything sensitive`);
     if (!redacted) return;
-    pendingImages.push(await shrinkImage(redacted, 1600, "image/jpeg", 0.85));
+    pendingImages.push(await shrinkImage(redacted, IMAGE_MAX, "image/jpeg", 0.9));
     renderAttachments();
   } finally {
     URL.revokeObjectURL(url);
@@ -865,18 +912,32 @@ function terminalScreenshot(sid) {
   const size = term.options.fontSize || 13, family = term.options.fontFamily || "monospace";
   const ctx0 = document.createElement("canvas").getContext("2d");
   ctx0.font = `${size}px ${family}`;
-  const cw = ctx0.measureText("W").width, ch = Math.ceil(size * 1.25), pad = 8;
-  const scale = Math.min(2, 1600 / (term.cols * cw + pad * 2));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.ceil((term.cols * cw + pad * 2) * scale);
-  canvas.height = Math.ceil((term.rows * ch + pad * 2) * scale);
-  const ctx = canvas.getContext("2d");
-  ctx.scale(scale, scale);
-  ctx.fillStyle = bg0;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.textBaseline = "middle";
+  const cw = ctx0.measureText("W").width, ch = Math.ceil(size * 1.3), pad = 8;
+  const atBottom = buf.viewportY === buf.baseY;
   const cell = buf.getNullCell();
-  for (let row = 0; row < term.rows; row++) {
+  // only the rows in use: down to the last row with content (or the cursor)
+  let rows = atBottom ? buf.cursorY + 1 : 1;
+  for (let row = term.rows - 1; row >= rows; row--) {
+    const line = buf.getLine(buf.viewportY + row);
+    if (line && line.translateToString(true).trim()) { rows = row + 1; break; }
+  }
+  const baseW = term.cols * cw + pad * 2, baseH = rows * ch + pad * 2;
+  const scale = baseW * 2 <= 2048 ? 2 : 1;                 // whole-number scale: fractional blurs every glyph
+  const W = Math.ceil(baseW * scale), H = Math.ceil(baseH * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  // Text goes on its own transparent layer: text drawn straight onto an opaque background may be
+  // sub-pixel antialiased (coloured fringes on every letter); on a transparent layer it can't be.
+  const layer = document.createElement("canvas");
+  layer.width = W; layer.height = H;
+  const tx = layer.getContext("2d");
+  ctx.scale(scale, scale);
+  tx.scale(scale, scale);
+  ctx.fillStyle = bg0;
+  ctx.fillRect(0, 0, baseW, baseH);
+  tx.textBaseline = "middle";
+  for (let row = 0; row < rows; row++) {
     const line = buf.getLine(buf.viewportY + row);
     if (!line) continue;
     const y = pad + row * ch;
@@ -889,18 +950,21 @@ function terminalScreenshot(sid) {
       if (bg) { ctx.fillStyle = bg; ctx.fillRect(x, y, w + 0.5, ch); }
       const chars = cell.getChars();
       if (!chars || chars === " " || cell.isInvisible()) continue;
-      ctx.font = `${cell.isItalic() ? "italic " : ""}${cell.isBold() ? "bold " : ""}${size}px ${family}`;
-      ctx.globalAlpha = cell.isDim() ? 0.6 : 1;
-      ctx.fillStyle = fg;
-      ctx.fillText(chars, x, y + ch / 2);
-      if (cell.isUnderline()) ctx.fillRect(x, y + ch - 2, w, 1);
-      ctx.globalAlpha = 1;
+      tx.font = `${cell.isItalic() ? "italic " : ""}${cell.isBold() ? "bold " : ""}${size}px ${family}`;
+      tx.globalAlpha = cell.isDim() ? 0.6 : 1;
+      tx.fillStyle = fg;
+      tx.fillText(chars, x, y + ch / 2);
+      if (cell.isUnderline()) tx.fillRect(x, y + ch - 2, w, 1);
+      tx.globalAlpha = 1;
     }
   }
-  if (buf.viewportY === buf.baseY) {           // cursor, when the screen isn't scrolled back
-    ctx.strokeStyle = fg0;
-    ctx.strokeRect(pad + buf.cursorX * cw + 0.5, pad + buf.cursorY * ch + 0.5, cw - 1, ch - 1);
+  if (atBottom) {                                           // cursor, when the screen isn't scrolled back
+    tx.strokeStyle = fg0;
+    tx.lineWidth = 1;
+    tx.strokeRect(pad + buf.cursorX * cw + 0.5, pad + buf.cursorY * ch + 0.5, cw - 1, ch - 1);
   }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(layer, 0, 0);
   return canvas.toDataURL("image/png");
 }
 
@@ -932,6 +996,8 @@ function rdpResize(r) {
   }, 400);
 }
 
+function needsVision(el) { el.setAttribute("data-needs-vision", ""); return el; }
+
 function ensureRdp(sess) {
   if (S.rdps[sess.id]) return S.rdps[sess.id];
   const r = { id: sess.id, state: 0, clipboard: "", typedOk: false };
@@ -944,12 +1010,13 @@ function ensureRdp(sess) {
     btn("Ctrl+Alt+Del", "Send Ctrl+Alt+Del", () => rdpKeys(r, [0xFFE3, 0xFFE9, 0xFFFF])),
     btn("Win", "Press the Windows key", () => rdpKeys(r, [0xFFEB])),
     btn("Win+R", "Open the Run dialog", () => rdpKeys(r, [0xFFEB, 0x72])),
-    btn("Screenshot → chat", "Attach a screenshot of the remote desktop to your next message", attachScreenshot),
+    needsVision(btn("Screenshot → chat", "Attach a screenshot of the remote desktop to your next message", attachScreenshot)),
     r.clipBtn,
     btn("Paste text…", "Put text on the remote clipboard, or type it into the focused window", () => rdpPasteText(r)),
     btn("Reconnect", "Reconnect the remote desktop", () => rdpConnect(r)),
     h("span", { class: "spacer" }), r.status);
   r.host = h("div", { class: "term-host rdp-host" }, r.bar, r.view);
+  setTimeout(renderVision, 0);
   $("#terms").append(r.host);
   r.keyboard = new Guacamole.Keyboard(r.view);
   r.keyboard.onkeydown = (keysym) => { if (r.state === 3) r.client.sendKeyEvent(1, keysym); return false; };
@@ -1094,9 +1161,13 @@ function redactImage(dataUrl, title = "Black out anything sensitive, then attach
       window.addEventListener("mousemove", move);
       window.addEventListener("mouseup", up);
       const count = h("span", { class: "muted small" });
-      modal({ title, wide: true,
-        body: h("div", { class: "redact" }, h("div", { class: "muted small" },
-          "Drag over anything that shouldn't reach the AI (names, addresses, keys). Blacked-out areas are replaced with black pixels before the image leaves this window. ", count),
+      const zoom = h("button", { type: "button", class: "small", onclick: () => {
+        canvas.classList.toggle("fit");
+        zoom.textContent = canvas.classList.contains("fit") ? "Actual size" : "Fit to window";
+      } }, "Fit to window");
+      const m = modal({ title, wide: true,
+        body: h("div", { class: "redact" }, h("div", { class: "row", style: "align-items:center" }, h("div", { class: "muted small", style: "flex:1" },
+          "Drag over anything that shouldn't reach the AI (names, addresses, keys). Blacked-out areas are replaced with black pixels before the image leaves this window. ", count), zoom),
           h("div", { class: "redact-wrap" }, canvas)),
         buttons: [
           { label: "Undo", onClick: () => { rects.pop(); draw(); return true; } },
@@ -1109,25 +1180,36 @@ function redactImage(dataUrl, title = "Black out anything sensitive, then attach
           window.removeEventListener("mouseup", up);
           resolve(result);
         } });
+      m.box.classList.add("xl");
       draw();
     };
     img.src = dataUrl;
   });
 }
 
-// Shrink an image to fit `max` px on its long side (models downscale anyway).
-function shrinkImage(dataUrl, max = 1600, type = "image/png", quality = 0.9) {
+// Fit an image within `max` px on its long side. Images already within it are left untouched
+// (every resample softens text); larger ones are halved step by step, then scaled once.
+const IMAGE_MAX = 2048;
+function shrinkImage(dataUrl, max = IMAGE_MAX, type = "image/png", quality = 0.9) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-      if (scale === 1 && dataUrl.startsWith(`data:${type}`)) return resolve(dataUrl);
+      let w = img.naturalWidth, hh = img.naturalHeight;
+      if (Math.max(w, hh) <= max && dataUrl.startsWith(`data:${type}`)) return resolve(dataUrl);
+      let src = img;
+      while (Math.max(w, hh) / 2 >= max) {
+        const c = document.createElement("canvas");
+        c.width = Math.round(w / 2); c.height = Math.round(hh / 2);
+        const cx = c.getContext("2d"); cx.imageSmoothingQuality = "high";
+        cx.drawImage(src, 0, 0, c.width, c.height);
+        src = c; w = c.width; hh = c.height;
+      }
+      const scale = Math.min(1, max / Math.max(w, hh));
       const c = document.createElement("canvas");
-      c.width = Math.round(img.naturalWidth * scale);
-      c.height = Math.round(img.naturalHeight * scale);
+      c.width = Math.round(w * scale); c.height = Math.round(hh * scale);
       const cx = c.getContext("2d");
       cx.imageSmoothingQuality = "high";
-      cx.drawImage(img, 0, 0, c.width, c.height);
+      cx.drawImage(src, 0, 0, c.width, c.height);
       resolve(c.toDataURL(type, quality));
     };
     img.src = dataUrl;
@@ -1136,6 +1218,7 @@ function shrinkImage(dataUrl, max = 1600, type = "image/png", quality = 0.9) {
 
 // Screenshot of the active session (terminal or remote desktop) -> redaction -> attachment.
 async function attachScreenshot() {
+  needVision();
   const sess = activeSession();
   if (!sess) return toast("Open and select a session first.");
   if (pendingImages.length >= 4) return toast("Up to four images per message.");
@@ -1659,6 +1742,7 @@ async function openSendResults(draft = "") {
   const images = [];
   const thumbs = h("div", { class: "thumbs" });
   const addShot = (sid) => guarded(async () => {
+    needVision();
     const r = S.rdps[sid];
     if (!r || r.state !== 3) throw new Error(`The remote desktop ${sid} is not connected.`);
     if (images.length >= 4) throw new Error("Up to four images per message.");
@@ -1674,7 +1758,7 @@ async function openSendResults(draft = "") {
     const ta = skipped ? null : h("textarea", { spellcheck: "false", value: prev[idx].text,
       placeholder: rdp ? "Output isn't captured from a remote desktop: paste it here, or attach a screenshot below." : "" });
     const rdpTools = rdp && !skipped ? h("div", { class: "row" },
-      h("button", { type: "button", class: "small", onclick: () => addShot(item.session_id) }, "📸 Screenshot of the desktop"),
+      h("button", { type: "button", class: "small", "data-needs-vision": true, onclick: () => addShot(item.session_id) }, "📸 Screenshot of the desktop"),
       h("button", { type: "button", class: "small", title: "Text last copied in the remote desktop",
         onclick: () => { const r = S.rdps[item.session_id]; if (r?.clipboard) { ta.value = r.clipboard; autosize(ta); } else toast("Copy the output in the remote desktop first."); } }, "Copied text")) : null;
     const note = h("input", { type: "text", placeholder: "Note to the AI (optional)", value: item.note || "" });
@@ -1693,6 +1777,7 @@ async function openSendResults(draft = "") {
     return { item, include, ta, note };
   });
   const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)", value: draft });
+  setTimeout(renderVision, 0);
   modal({
     title: "Review results before sending", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
@@ -1852,6 +1937,9 @@ async function openModelPicker() {
         await guarded(async () => { await api("POST", "/api/model", { provider: prov, model: x.id }); m.close(); });
       },
     }, h("span", { class: "id" }, x.id), recent.includes(x.id) ? h("span", { class: "muted small" }, "recent") : null,
+    x.reasoning ? h("span", { class: "cap", title: `Reasoning model${x.efforts?.length ? `: effort ${x.efforts.join(" / ")}` : ""}` }, "🧠") : null,
+    h("span", { class: `cap${x.vision ? "" : " off"}`, title: x.vision === true ? "Reads images" : x.vision === false ? "Text only: can't read images" : "Unknown whether it reads images (set it under Settings → Providers)" },
+      x.vision === true ? "👁" : x.vision === false ? "text only" : "?"),
     h("span", { class: `badge ${x.tier}` }, x.tier))));
     if (!shown.length) listEl.append(h("div", { class: "muted" }, "No matching models."));
   };
@@ -1870,6 +1958,7 @@ async function openModelPicker() {
     title: "Choose model", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "muted small" }, legend, " Tier is detected from the model id; override it in Settings → Providers."),
+      h("div", { class: "muted small" }, "👁 reads images · text only: needs a vision helper (Settings → Model) for screenshots and photos · 🧠 reasoning model."),
       h("div", { class: "row" }, providers.length > 1 ? provSel : null, search,
         h("button", { type: "button", onclick: () => load(true) }, "Refresh")),
       listEl),
@@ -1885,9 +1974,9 @@ function openSettings(tab = "providers") {
   const pane = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
   const show = (name) => {
     for (const b of tabs.children) b.classList.toggle("active", b.dataset.tab === name);
-    pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, tools: toolsPane, general: generalPane })[name]());
+    pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, model: modelPane, tools: toolsPane, general: generalPane })[name]());
   };
-  for (const [key, label] of [["providers", "AI providers"], ["hosts", "Hosts"], ["tools", "Tool cache"], ["general", "General"]]) {
+  for (const [key, label] of [["providers", "AI providers"], ["model", "Model"], ["hosts", "Hosts"], ["tools", "Tool cache"], ["general", "General"]]) {
     tabs.append(h("button", { type: "button", "data-tab": key, onclick: () => show(key) }, label));
   }
   const m = modal({ title: "Settings", wide: true, body: h("div", {}, pane), buttons: [{ label: "Close" }] });
@@ -1924,6 +2013,9 @@ function openSettings(tab = "providers") {
     const overrides = h("textarea", { rows: 3, class: "mono",
       value: Object.entries(p.tier_overrides || {}).map(([k, v]) => `${k} = ${v}`).join("\n"),
       placeholder: "One per line: model-id = standard | tee | local" });
+    const visionOv = h("textarea", { rows: 2, class: "mono",
+      value: Object.entries(p.vision_overrides || {}).map(([k, v]) => `${k} = ${v}`).join("\n"),
+      placeholder: "One per line: model-id = yes | no   (for providers that don't report it, e.g. local models)" });
     const status = h("div", { class: "muted small" });
     const payload = () => {
       const tier_overrides = {};
@@ -1931,7 +2023,12 @@ function openSettings(tab = "providers") {
         const [k, v] = line.split("=").map((s) => (s || "").trim());
         if (k && v) tier_overrides[k] = v.toLowerCase();
       }
-      return { provider: { name: name.value.trim(), base_url: url.value.trim(), default_model: def.value.trim(), tier_overrides },
+      const vision_overrides = {};
+      for (const line of visionOv.value.split("\n")) {
+        const [k, v] = line.split("=").map((s) => (s || "").trim());
+        if (k && v) vision_overrides[k] = v.toLowerCase();
+      }
+      return { provider: { name: name.value.trim(), base_url: url.value.trim(), default_model: def.value.trim(), tier_overrides, vision_overrides },
         api_key: key.value.trim() || null, original_name: p._new ? null : p.name };
     };
     const save = async () => {
@@ -1947,6 +2044,7 @@ function openSettings(tab = "providers") {
       h("label", { class: "field" }, h("span", {}, "API key"), key),
       h("label", { class: "field" }, h("span", {}, "Default model"), def),
       h("label", { class: "field" }, h("span", {}, "Tier overrides"), overrides),
+      h("label", { class: "field" }, h("span", {}, "Reads images (overrides)"), visionOv),
       h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models, attested with Tinfoil's verifier); LOCAL = your own hardware (localhost/private IP URLs)."),
       status,
       h("div", { class: "row" },
@@ -2092,6 +2190,60 @@ function openSettings(tab = "providers") {
       }) }, "Add")));
     load();
     return box;
+  }
+
+  function modelPane() {
+    const g = S.state.config.settings.generation || {};
+    const num = (key, attrs = {}) => h("input", { type: "number", value: g[key] ?? "", placeholder: "model default", ...attrs });
+    const f = {
+      temperature: num("temperature", { step: 0.05, min: 0, max: 2 }),
+      top_p: num("top_p", { step: 0.05, min: 0, max: 1 }),
+      max_tokens: num("max_tokens", { step: 256, min: 1 }),
+      frequency_penalty: num("frequency_penalty", { step: 0.1, min: -2, max: 2 }),
+      presence_penalty: num("presence_penalty", { step: 0.1, min: -2, max: 2 }),
+      seed: num("seed", { step: 1, min: 0 }),
+      reasoning_effort: h("select", {}, [["", "model default"], ["none", "none (no reasoning)"], ["minimal", "minimal"], ["low", "low"],
+        ["medium", "medium"], ["high", "high"], ["xhigh", "extra high"], ["max", "max"]].map(([v, l]) => h("option", { value: v, selected: (g.reasoning_effort || "") === v }, l))),
+    };
+    const field = (label, el, hint) => h("label", { class: "field" }, h("span", {}, label), el, hint ? h("div", { class: "muted small" }, hint) : null);
+    const helper = h("select", {}, h("option", { value: "" }, "Loading vision models…"));
+    const current = S.state.config.settings.vision_model || "";
+    const loadHelpers = async () => {
+      const opts = [h("option", { value: "", selected: !current }, "None (image features off for text-only models)")];
+      for (const p of S.state.config.providers) {
+        try {
+          const models = (await api("GET", `/api/models?provider=${encodeURIComponent(p.name)}`)).models;
+          for (const m of models.filter((x) => x.vision === true && x.allowed)) {
+            const v = `${p.name}|${m.id}`;
+            opts.push(h("option", { value: v, selected: v === current }, `${m.id}  (${p.name}, ${m.tier})`));
+          }
+        } catch { /* provider unreachable: skip */ }
+      }
+      if (current && !opts.some((o) => o.value === current)) opts.push(h("option", { value: current, selected: true }, `${current} (not available now)`));
+      helper.replaceChildren(...opts);
+    };
+    loadHelpers();
+    const v = visionState();
+    const save = async () => {
+      const generation = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
+      await api("POST", "/api/settings", { generation, vision_model: helper.value });
+      toast("Model settings saved.", "ok");
+    };
+    return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
+      h("h3", {}, "Generation"),
+      h("div", { class: "muted small" }, "Sent with every request. Blank means the model's own default. Reasoning effort only goes to reasoning models, moved to the nearest level each model accepts (e.g. Kimi and GLM take low / high / max)."),
+      h("div", { class: "row" }, field("Temperature", f.temperature, "0 = focused, 1 = varied. 0.3 suits diagnostics."),
+        field("Reasoning effort", f.reasoning_effort, "Higher thinks longer: slower and more tokens.")),
+      h("div", { class: "row" }, field("Max output tokens", f.max_tokens), field("Top-p", f.top_p)),
+      h("div", { class: "row" }, field("Frequency penalty", f.frequency_penalty), field("Presence penalty", f.presence_penalty), field("Seed", f.seed)),
+      h("div", { class: "row" }, h("span", { class: "spacer" }),
+        h("button", { type: "button", onclick: () => { for (const [k, el] of Object.entries(f)) el.value = { temperature: 0.3, reasoning_effort: "low" }[k] ?? ""; } }, "Reset to defaults")),
+      h("h3", {}, "Images"),
+      h("div", { class: `vision-now ${v.mode}` }, v.mode === "native" ? `The current model (${v.model}) reads images directly.`
+        : v.mode === "helper" ? `The current model (${v.model}) can't read images; ${v.helper} describes them for it.`
+        : `Image features are off: ${v.why}`),
+      field("Vision helper", helper, "Used only when the chat model can't read images: it describes each image once (text exactly, then the rest), and the chat model gets the description. That adds a request per image, so replies with images take longer. It must be allowed by the case's sensitivity. With no helper, image features are disabled for text-only models."),
+      h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(save) }, "Save")));
   }
 
   function generalPane() {
@@ -2289,6 +2441,7 @@ function init() {
     toast(r.status === "verified" ? `Enclave attested: ${r.summary}` : `Attestation failed: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
   }));
   $("#settings-btn").addEventListener("click", () => openSettings());
+  $("#vision-btn").addEventListener("click", () => openSettings("model"));
   $("#export-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#export-menu")); });
   $("#export-menu").addEventListener("click", (e) => { const a = e.target.closest("button")?.dataset.act; if (a) doExport(a); });
   $("#new-session-btn").addEventListener("click", (e) => {

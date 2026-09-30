@@ -221,7 +221,7 @@ class _NonEmptyBodyTransport(httpx.AsyncHTTPTransport):
 
 
 def shape_body(model: str, upstream: str, messages: list[dict], tools: list[dict] | None,
-               cache_secret: str) -> dict:
+               cache_secret: str, params: dict | None = None) -> dict:
     """The body Tinfoil's router takes, shaped as the proxy does for the fields we send."""
     msgs = []
     for m in messages:
@@ -233,8 +233,9 @@ def shape_body(model: str, upstream: str, messages: list[dict], tools: list[dict
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
+    body.update(params or {})
     if upstream.startswith("glm-5"):
-        body["chat_template_kwargs"] = {"thinking": True}
+        body["chat_template_kwargs"] = {"thinking": (params or {}).get("reasoning_effort") != "none"}
     body = {k: v for k, v in body.items() if k in ALLOWED_FIELDS}
     body[CACHE_SECRET_FIELD] = cache_secret  # sealed with the body; never seen by NanoGPT
     return body
@@ -285,8 +286,8 @@ class PrivateModeClient:
             raise PrivateModeError("NanoGPT's Private Mode check didn't say where to send the request")
         return scope, upstream
 
-    async def stream(self, model: str, messages: list[dict],
-                     tools: list[dict] | None = None) -> AsyncIterator[tuple[str, object]]:
+    async def stream(self, model: str, messages: list[dict], tools: list[dict] | None = None,
+                     params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
         """Yield ("text"|"reasoning", str) deltas, then ("done", TurnResult)."""
         from ehbp import EHBPError, KeyConfigMismatchError
 
@@ -297,7 +298,7 @@ class PrivateModeClient:
             verified = None
             try:
                 verified = await self.enclave.current()  # attested before anything, even the charge
-                async for event in self._one_request(model, messages, tools, verified):
+                async for event in self._one_request(model, messages, tools, verified, params):
                     started = True
                     yield event
                 return
@@ -313,10 +314,10 @@ class PrivateModeClient:
             self.enclave.invalidate(verified)  # key rotated: attest again and retry once
 
     async def _one_request(self, model: str, messages: list[dict], tools: list[dict] | None,
-                           verified: Verified) -> AsyncIterator[tuple[str, object]]:
-        probe = shape_body(model, model, messages, tools, self.enclave.cache_secret)
+                           verified: Verified, params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
+        probe = shape_body(model, model, messages, tools, self.enclave.cache_secret, params)
         scope, upstream = await self._preflight(model, len(json.dumps(probe).encode()))
-        body = shape_body(model, upstream, messages, tools, self.enclave.cache_secret)
+        body = shape_body(model, upstream, messages, tools, self.enclave.cache_secret, params)
         headers = {
             **self._headers(),
             "Accept": "text/event-stream",
@@ -356,9 +357,9 @@ class PrivateModeClient:
             raise PrivateModeError("the encrypted reply ended before it was complete")
         yield "done", result
 
-    async def complete(self, model: str, messages: list[dict]) -> str:
+    async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         text = ""
-        async for kind, val in self.stream(model, messages):
+        async for kind, val in self.stream(model, messages, params=params):
             if kind == "text":
                 text += val
         return text

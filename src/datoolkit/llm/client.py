@@ -84,7 +84,7 @@ class LLMClient:
         return sorted(m.id for m in page.data)
 
     async def stream(
-        self, model: str, messages: list[dict], tools: list[dict] | None = None
+        self, model: str, messages: list[dict], tools: list[dict] | None = None, params: dict | None = None
     ) -> AsyncIterator[tuple[str, object]]:
         """Yield ("text"|"reasoning", str) deltas and ("tool", name) as each tool call starts,
         then ("done", TurnResult)."""
@@ -95,6 +95,7 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        kwargs.update(_split_params(params))
         acc = StreamAccumulator()
         stream = await self._client.chat.completions.create(**kwargs)
         async for chunk in stream:
@@ -102,11 +103,21 @@ class LLMClient:
                 yield event
         yield "done", acc.finish()
 
-    async def complete(self, model: str, messages: list[dict]) -> str:
+    async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
-        resp = await self._client.chat.completions.create(model=model, messages=messages)
+        resp = await self._client.chat.completions.create(model=model, messages=messages, **_split_params(params))
         return resp.choices[0].message.content or ""
+
+
+def _split_params(params: dict | None) -> dict:
+    """Standard sampling fields as SDK arguments; reasoning_effort in the extra body, so it
+    reaches the provider whatever the SDK version knows about."""
+    params = dict(params or {})
+    effort = params.pop("reasoning_effort", None)
+    if effort:
+        params["extra_body"] = {"reasoning_effort": effort}
+    return params
 
 
 class StreamAccumulator:

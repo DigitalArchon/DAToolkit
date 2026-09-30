@@ -77,6 +77,10 @@ Treat that URL like a password: it grants terminal access.
   Perplexity $0.005, Linkup $0.006 per search; each search card shows its cost). If the
   account has Zero Data Retention required, NanoGPT only allows Linkup, so DAToolkit falls
   back to it and says so on the card.
+- **Retry.** When a request fails or you stop it, the status line (and the error note in the
+  chat) offers **Retry with ‹model›**: the last message is sent again, once, with whichever
+  model is selected now. So when a model is overloaded, pick another and retry; nothing needs
+  retyping or re-attaching.
 - The line above the chat box always says whose turn it is: *AI is responding* (with the
   phase, e.g. "Preparing commands", and a note if no text has arrived for a few seconds) or
   *✓ AI finished. Your turn*, with what is waiting for you.
@@ -170,6 +174,16 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
   a terminal's screen drawn from its buffer with its colours, or the remote desktop of an
   RDP session. Use it when a login lands on an appliance menu (OPNsense, pfSense, Sophos)
   rather than a shell: the layout makes that obvious where plain text may not.
+- **Vision.** The model picker marks models that read images (👁), text-only ones, and
+  reasoning models (🧠), from NanoGPT's model details (Private Mode models borrow their public
+  twin's; other providers can be marked under Settings → Providers → "Reads images"). With a
+  text-only chat model, set a **vision helper** in Settings → Model: it describes each image
+  once (text transcribed exactly, then the rest) and the chat model gets the description,
+  shown under the image in the chat. That adds a request per image, so replies with images
+  are slower. With neither, every image feature is disabled and says why; the top bar shows
+  the current state (👁, 👁 via helper, or "no images").
+- Screenshots are drawn at a whole-number 2× scale, cropped to the rows in use, with plain
+  (not sub-pixel) text smoothing, and are not resampled again unless over 2048 px.
 - **Every image goes through a redaction editor first.** Drag over anything that shouldn't
   reach the AI and it becomes solid black; Undo and Clear are there, Attach sends. The black
   replaces the pixels in the one bitmap (no layers; boxes snap outwards to whole pixels so no
@@ -238,6 +252,14 @@ the rules.
 | ↑ / ↓ in the chat box | Recall earlier messages |
 | Enter / Shift+Enter | Send / newline |
 | Ctrl+Shift+C / V | Copy / paste in the terminal |
+
+## Generation settings
+
+Settings → Model sets what goes with every request: temperature (default 0.3), reasoning
+effort (default low), max output tokens, top-p, frequency and presence penalty, and seed.
+Blank means the model's own default. Reasoning effort is sent only to reasoning models and is
+moved to the nearest level each model accepts (Kimi and GLM take low / high / max; Opus low to
+max). The same settings apply through NanoGPT Private Mode.
 
 ## Model tiers and end-to-end encryption
 

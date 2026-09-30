@@ -31,7 +31,8 @@ from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
 from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, list_private_models,
                                offers_private_mode, relay_url)
-from .llm import websearch
+from .llm import capabilities, websearch
+from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
 from .safety import images as images_mod
@@ -151,11 +152,19 @@ class Engine:
         self._req_system_sha = ""     # system prompt of the last logged request (logged again only when it changes)
         self._req_conv_len = 0        # conversation messages already logged
         self._img_names: dict[str, str] = {}   # sha256 of image bytes -> case file name
+        self._caps: dict[str, dict[str, dict]] = {}   # provider -> model id -> capabilities
+        self._caps_tasks: dict[str, asyncio.Task] = {}
+        self._caps_http = None                         # httpx client override (tests)
+        self._img_desc: dict[str, dict] = {}           # image file -> {"model", "text"} from the vision helper
+        self._last_turn_error: str | None = None
 
     # ---------------------------------------------------------------- lifecycle
 
     async def start(self) -> None:
         await self.bridge.start()
+        prov = self.cfg.provider(self.cfg.active_provider)
+        if prov:
+            self._schedule_caps(prov)
 
     async def stop(self) -> None:
         for task in (self._turn, self._attest_task):
@@ -187,6 +196,9 @@ class Engine:
             "prompts": [info for _, info in self._prompts.values()],
             "search_requests": [info for _, info in self._search_reqs.values()],
             "search": self.search_status(),
+            "vision": self.vision_status(),
+            "can_retry": self.can_retry,
+            "last_error": self._last_turn_error,
             "last_usage": self.last_usage,
             "hypotheses": self.hypotheses,
             "similar_cases": [{k: v for k, v in c.items() if k != "runbook"} for c in self._similar],
@@ -231,8 +243,12 @@ class Engine:
         if not name or not base_url:
             raise UserError("Provider needs a name and base URL.")
         overrides = {k.strip(): v.strip() for k, v in (data.get("tier_overrides") or {}).items() if k.strip()}
+        vision = {k.strip(): str(v).strip().lower() for k, v in (data.get("vision_overrides") or {}).items() if k.strip()}
+        bad = [k for k, v in vision.items() if v not in ("yes", "no")]
+        if bad:
+            raise UserError(f"Vision overrides must be yes or no ({', '.join(bad)}).")
         prov = Provider(name=name, base_url=base_url, default_model=str(data.get("default_model", "")).strip(),
-                        tier_overrides=overrides)
+                        tier_overrides=overrides, vision_overrides=vision)
         old = self.cfg.provider(original_name or name)
         if original_name and original_name != name and old:
             key = creds.get_secret("provider", original_name)
@@ -288,6 +304,7 @@ class Engine:
                 except Exception as e:  # noqa: BLE001 - the plain models are still usable
                     self.emit("toast", level="error", text=f"Could not list Private Mode models: {e}")
             self._models[provider_name] = ids
+            await self._load_caps(prov)
             if not prov.default_model:
                 ids = self._models[provider_name]
                 prov.default_model = next((m for m in ids if re.search(r"claude-opus-5[.-]5", m)), "")
@@ -303,8 +320,84 @@ class Engine:
         out = []
         for m in self._models[provider_name]:
             tier = detect_tier(m, prov.base_url, prov.tier_overrides)
-            out.append({"id": m, "tier": tier, "allowed": tier in allowed})
+            caps = self.caps_for(prov, m) or {}
+            out.append({"id": m, "tier": tier, "allowed": tier in allowed, "vision": self.vision_of(prov, m),
+                        "reasoning": caps.get("reasoning", False), "efforts": caps.get("efforts", [])})
         return out
+
+    # ---------------------------------------------------------------- capabilities, vision, generation
+
+    async def _load_caps(self, prov: Provider) -> None:
+        if not websearch.is_nanogpt(prov.base_url):
+            self._caps.setdefault(prov.name, {})
+            return
+        try:
+            self._caps[prov.name] = await capabilities.fetch_nanogpt(
+                prov.base_url, self._get_secret_safe("provider", prov.name), http=self._caps_http)
+        except Exception as e:  # noqa: BLE001 - models still work; vision is just unknown
+            self._caps.setdefault(prov.name, {})
+            self.emit("toast", level="error", text=f"Could not read model capabilities from {prov.name}: {e}")
+
+    def _schedule_caps(self, prov: Provider) -> None:
+        if prov.name in self._caps or (prov.name in self._caps_tasks and not self._caps_tasks[prov.name].done()):
+            return
+
+        async def run():
+            await self._load_caps(prov)
+            self._changed()
+        self._caps_tasks[prov.name] = asyncio.create_task(run())
+
+    def caps_for(self, prov: Provider, model: str) -> dict | None:
+        return capabilities.lookup(self._caps.get(prov.name, {}), model)
+
+    def vision_of(self, prov: Provider, model: str) -> bool | None:
+        """True/False, or None when nobody knows (non-NanoGPT providers without an override)."""
+        override = (prov.vision_overrides or {}).get(model)
+        if override in ("yes", "no"):
+            return override == "yes"
+        if is_training_url(prov.base_url):
+            return False
+        caps = self.caps_for(prov, model)
+        return caps["vision"] if caps else None
+
+    def _vision_helper(self) -> tuple[Provider, str, str] | str:
+        """(provider, model, tier) of the helper that reads images for a text-only model, or
+        the reason there is none."""
+        want = (self.cfg.settings.vision_model or "").strip()
+        if not want or "|" not in want:
+            return "No vision helper model is set (Settings → Model)."
+        pname, model = want.split("|", 1)
+        prov = self.cfg.provider(pname)
+        if not prov:
+            return f"The vision helper's provider {pname} no longer exists."
+        try:
+            tier = self._check_tier(prov, model)
+        except UserError as e:
+            return f"The vision helper {model} isn't allowed here: {e}"
+        if self.vision_of(prov, model) is False:
+            return f"The vision helper {model} can't read images itself."
+        return prov, model, tier
+
+    def vision_status(self) -> dict:
+        """native: the chat model reads images; helper: a vision model describes them for it;
+        none: images can't be used (the UI disables image features)."""
+        prov = self.cfg.provider(self.cfg.active_provider)
+        model = self.cfg.active_model
+        if not prov or not model:
+            return {"mode": "none", "why": "Choose a model first."}
+        vision = self.vision_of(prov, model)
+        if vision:
+            return {"mode": "native", "model": model}
+        helper = self._vision_helper()
+        if isinstance(helper, tuple):
+            return {"mode": "helper", "model": model, "helper": helper[1], "helper_provider": helper[0].name,
+                    "helper_tier": helper[2]}
+        what = (f"{model} can't read images." if vision is False else
+                f"It isn't known whether {model} can read images (mark it under Settings → Providers).")
+        return {"mode": "none", "model": model, "why": f"{what} {helper}"}
+
+    def _params(self, prov: Provider, model: str) -> dict:
+        return params_mod.for_model(self.cfg.settings.generation or {}, self.caps_for(prov, model))
 
     def select_model(self, provider_name: str, model: str) -> None:
         prov = self.cfg.provider(provider_name)
@@ -316,6 +409,7 @@ class Engine:
                                   [r for r in self.cfg.recent_models if r != f"{provider_name}|{model}"])[:8]
         self._save_config(self.cfg)
         self.log("model_selected", provider=provider_name, model=model, tier=self.active_tier())
+        self._schedule_caps(prov)
         self.attestation = None
         if is_private_mode(model):
             self._start_attestation(prov, model)
@@ -427,6 +521,16 @@ class Engine:
             s.search_provider = data["search_provider"]
         if "search_via" in data:
             s.search_via = str(data["search_via"] or "").strip()
+        if "generation" in data:
+            try:
+                s.generation = params_mod.validate(data["generation"] or {})
+            except ValueError as e:
+                raise UserError(str(e)) from e
+        if "vision_model" in data:
+            want = str(data["vision_model"] or "").strip()
+            if want and ("|" not in want or not self.cfg.provider(want.split("|", 1)[0])):
+                raise UserError("The vision helper must be given as provider|model.")
+            s.vision_model = want
         self._save_config(self.cfg)
         self._changed()
 
@@ -472,6 +576,11 @@ class Engine:
     def _attach_case(self) -> None:
         self.sessions.set_transcript_paths(self.case.transcript_path)
         self._req_system_sha, self._req_conv_len, self._img_names = "", 0, {}
+        self._last_turn_error = None
+        try:
+            self._img_desc = json.loads((self.case.dir / "image-descriptions.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self._img_desc = {}
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov and self.cfg.active_model:
             try:
@@ -1114,6 +1223,8 @@ class Engine:
                     "proposal_ran": lambda: f"Ran #{e.get('num')} on {e.get('session_id')}: {e.get('command')}",
                     "proposal_inserted": lambda: f"Inserted #{e.get('num')} on {e.get('session_id')}: {e.get('command')}",
                     "proposal_skipped": lambda: f"Skipped #{e.get('num')}: {e.get('command')}" + (f" ({e.get('note')})" if e.get("note") else ""),
+                    "retry": lambda: f"Retried the last message with {e.get('model')}",
+                    "image_described": lambda: f"Vision helper {e.get('model')} described {e.get('file')}",
                     "proposal_withdrawn": lambda: f"AI withdrew #{e.get('num')}: {e.get('reason', '')}",
                     "web_search": lambda: f"Web search ({e.get('provider')}): {e.get('query')} → {e.get('results')} result(s)",
                     "web_search_declined": lambda: f"Web search declined: {e.get('query')}",
@@ -1293,6 +1404,8 @@ class Engine:
         prov, model, tier = self._require_model()
         if not (message.strip() or results or snippets or images):
             raise UserError("Nothing to send.")
+        if images and self.vision_status()["mode"] == "none":
+            raise UserError(self.vision_status()["why"] + " Images can't be sent.")
         saved_images = self._save_images(images)
         if not self.conv and message.strip():
             self._find_similar(message)
@@ -1406,6 +1519,35 @@ class Engine:
         if self.busy:
             self._turn.cancel()
 
+    @property
+    def can_retry(self) -> bool:
+        """The last message got no complete answer: the request failed, was stopped, or the
+        app closed before a reply came."""
+        return (bool(self.case) and not self.busy and bool(self.conv)
+                and (self.conv[-1].get("role") == "user" or self._last_turn_error is not None))
+
+    def retry(self) -> None:
+        """Send the last message again, with whichever model is selected now. Nothing is added
+        to the conversation: what a failed or stopped attempt left behind is dropped."""
+        if self.busy:
+            raise UserError("The AI is still responding.")
+        if not self.can_retry:
+            raise UserError("The last message was answered; there is nothing to retry.")
+        prov, model, tier = self._require_model()
+        last_user = max(i for i, m in enumerate(self.conv) if m.get("role") == "user")
+        dropped = len(self.conv) - last_user - 1
+        self.conv = self.conv[:last_user + 1]
+        self._req_conv_len = min(self._req_conv_len, len(self.conv))
+        c = self.conv[-1].get("content")
+        if isinstance(c, list) and self.vision_status()["mode"] == "none" and any(p.get("type") == "image_url" for p in c):
+            raise UserError(self.vision_status()["why"] + " The message has an image.")
+        self._last_turn_error = None
+        self.chat.append({"kind": "note", "text": f"Retrying the last message with {model}."})
+        self.log("retry", model=model, tier=tier, dropped_messages=dropped)
+        self.emit("chat", entry=self.chat[-1])
+        self._persist()
+        self._turn = asyncio.create_task(self._run_turn(prov, model, tier))
+
     def _outputs_seen(self) -> dict[str, int]:
         """How many times output from each session has actually been sent to the model."""
         seen: dict[str, int] = {}
@@ -1445,16 +1587,17 @@ class Engine:
                 entry["sealed"] = att.summary
             turn: dict = {}
             nudged = False
+            vision = self.vision_status()
             for _ in range(MAX_TOOL_ROUNDS):
                 system = self._system_prompt()
-                messages = [{"role": "system", "content": system}] + self.conv
+                messages = [{"role": "system", "content": system}] + await self._conv_for_model(vision)
                 tools = prompts.tools(search=self.search_status()["mode"] != "off")
                 start = self._req_conv_len if self._req_conv_len <= len(self.conv) else 0   # 0: context was trimmed
                 sent = self.conv[start:]
                 round_reasoning, round_text = len(entry["reasoning"]), len(entry["text"])
                 in_flight = (system, sent, start, round_reasoning, round_text)
                 result = None
-                async for kind, val in client.stream(model, messages, tools):
+                async for kind, val in client.stream(model, messages, tools, self._params(prov, model)):
                     if kind == "text":
                         entry["text"] += val
                         self.emit("delta", kind="text", text=val)
@@ -1499,13 +1642,15 @@ class Engine:
             self.chat.append(entry)
             self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"],
                      questions=entry.get("questions", []))
+        self._last_turn_error = error
         if error:
-            self.chat.append({"kind": "note", "text": f"AI request {error}"})
+            self.chat.append({"kind": "note", "text": f"AI request {error}", "retry": True})
             self.log("turn_error", error=error)
         if usage:
             self.last_usage = usage
             self.log("usage", model=model, **{k: v for k, v in usage.items() if isinstance(v, int)})
-        self.emit("turn_end", entry=entry, error=error, usage=usage, chat=self.chat)
+        self._turn = None      # finished: can_retry must not see this task as still busy
+        self.emit("turn_end", entry=entry, error=error, usage=usage, chat=self.chat, can_retry=self.can_retry)
         self._queue_changed()
         self._persist()
 
@@ -1693,6 +1838,67 @@ class Engine:
         except OSError as e:
             self.emit("toast", level="error", text=f"Could not write the request log: {e}")
 
+    async def _conv_for_model(self, vision: dict) -> list[dict]:
+        """The conversation as this model may receive it. A model without vision gets each image
+        replaced by the helper's description (made once per image, then reused), or by a note
+        when there is no helper."""
+        if vision["mode"] == "native":
+            return self.conv
+        out = []
+        for m in self.conv:
+            c = m.get("content")
+            if not (isinstance(c, list) and any(p.get("type") == "image_url" for p in c)):
+                out.append(m)
+                continue
+            context = " ".join(p.get("text", "") for p in c if p.get("type") == "text")
+            parts = []
+            for p in c:
+                if p.get("type") != "image_url":
+                    parts.append(p)
+                    continue
+                name = self._image_name(p["image_url"]["url"])
+                if vision["mode"] == "helper":
+                    desc = await self._describe_image(name, p["image_url"]["url"], context)
+                    parts.append({"type": "text", "text": f"[Image {name}. You can't see images, so a vision model "
+                                  f"({desc['model']}) described it:]\n{desc['text']}"})
+                else:
+                    parts.append({"type": "text", "text": f"[Image {name} was attached here, but the current model "
+                                  "can't see images and no vision helper is set.]"})
+            out.append({**m, "content": parts})
+        return out
+
+    async def _describe_image(self, name: str, data_url: str, context: str) -> dict:
+        if name in self._img_desc:
+            return self._img_desc[name]
+        helper = self._vision_helper()
+        if not isinstance(helper, tuple):
+            raise UserError(helper)
+        hprov, hmodel, htier = helper
+        self.emit("delta", kind="tool", name="describe_image")
+        messages = [{"role": "system", "content": prompts.VISION_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": ("The technician's message that came with this image:\n" + context.strip())
+                         if context.strip() else "The technician sent this image without a message."},
+                        {"type": "image_url", "image_url": {"url": data_url}}]}]
+        self.log("sent_to_ai", purpose="describe_image", provider=hprov.name, model=hmodel, tier=htier, file=name)
+        try:
+            text = await self._client(hprov, hmodel).complete(hmodel, messages, self._params(hprov, hmodel))
+        except Exception as e:  # noqa: BLE001
+            self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"error": str(e)})
+            raise UserError(f"The vision helper {hmodel} failed: {e}") from e
+        self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"content": text})
+        desc = {"model": hmodel, "text": text.strip()}
+        self._img_desc[name] = desc
+        for e in self.chat:
+            if e.get("kind") == "user" and name in (e.get("images") or []):
+                e.setdefault("image_notes", {})[name] = desc
+        try:
+            (self.case.dir / "image-descriptions.json").write_text(json.dumps(self._img_desc, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        self.log("image_described", file=name, model=hmodel, chars=len(desc["text"]))
+        return desc
+
     def _log_failed_round(self, in_flight, model: str, tier: str, entry: dict, error: str) -> None:
         if not in_flight:
             return
@@ -1762,7 +1968,7 @@ class Engine:
                     {"role": "user", "content": f"Case: {self.case.name}\n\n" + self._transcript_for_model()}]
         self.log("sent_to_ai", purpose=purpose, provider=prov.name, model=model, tier=tier)
         try:
-            text = await self._client(prov, model).complete(model, messages)
+            text = await self._client(prov, model).complete(model, messages, self._params(prov, model))
         except Exception as e:  # noqa: BLE001
             self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)})
             raise UserError(f"{purpose} request failed: {e}") from e
@@ -1814,7 +2020,7 @@ class Engine:
         messages = [{"role": "system", "content": prompts.REVIEW_PROMPT}, {"role": "user", "content": "\n\n".join(context)}]
         self.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num)
         try:
-            text = await self._client(prov, model).complete(model, messages)
+            text = await self._client(prov, model).complete(model, messages, self._params(prov, model))
         except Exception as e:  # noqa: BLE001
             self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)})
             raise UserError(f"Review request failed: {e}") from e

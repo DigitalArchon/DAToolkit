@@ -39,6 +39,7 @@ def tool_call_stream(args: dict, text="Let's check disk space."):
 class FakeAPI:
     def __init__(self):
         self.responses = []   # queued SSE bodies
+        self.completions = []  # queued texts for non-streaming requests
         self.requests = []    # captured request JSON
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -47,8 +48,13 @@ class FakeAPI:
                 {"id": "anthropic/claude-opus-5.5", "object": "model", "created": 0, "owned_by": "x"},
                 {"id": "TEE/glm-5.3", "object": "model", "created": 0, "owned_by": "x"},
                 {"id": "private/glm-5-3", "object": "model", "created": 0, "owned_by": "x"}]})
-        self.requests.append(json.loads(request.content))
+        body = json.loads(request.content)
+        self.requests.append(body)
         assert request.headers["authorization"] == "Bearer sk-test"
+        if not body.get("stream"):                  # plain completion (write-ups, vision helper)
+            return httpx.Response(200, json={"id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
+                                             "choices": [{"index": 0, "finish_reason": "stop",
+                                                          "message": {"role": "assistant", "content": self.completions.pop(0)}}]})
         return httpx.Response(200, text=self.responses.pop(0), headers={"content-type": "text/event-stream"})
 
 
@@ -56,7 +62,7 @@ class FakeAPI:
 async def env(tmp_path, monkeypatch):
     fake = FakeAPI()
     events = []
-    cfg = Config(providers=[Provider("Fake", BASE)], hosts=[Host("web01", "ssh", "web01.lan", user="bob", auth="password")])
+    cfg = Config(providers=[Provider("Fake", BASE, vision_overrides={"anthropic/claude-opus-5.5": "yes"})], hosts=[Host("web01", "ssh", "web01.lan", user="bob", auth="password")])
     engine = Engine(cfg, events.append, tmp_path / "rt", save_config=lambda c: None)
     http = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
     monkeypatch.setattr(engine, "_client", lambda prov, model="": LLMClient(prov.base_url, creds.get_secret("provider", prov.name), http))
