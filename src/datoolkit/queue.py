@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 
 from .safety import risk
+from .safety.sensitive import sensitive
 
 # pending -> ran | inserted | skipped -> sent; pending -> withdrawn (the AI took it back)
 STATUSES = ("pending", "ran", "inserted", "skipped", "sent", "withdrawn")
@@ -33,6 +34,8 @@ class Proposal:
     watch: bool = False                  # command was wrapped in a bounded watch loop
     cuts_session: str = ""               # local rule: this would cut the session it runs in
     dry_run_of: int | None = None        # this item rehearses another item
+    sensitive: list[str] = field(default_factory=list)  # local rules: may expose secrets or private data
+    review: dict = field(default_factory=dict)          # second opinion on this exact command (see Engine)
 
     @property
     def edited(self) -> bool:
@@ -95,6 +98,8 @@ class Queue:
             # a rehearsal (apt -s, rsync -n, -WhatIf, plan) trips the same local rules as the
             # real command; it is read-only by construction, but never below disruptive
             p.risk, p.risk_reasons = "read_only", []
+        p.sensitive = sensitive(p.command)
+        p.review = {}                    # a review was of the old command or target
         cut = risk.session_impact(p.command, (session_kinds or {}).get(p.session_id, "local"))
         p.cuts_session = cut or ""
         if cut:
@@ -162,6 +167,9 @@ class Queue:
         q = cls()
         known = {f.name for f in fields(Proposal)}
         for d in items:
-            q.items.append(Proposal(**{k: v for k, v in d.items() if k in known}))
+            p = Proposal(**{k: v for k, v in d.items() if k in known})
+            if p.review.get("status") == "checking":
+                p.review = {}            # the app closed while it was being reviewed
+            q.items.append(p)
         q._next = max((p.num for p in q.items), default=0) + 1
         return q

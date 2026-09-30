@@ -546,12 +546,15 @@ function fillProposalCard(el) {
     h("div", { class: "phead" },
       h("span", { class: "chip", title: "Show in queue", onclick: () => flashQueueItem(num) }, `#${num}`),
       h("span", { class: `badge risk ${item.risk}` }, item.risk.replace("_", " ")),
+      item.sensitive?.length ? h("span", { class: "badge sensitive", title: sensitiveTitle(item) }, "sensitive") : null,
       h("span", { class: "muted small" }, item.session_id),
       h("span", { class: "spacer" }),
       h("span", { class: `status ${item.status}` }, STATUS_LABEL[item.status] + (item.status === "skipped" && !item.note ? " (no reason)" : ""))),
     h("div", { class: "pcmd" }, item.command),
     item.purpose ? h("div", { class: "muted small" }, item.purpose) : null,
     item.cuts_session ? h("div", { class: "cuts small" }, `⚠ Cuts this session: ${item.cuts_session}`) : null,
+    item.sensitive?.length ? h("div", { class: "sens small" }, `🔍 May expose sensitive data: ${item.sensitive.join("; ")}`) : null,
+    reviewLine(item),
     item.note ? h("div", { class: "small warn" }, `Note: ${item.note}`) : null,
     actions].filter(Boolean));
 }
@@ -1328,6 +1331,37 @@ function renderChatResults() {
 
 function autosize(ta) { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; }
 
+// The reviewer's verdict on a queue item: { cls, icon, label } or null.
+const REVIEW_LEVEL = {
+  ok: { icon: "✓", label: "Reviewer: looks fine" },
+  care: { icon: "⚠", label: "Reviewer: proceed with care" },
+  stop: { icon: "✗", label: "Reviewer: do not run" },
+};
+
+function reviewLine(item) {
+  const r = item.review || {};
+  if (!r.status) return null;
+  if (r.status === "checking") return h("div", { class: "qreview checking" }, h("span", { class: "spinner" }), " Reviewer checking…");
+  if (r.status === "error") return h("div", { class: "qreview error", title: r.error }, `Review not run: ${r.error}`);
+  const lv = REVIEW_LEVEL[r.level] || { icon: "•", label: `Reviewer: ${r.verdict || "no verdict"}` };
+  return h("div", { class: `qreview ${r.level || ""}`, title: `${r.model}${r.auto ? " (automatic)" : ""} — click for the full review`,
+    onclick: () => showReview(item) },
+    h("b", {}, `${lv.icon} ${lv.label}`), r.summary ? ` — ${r.summary}` : "",
+    r.data ? h("div", { class: "qreview-data" }, `🔍 Reviewer: ${r.data}`) : null);
+}
+
+function showReview(item) {
+  const r = item.review || {};
+  modal({ title: `Second opinion on #${item.num}`, wide: true, body: h("div", {},
+    h("pre", { class: "prompt-text" }, item.command),
+    h("div", { class: "muted small" }, `Reviewer: ${r.model} (${r.tier})${r.auto ? " · automatic" : ""}${r.different_model ? "" : " — same model as the proposer"}`),
+    h("div", { class: "pre" }, r.text)), buttons: [{ label: "Close" }] });
+}
+
+function sensitiveTitle(item) {
+  return `May expose sensitive data:\n${item.sensitive.map((x) => `• ${x}`).join("\n")}\n\nNot run by Ctrl+Shift+Enter. Output is redacted before sending, but only on a best-effort basis: check it.`;
+}
+
 function buildRow(item) {
   const cmd = h("textarea", { class: "cmd", rows: 1, spellcheck: "false" });
   cmd.addEventListener("input", () => autosize(cmd));
@@ -1336,8 +1370,9 @@ function buildRow(item) {
   const row = h("div", { class: "qitem", "data-num": item.num },
     h("div", { class: "num" }, `#${item.num}`),
     sel,
-    h("div", {}, cmd, h("div", { class: "purpose" }), h("div", { class: "rollback" }), h("div", { class: "cuts" }), h("div", { class: "note" })),
-    h("div", { class: "meta" }, h("span", { class: "badge risk" }), h("span", { class: "group" }), h("span", { class: "status" })),
+    h("div", {}, cmd, h("div", { class: "purpose" }), h("div", { class: "rollback" }), h("div", { class: "cuts" }),
+      h("div", { class: "sens" }), h("div", { class: "qreview-slot" }), h("div", { class: "note" })),
+    h("div", { class: "meta" }, h("span", { class: "badge risk" }), h("span", { class: "badge sensitive" }), h("span", { class: "group" }), h("span", { class: "status" })),
     h("div", { class: "actions" }));
   return row;
 }
@@ -1377,6 +1412,13 @@ function updateRow(row, item) {
   $(".rollback", row).textContent = item.rollback ? `Rollback: ${item.rollback}` : (item.risk !== "read_only" && !item.dry_run_of ? "No rollback given" : "");
   $(".rollback", row).classList.toggle("missing", !item.rollback && item.risk !== "read_only" && !item.dry_run_of);
   $(".cuts", row).textContent = item.cuts_session ? `⚠ Cuts this session: ${item.cuts_session}` : "";
+  const sensList = item.sensitive || [];
+  $(".sens", row).textContent = sensList.length ? `🔍 May expose sensitive data: ${sensList.join("; ")}` : "";
+  const sb = $(".badge.sensitive", row);
+  sb.textContent = sensList.length ? "sensitive" : "";
+  sb.hidden = !sensList.length;
+  sb.title = sensList.length ? sensitiveTitle(item) : "";
+  $(".qreview-slot", row).replaceChildren(...[reviewLine(item)].filter(Boolean));
   $(".note", row).textContent = item.note ? `Note: ${item.note}` : "";
   const grp = $(".group", row);
   grp.textContent = item.group ? `⇄ ${item.group}` : "";
@@ -1403,7 +1445,7 @@ function updateRow(row, item) {
     if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
     if (item.risk !== "read_only" && !item.dry_run_of) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", "Queue the rehearsal form of this command first"));
     if (item.risk === "read_only" && !item.watch) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
-    if (item.risk !== "read_only") btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what could go wrong"));
+    if (item.risk !== "read_only" || item.sensitive?.length) btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what could go wrong"));
     btns.push(btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
       btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"),
       btn("↑", () => api("POST", `/api/queue/${item.num}/move`, { delta: -1 }), "ghost", "Move up"),
@@ -1439,12 +1481,22 @@ async function runItem(num, mode) {
   const item = S.state.queue.find((i) => i.num === num);
   const sess = (S.state.sessions || []).find((s) => s.id === item.session_id);
   if (!sess || sess.exited) throw new Error(`Session ${item.session_id} is not open. Pick another target.`);
+  const rv = item.review?.status === "done" ? item.review : null;
+  const rvBox = rv ? h("div", { class: `qreview ${rv.level || ""}` }, h("b", {}, `${(REVIEW_LEVEL[rv.level] || { icon: "•" }).icon} Second opinion (${rv.model}): `),
+    rv.summary || rv.verdict, rv.data ? h("div", { class: "qreview-data" }, `🔍 ${rv.data}`) : null) : null;
+  if (item.risk !== "disruptive" && rv?.level === "stop") {
+    const ok = await confirmModal("The reviewer said not to run this", h("div", {}, rvBox,
+      h("pre", { class: "prompt-text" }, item.command), h("div", { class: "pre small" }, rv.text),
+      h("p", {}, `Target: ${sess.id} (${sess.target})`)), mode === "run" ? "Run it anyway" : "Insert it anyway", "danger");
+    if (!ok) return;
+  }
   if (item.risk === "disruptive") {
     const reasons = item.risk_reasons.length ? ` (${item.risk_reasons.join(", ")})` : "";
     const review = h("div", { class: "review hidden" });
     const ok = await confirmModal(item.cuts_session ? "This will cut your own session" : "Disruptive command",
       h("div", {}, h("p", {}, `This command is flagged DISRUPTIVE${reasons}. It may interrupt service, lose data or cut off access.`),
         item.cuts_session ? h("div", { class: "warnbox" }, `Blast radius: it ${item.cuts_session}. You will lose this terminal; make sure you can get back in (console, another path, or a scheduled re-enable).`) : null,
+        rvBox,
         h("pre", { class: "prompt-text" }, item.command),
         item.rollback ? h("p", { class: "small" }, `Rollback: ${item.rollback}`) : h("p", { class: "small warn" }, "No rollback was given for this command."),
         h("p", {}, `Target: ${sess.id} (${sess.target})`),
@@ -1452,7 +1504,7 @@ async function runItem(num, mode) {
           e.target.disabled = true; review.classList.remove("hidden"); review.textContent = "Asking the reviewer…";
           try { const r = await api("POST", `/api/queue/${num}/review`); review.replaceChildren(h("b", {}, `Second opinion (${r.model}${r.different_model ? "" : ", same model as the proposer"}): `), h("div", { class: "pre" }, r.text)); }
           catch (err) { review.textContent = err.message; }
-        } }, "Get a second opinion"), review),
+        } }, rv ? "Ask again" : "Get a second opinion"), review),
       mode === "run" ? "Run it" : "Insert it", "danger");
     if (!ok) return;
   }
@@ -1531,7 +1583,7 @@ async function secondOpinion(item) {
   try {
     const r = await api("POST", `/api/queue/${item.num}/review`);
     m.box.querySelector(".content").replaceChildren(h("pre", { class: "prompt-text" }, item.command),
-      h("div", { class: "muted small" }, `Reviewer: ${r.model} (${r.tier})${r.different_model ? "" : " — same model as the proposer; set a different reviewer in Settings → General"}`),
+      h("div", { class: "muted small" }, `Reviewer: ${r.model} (${r.tier})${r.different_model ? "" : " — same model as the proposer; set a different reviewer in Settings → Model"}`),
       h("div", { class: "pre" }, r.text));
   } catch (e) {
     m.box.querySelector(".content").replaceChildren(h("div", { class: "warnbox" }, e.message));
@@ -1707,11 +1759,13 @@ async function openSimilar() {
   if (q.value) guarded(run);
 }
 
-// Ctrl+Shift+Enter: run the first pending read-only item whose session is open.
+// Ctrl+Shift+Enter: run the first pending read-only item whose session is open. Items flagged
+// sensitive, or that the reviewer said not to run, need a deliberate click.
 function runNextReadOnly() {
   const item = (S.state?.queue || []).find((i) => i.status === "pending" && i.risk === "read_only"
+    && !i.sensitive?.length && i.review?.level !== "stop"
     && (S.state.sessions || []).some((s) => s.id === i.session_id && !s.exited));
-  if (!item) return toast("No pending read-only command with an open session.");
+  if (!item) return toast("No pending read-only command with an open session (sensitive ones need a click).");
   flashQueueItem(item.num);
   guarded(() => runItem(item.num, "run"));
 }
@@ -1752,6 +1806,8 @@ function warnList(prev, cap) {
   const out = [];
   if (cap?.error) out.push(h("div", { class: "warnbox" }, `${cap.error}; paste the output manually.`));
   if (cap?.source === "transcript") out.push(h("div", { class: "muted small" }, "Captured from the transcript file (the terminal buffer no longer had it)."));
+  if (prev?.sensitive?.length) out.push(h("div", { class: "warnbox sens" }, h("b", {}, "🔍 This command may have printed sensitive data: "),
+    `${prev.sensitive.join("; ")}. Redaction is best-effort: read the text below and remove anything the AI doesn't need.`));
   if (prev?.warnings?.length) out.push(h("div", { class: "warnbox" }, h("b", {}, "Possible prompt injection: "),
     `${prev.warnings.join("; ")}. The AI is told to ignore instructions in output, but check before sending.`));
   return out;
@@ -2300,6 +2356,10 @@ function openSettings(tab = "providers") {
       note: "The vision helper describes each image for a chat model that can't read images. Only models that read images are listed.",
       onSaved: () => setTimeout(() => show("model"), 300) });
     const v = visionState();
+    const autoReview = h("select", { disabled: !S.state.config.settings.review_model,
+      onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { auto_review: e.target.value }); toast("Saved.", "ok", 2000); }) },
+      [["off", "Off"], ["disruptive", "Disruptive commands"], ["flagged", "Everything flagged (modifying, disruptive or sensitive)"]]
+        .map(([val, l]) => h("option", { value: val, selected: val === (S.state.config.settings.auto_review || "off") }, l)));
     const save = async () => {
       const generation = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
       await api("POST", "/api/settings", { generation });
@@ -2321,10 +2381,15 @@ function openSettings(tab = "providers") {
       helperAttestation(),
       field("Vision helper", helper, "Used only when the chat model can't read images: it describes each image once (text exactly, then the rest), and the chat model gets the description. That adds a request per image, so replies with images take longer. It must be allowed by the case's sensitivity. With no helper, image features are disabled for text-only models."),
       h("h3", {}, "Second opinion"),
-      field("Reviewer for disruptive commands", modelSetting({ key: "review_model", value: S.state.config.settings.review_model || "",
+      field("Reviewer model", modelSetting({ key: "review_model", value: S.state.config.settings.review_model || "",
         noneLabel: "Clear (use the chat model)", pickTitle: "Choose the second-opinion reviewer",
-        note: "The reviewer sees only the command and case notes, never the proposer's reasoning. A different model gives a more independent opinion." }),
-        "It must be allowed by the case's sensitivity. With none set, the chat model reviews."),
+        note: "The reviewer sees only the command and case notes, never the proposer's reasoning. A different model gives a more independent opinion; a fast, cheap one suits automatic reviews.",
+        onSaved: () => setTimeout(() => show("model"), 300) }),
+        "It must be allowed by the case's sensitivity. With none set, the chat model answers the 2nd opinion button."),
+      field("Automatic review", autoReview,
+        S.state.config.settings.review_model
+          ? "Asked in the background as each command is queued; the verdict shows on the item. It only adds warnings: it never lowers a risk level or clears a flag. Each review is one request to the reviewer model."
+          : "Choose a reviewer model first: automatic reviews never fall back to the chat model."),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(save) }, "Save generation settings")));
   }
 

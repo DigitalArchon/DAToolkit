@@ -12,12 +12,13 @@ from .config import data_dir
 from .safety import risk
 from .safety.inject import suspicious
 from .safety.redact import redact
+from .safety.sensitive import sensitive
 
 
 def replay_case(case_dir: Path) -> dict:
     events = case_dir / "events.jsonl"
-    out = {"case": case_dir.name, "proposals": 0, "risk_changes": [], "session_cuts": [], "redaction_changes": [],
-           "injection_flags": []}
+    out = {"case": case_dir.name, "proposals": 0, "risk_changes": [], "session_cuts": [], "sensitive_flags": [],
+           "redaction_changes": [], "injection_flags": []}
     if not events.exists():
         return out
     kinds: dict[str, str] = {}
@@ -38,6 +39,9 @@ def replay_case(case_dir: Path) -> dict:
             cut = risk.session_impact(e.get("command", ""), kinds.get(e.get("session_id", ""), "local"))
             if cut and not e.get("cuts_session"):
                 out["session_cuts"].append({"num": e.get("num"), "command": e.get("command"), "reason": cut})
+            flags = sensitive(e.get("command", ""))
+            if flags and not e.get("sensitive"):
+                out["sensitive_flags"].append({"num": e.get("num"), "command": e.get("command"), "reasons": flags})
         elif ev == "sent_to_ai" and e.get("content"):
             content = e["content"]
             _, n = redact(content)
@@ -61,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(reports, sys.stdout, indent=1)
         return 0
     total = sum(r["proposals"] for r in reports)
-    changed = [r for r in reports if r["risk_changes"] or r["session_cuts"] or r["redaction_changes"] or r["injection_flags"]]
+    changed = [r for r in reports if r["risk_changes"] or r["session_cuts"] or r["sensitive_flags"]
+               or r["redaction_changes"] or r["injection_flags"]]
     print(f"{len(reports)} case(s), {total} proposal(s); {len(changed)} case(s) would differ under current rules.")
     for r in changed:
         print(f"\n== {r['case']}")
@@ -69,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  risk   #{c['num']}: {c['was']} -> {c['now']}  {c['command']}  ({', '.join(c['reasons'])})")
         for c in r["session_cuts"]:
             print(f"  cuts   #{c['num']}: {c['reason']}  {c['command']}")
+        for c in r["sensitive_flags"]:
+            print(f"  sens   #{c['num']}: {c['command']}  ({', '.join(c['reasons'])})")
         for c in r["redaction_changes"]:
             print(f"  redact: a message sent to the AI would now get {c['new_redactions']} more redaction(s)")
         for c in r["injection_flags"]:

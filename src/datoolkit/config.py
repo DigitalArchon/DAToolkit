@@ -63,6 +63,9 @@ class Settings:
     context_warn_tokens: int = 100000
     # "provider|model" used for second opinions on disruptive commands; empty = the active model
     review_model: str = ""
+    # second opinions asked automatically when a command is queued (needs review_model):
+    # "off", "disruptive", or "flagged" (anything not plain read-only: modifying, disruptive or sensitive)
+    auto_review: str = "off"
     # AI web searches through NanoGPT: "ask" (approve each), "auto" (Open cases only), "off"
     search_mode: str = "ask"
     search_provider: str = "kagi"

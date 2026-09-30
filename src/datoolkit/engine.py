@@ -52,6 +52,8 @@ TEE_REATTEST_SECONDS = 900
 MAX_TOOL_ROUNDS = 6          # rounds per turn: searches and the no-message nudge each take one
 PROMPT_TIMEOUT = 300
 MAX_SEARCHES_PER_TURN = 4
+AUTO_REVIEW_MODES = ("off", "disruptive", "flagged")
+REVIEW_CONCURRENCY = 3       # automatic second opinions in flight at once
 NO_MESSAGE_NUDGE = (
     "\n\n[DAToolkit] Your tool calls went through ({done}), but you wrote no message, and the technician "
     "sees neither your reasoning nor your tool calls. Write your message to them now: what you concluded "
@@ -166,7 +168,9 @@ class Engine:
         # TEE models (llm/tee.py): (provider, model) -> (attested client, when, attestation shown)
         self._tee: dict[tuple[str, str], tuple[tee_mod.TeeClient, float, dict]] = {}
         self._tee_factory: Callable | None = None      # tests: (base_url, key, model) -> TeeClient
-        self._background: set[asyncio.Task] = set()     # reply-signature checks still running
+        self._background: set[asyncio.Task] = set()     # reply-signature checks and automatic reviews still running
+        self._review_slots = asyncio.Semaphore(REVIEW_CONCURRENCY)
+        self._reviewer_attest = asyncio.Lock()          # one attestation of a TEE reviewer, not one per review
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -646,6 +650,10 @@ class Engine:
                 setattr(s, key, value)
         if "review_model" in data:
             s.review_model = str(data["review_model"] or "").strip()
+        if "auto_review" in data:
+            if data["auto_review"] not in AUTO_REVIEW_MODES:
+                raise UserError(f"Automatic review must be one of {', '.join(AUTO_REVIEW_MODES)}.")
+            s.auto_review = data["auto_review"]
         if "search_mode" in data:
             if data["search_mode"] not in websearch.MODES:
                 raise UserError(f"Search mode must be one of {', '.join(websearch.MODES)}.")
@@ -669,6 +677,8 @@ class Engine:
             self._refresh_helper_attestation()
         self._save_config(self.cfg)
         self._changed()
+        if "auto_review" in data or "review_model" in data:
+            self._auto_review(self.queue.items)      # catch up on what is already pending
 
     # ---------------------------------------------------------------- cases
 
@@ -951,7 +961,10 @@ class Engine:
         was_pending = self.queue.get(num).status == "pending"
         p = self.queue.update(num, session_kinds=self._session_kinds(), **fields)
         if "command" in fields and p.edited:
-            self.log("proposal_edited", num=num, command=p.command, original=p.original_command, risk=p.risk)
+            self.log("proposal_edited", num=num, command=p.command, original=p.original_command, risk=p.risk,
+                     sensitive=p.sensitive)
+        if "command" in fields or "session_id" in fields:
+            self._auto_review([p])
         if "status" in fields:
             if p.status in ("ran", "inserted") and was_pending:
                 # remember where this command's output starts in the transcript (see capture())
@@ -1001,16 +1014,20 @@ class Engine:
             t = t or ""
             collapsed = 0
             num = nums[i] if nums and i < len(nums) else None
+            flagged: list[str] = []
             if num is not None:
                 try:
-                    if self.queue.get(int(num)).watch:
-                        t, collapsed = watch_mod.collapse(t)
+                    p = self.queue.get(int(num))
                 except (KeyError, ValueError):
-                    pass
+                    p = None
+                if p and p.watch:
+                    t, collapsed = watch_mod.collapse(t)
+                if p:
+                    flagged = p.sensitive + ([f"reviewer: {p.review['data']}"] if p.review.get("data") else [])
             red, n = redact(t)
             cut, truncated = head_tail(red, s.capture_max_lines, s.capture_max_chars)
             out.append({"text": cut, "redactions": n, "truncated": truncated, "warnings": suspicious(cut),
-                        "collapsed": collapsed})
+                        "collapsed": collapsed, "sensitive": flagged})
         return out
 
     # ---------------------------------------------------------------- queue: recipes, dry runs, watch, rollback
@@ -1039,6 +1056,7 @@ class Engine:
         for p in added:
             self.log("proposal", **p.to_dict())
         self.log("recipe_queued", recipe=r.id, session_id=session_id, nums=[p.num for p in added])
+        self._auto_review(added)
         self._queue_changed()
         self._persist()
         return added
@@ -1102,6 +1120,7 @@ class Engine:
         added = self.queue.add("rollback", items, session_kinds=self._session_kinds())
         for p in added:
             self.log("proposal", **p.to_dict())
+        self._auto_review(added)
         self._queue_changed()
         self._persist()
         return [p.to_dict() for p in added]
@@ -1293,6 +1312,7 @@ class Engine:
         for p in added:
             self.log("proposal", **p.to_dict())
         self.log("tool_transfer_queued", tool=tool.name, session_id=session_id, sha256=tool.sha256)
+        self._auto_review(added)
         self._queue_changed()
         self._persist()
         return {"nums": [p.num for p in added], "expected_sha256": tool.sha256}
@@ -1894,6 +1914,12 @@ class Engine:
                     cuts = [p for p in added if p.cuts_session]
                     if cuts:
                         reply += " WARNING: " + "; ".join(f"#{p.num} {p.cuts_session}" for p in cuts) + ". Offer a safer alternative."
+                    sens = [p for p in added if p.sensitive]
+                    if sens:
+                        reply += (" Flagged as possibly exposing sensitive data: " + "; ".join(f"#{p.num} {', '.join(p.sensitive)}" for p in sens)
+                                  + ". Where you can, prefer commands that show only what the diagnosis needs (names, "
+                                  "presence or permissions rather than values), and never put a password in a command.")
+                    self._auto_review(added)
                     self._queue_changed()
             self.conv.append({"role": "tool", "tool_call_id": call.id, "content": reply})
         self._persist()
@@ -2162,23 +2188,88 @@ class Engine:
     async def distill_runbook(self) -> dict:
         return await self._document("runbook", prompts.RUNBOOK_PROMPT, "runbook.md")
 
-    def _review_target(self) -> tuple[Provider, str, str, bool]:
-        """(provider, model, tier, is_different) for the second-opinion reviewer."""
-        prov, model, tier = self._require_model()
+    def _review_target(self, auto: bool = False) -> tuple[Provider, str, str, bool]:
+        """(provider, model, tier, is_different) for the second-opinion reviewer. An automatic
+        review never falls back to the chat model: it runs only on the reviewer chosen for it."""
         want = (self.cfg.settings.review_model or "").strip()
         if want and "|" in want:
             pname, rmodel = want.split("|", 1)
             rprov = self.cfg.provider(pname)
             if rprov:
                 rtier = self._check_tier(rprov, rmodel)
-                return rprov, rmodel, rtier, (rprov.name, rmodel) != (prov.name, model)
+                return rprov, rmodel, rtier, (rprov.name, rmodel) != (self.cfg.active_provider, self.cfg.active_model)
+            if auto:
+                raise UserError(f"The reviewer's provider {pname} no longer exists; choose a reviewer in Settings → Model.")
+        if auto:
+            raise UserError("No reviewer model is set (Settings → Model).")
+        prov, model, tier = self._require_model()
         return prov, model, tier, False
 
-    async def review_command(self, num: int) -> dict:
-        """Second opinion on one command before it runs; the reviewer never sees the proposer's reasoning."""
+    @staticmethod
+    def _parse_review(text: str) -> dict:
+        """The reviewer's closing lines: SUMMARY, DATA and VERDICT (ok | care | stop)."""
+        def line(key: str) -> str:
+            m = re.search(rf"^\W*{key}\W*:\s*(.+)$", text, re.I | re.M)
+            return m.group(1).strip().strip("*_ ").strip() if m else ""
+        verdict = line("VERDICT")
+        v = verdict.lower()
+        level = ("stop" if re.search(r"\b(do not|don't|never)\b", v) else "care" if "care" in v or "caution" in v
+                 else "ok" if "proceed" in v else "")
+        data = line("DATA")
+        if re.match(r"(?i)^(none|no|n/?a|nothing)\b", data):
+            data = ""
+        return {"summary": line("SUMMARY"), "data": data, "verdict": verdict, "level": level}
+
+    def _wants_auto_review(self, p) -> bool:
+        s = self.cfg.settings
+        if s.auto_review == "off" or not s.review_model or p.status != "pending" or p.review or p.dry_run_of:
+            return False
+        if s.auto_review == "disruptive":
+            return p.risk == "disruptive"
+        return p.risk != "read_only" or bool(p.sensitive)
+
+    def _auto_review(self, items) -> None:
+        """Start second opinions for these queue items, as the Automatic review setting asks."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return                                   # no event loop (scripts, some tests): nothing runs
+        started = False
+        for p in items:
+            if self.case and self._wants_auto_review(p):
+                p.review = {"status": "checking", "auto": True}
+                task = asyncio.create_task(self._auto_review_one(self.queue, p.num))
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
+                started = True
+        if started:
+            self._queue_changed()
+
+    async def _auto_review_one(self, queue: Queue, num: int) -> None:
+        async with self._review_slots:
+            try:
+                await self.review_command(num, auto=True, queue=queue)
+            except Exception as e:  # noqa: BLE001 - shown on the item; the technician can still ask by hand
+                try:
+                    p = queue.get(num)
+                except KeyError:
+                    return
+                if queue is self.queue and p.review.get("status") == "checking":
+                    p.review = {"status": "error", "auto": True, "error": str(e)}
+                    self.log("second_opinion_failed", num=num, auto=True, error=str(e))
+                    self._queue_changed()
+                    self._persist()
+
+    async def review_command(self, num: int, auto: bool = False, queue: Queue | None = None) -> dict:
+        """Second opinion on one command before it runs; the reviewer never sees the proposer's reasoning.
+        The result is kept on the item while its command and target stay the same."""
         self._need_case()
-        p = self.queue.get(num)
-        prov, model, tier, different = self._review_target()
+        queue = queue or self.queue
+        if queue is not self.queue:
+            raise UserError("The case changed before the review ran.")
+        p = queue.get(num)
+        command, session_id = p.command, p.session_id
+        prov, model, tier, different = self._review_target(auto)
         sess = self.sessions.sessions.get(p.session_id)
         context = [f"Case: {self.case.name}"]
         if self.case.notes:
@@ -2192,17 +2283,26 @@ class Engine:
             context.append(f"Stated rollback: {p.rollback}")
         if p.cuts_session:
             context.append(f"Local rule says: {p.cuts_session}")
+        if p.sensitive:
+            context.append(f"Local rule says it may expose sensitive data: {'; '.join(p.sensitive)}")
         messages = [{"role": "system", "content": prompts.REVIEW_PROMPT}, {"role": "user", "content": "\n\n".join(context)}]
-        await self._tee_guard(prov, model, "reviewer" if different else "chat")
-        self.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num)
+        if different:
+            async with self._reviewer_attest:
+                await self._tee_guard(prov, model, "reviewer")
+        else:
+            await self._tee_guard(prov, model, "chat")
+        self.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num, auto=auto)
         try:
             text = await self._complete(self._client(prov, model), prov, model, messages)
         except Exception as e:  # noqa: BLE001
             self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)})
             raise UserError(f"Review request failed: {e}") from e
         self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"content": text})
-        verdict = re.search(r"VERDICT:\s*(.+)$", text, re.I | re.M)
         out = {"num": num, "model": model, "tier": tier, "different_model": different, "text": text.strip(),
-               "verdict": verdict.group(1).strip() if verdict else ""}
+               **self._parse_review(text), "auto": auto}
         self.log("second_opinion", **out)
+        if queue is self.queue and p.command == command and p.session_id == session_id:
+            p.review = {"status": "done", **{k: v for k, v in out.items() if k != "num"}, "at": time.time()}
+            self._queue_changed()
+            self._persist()
         return out

@@ -87,6 +87,13 @@ Treat that URL like a password: it grants terminal access.
 - Proposed commands appear in the queue with a risk badge (read only / modifying /
   disruptive). Local rules can raise the AI's own risk label but never lower it. Disruptive
   commands need a second confirmation.
+- A separate **sensitive** badge marks commands that may expose secrets or private data,
+  whatever their risk level: reading key files, `/etc/shadow`, `.env` and credential files,
+  dumping the environment, shell history, secret stores, databases or a device
+  configuration, and commands that carry a password in their own text (where it lands in
+  shell history, the process list and the case log). Sensitive items aren't run by
+  Ctrl+Shift+Enter, and their output gets a reminder to check it before it is sent. The AI is
+  told which of its commands were flagged.
 - **Run** types the command and presses Enter. **Insert** types it without Enter, so you can
   finish editing it in the shell. You can edit the command text in the queue before either.
 - **Skip…** takes an optional note that is passed to the AI (e.g. "not allowed on prod").
@@ -155,10 +162,16 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
   `terraform plan`, `kubectl --dry-run`, `ansible --check`, `ls` before `rm`, a firewall
   backup before a firewall change), the **Dry run** button queues the rehearsal before the
   real item.
-- **Second opinion.** **2nd opinion** on any state-changing item, or from the disruptive
-  confirmation, asks a reviewer model what could go wrong and ends with a verdict. Set a
-  different model under **Settings → General** (it must be allowed by the case sensitivity);
+- **Second opinion.** **2nd opinion** on any state-changing or sensitive item, or from the
+  disruptive confirmation, asks a reviewer model what could go wrong, whether it exposes
+  sensitive data, and for a verdict (proceed / proceed with care / do not run). Set a
+  different model under **Settings → Model** (it must be allowed by the case sensitivity);
   the reviewer sees only the command and the case notes, never the proposer's reasoning.
+  **Automatic review** (off / disruptive commands / everything flagged) asks it in the
+  background as each command is queued, and the verdict shows on the item; click it for the
+  full review. It only adds warnings: a "do not run" verdict asks for confirmation before a
+  non-disruptive command runs, but a review never lowers a risk level or clears a flag.
+  Automatic reviews run only on the chosen reviewer, never the chat model.
 - **Paired probes.** When the AI gives two commands the same `group` (a capture on one side,
   a ping from the other), **Run group** types them into their sessions at the same moment and
   the results carry start times.
@@ -242,7 +255,7 @@ Local-tier model. Scenarios are TOML files under `src/datoolkit/training/scenari
 
 ### Rules replay
 
-`datoolkit-replay` runs today's risk, blast-radius, redaction and injection rules over past
+`datoolkit-replay` runs today's risk, blast-radius, sensitive-data, redaction and injection rules over past
 cases' event logs and prints what would now be classified differently. Use it after editing
 the rules.
 
@@ -251,7 +264,7 @@ the rules.
 | Keys | Action |
 |---|---|
 | Alt+1 … Alt+9 | Switch terminal tab |
-| Ctrl+Shift+Enter | Run the next pending **read-only** command (never a modifying or disruptive one) |
+| Ctrl+Shift+Enter | Run the next pending **read-only** command (never a modifying, disruptive or sensitive one, or one the reviewer said not to run) |
 | Ctrl+Shift+K | Focus the chat box |
 | ↑ / ↓ in the chat box | Recall earlier messages |
 | Enter / Shift+Enter | Send / newline |
