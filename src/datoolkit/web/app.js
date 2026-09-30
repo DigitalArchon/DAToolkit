@@ -1053,8 +1053,10 @@ function redactImage(dataUrl, title = "Black out anything sensitive, then attach
       const rects = [];
       let drag = null, result = null;
       const draw = () => {
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
         ctx.drawImage(img, 0, 0);
-        ctx.fillStyle = "#000";
+        ctx.fillStyle = "#000";                 // opaque black painted INTO the one bitmap: no layers
         for (const b of rects) ctx.fillRect(b.x, b.y, b.w, b.h);
         if (drag) {
           ctx.fillRect(drag.x, drag.y, drag.w, drag.h);
@@ -1075,8 +1077,14 @@ function redactImage(dataUrl, title = "Black out anything sensitive, then attach
         Object.assign(drag, { x: Math.min(drag.x0, p.x), y: Math.min(drag.y0, p.y), w: Math.abs(p.x - drag.x0), h: Math.abs(p.y - drag.y0) });
         draw();
       };
+      // Snap outwards to whole pixels: a fractional box would be anti-aliased, leaving its
+      // edge pixels only partly black, with a trace of what was under them.
+      const snap = (b) => {
+        const x = Math.floor(b.x), y = Math.floor(b.y);
+        return { x, y, w: Math.min(canvas.width, Math.ceil(b.x + b.w)) - x, h: Math.min(canvas.height, Math.ceil(b.y + b.h)) - y };
+      };
       const up = () => {
-        if (drag && drag.w > 2 && drag.h > 2) rects.push({ x: drag.x, y: drag.y, w: drag.w, h: drag.h });
+        if (drag && drag.w > 2 && drag.h > 2) rects.push(snap(drag));
         drag = null;
         draw();
       };
@@ -1093,6 +1101,7 @@ function redactImage(dataUrl, title = "Black out anything sensitive, then attach
           { label: "Clear", onClick: () => { rects.length = 0; draw(); return true; } },
           { label: "Cancel" },
           { label: "Attach", kind: "primary", onClick: () => { drag = null; draw(); result = canvas.toDataURL("image/png"); } }],
+        // (the server also re-encodes every image from its pixels, dropping all metadata)
         onClose: () => {
           window.removeEventListener("mousemove", move);
           window.removeEventListener("mouseup", up);

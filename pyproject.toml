@@ -19,6 +19,10 @@ dependencies = [
     "pypsrp>=0.8",
     "keyring>=25",
     "tomli-w>=1.0",
+    # attached images are re-encoded from pixels only (safety/images.py)
+    "pillow>=10",
+    # RDP certificate pinning (sessions/rdpcert.py)
+    "cryptography>=41",
     # NanoGPT sends brotli-compressed replies; the OpenAI SDK's HTTP layer needs Brotli >= 1.2.
     # Pinned here so the venv never falls back to an older distro copy (Mint/Ubuntu ship 1.1).
     "brotli>=1.2",

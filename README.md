@@ -171,8 +171,14 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
   RDP session. Use it when a login lands on an appliance menu (OPNsense, pfSense, Sophos)
   rather than a shell: the layout makes that obvious where plain text may not.
 - **Every image goes through a redaction editor first.** Drag over anything that shouldn't
-  reach the AI and it becomes solid black; Undo and Clear are there, Attach sends. The pixels
-  are replaced in the app window, so the unredacted original is never uploaded or stored.
+  reach the AI and it becomes solid black; Undo and Clear are there, Attach sends. The black
+  replaces the pixels in the one bitmap (no layers; boxes snap outwards to whole pixels so no
+  edge is half-blended), so the unredacted original is never uploaded or stored.
+- **Images carry nothing but pixels.** The server decodes every attached image and re-encodes
+  it from its pixels alone, so EXIF (GPS, camera, times), the embedded EXIF thumbnail, XMP,
+  ICC profiles, PNG text chunks, JPEG comments, extra APNG frames and bytes appended after the
+  image are all dropped, whatever the page sent. Only that cleaned image is stored (as a
+  generic `img-N.png` / `img-N.jpg`) and sent; the original file name never leaves the page.
 - **Export ▾ → Timeline replay** plays the case back: events on the left, the terminal
   transcript on the right, on one slider.
 - **Export ▾ → What the AI knows** shows the exact context the model gets next turn, with a

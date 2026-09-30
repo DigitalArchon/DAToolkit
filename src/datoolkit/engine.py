@@ -32,6 +32,7 @@ from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, lis
 from .llm import websearch
 from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
+from .safety import images as images_mod
 from .safety import watch as watch_mod
 from .safety.dryrun import dry_run
 from .safety.inject import suspicious
@@ -1346,22 +1347,30 @@ class Engine:
         self._turn = asyncio.create_task(self._run_turn(prov, model, tier))
 
     def _save_images(self, images: list[str]) -> list[tuple[str, str]]:
-        """Store attached photos in the case directory; returns (file name, data URL) pairs.
-        The audit log records the file name, never the bytes."""
-        out = []
+        """Clean attached images (decoded and re-encoded from pixels only: no metadata, no
+        embedded thumbnails, no extra frames or trailing bytes), store them in the case
+        directory under a generic name, and return (file name, data URL of the CLEANED image)
+        pairs. Only the cleaned image is ever stored or sent; the audit log records the name."""
+        cleaned = []
         for data_url in images[:4]:
-            m = re.match(r"data:image/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=]+)$", data_url or "")
+            m = re.match(r"data:image/(jpeg|jpg|png);base64,([A-Za-z0-9+/=]+)$", data_url or "")
             if not m:
-                raise UserError("Photos must be JPEG, PNG or WebP.")
+                raise UserError("Images must be PNG or JPEG.")
             raw = base64.b64decode(m.group(2))
             if len(raw) > 6 * 1024 * 1024:
-                raise UserError("Photo is over 6 MB; the app should have resized it.")
+                raise UserError("Image is over 6 MB; the app should have resized it.")
+            try:
+                cleaned.append(images_mod.clean(raw))
+            except ValueError as e:
+                raise UserError(f"Could not use an attached image: {e}") from e
+        out = []
+        for data, ext in cleaned:
             n = 1 + sum(1 for _ in self.case.dir.glob("img-*"))
-            ext = "jpg" if m.group(1) in ("jpeg", "jpg") else m.group(1)
             name = f"img-{n}.{ext}"
-            (self.case.dir / name).write_bytes(raw)
-            self.log("image_attached", file=name, bytes=len(raw))
-            out.append((name, data_url))
+            (self.case.dir / name).write_bytes(data)
+            self.log("image_attached", file=name, bytes=len(data), metadata="stripped (re-encoded from pixels)")
+            mime = "image/jpeg" if ext == "jpg" else "image/png"
+            out.append((name, f"data:{mime};base64,{base64.b64encode(data).decode()}"))
         return out
 
     def _find_similar(self, message: str) -> None:
