@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Everything is served from this origin. In particular no remote images: a prompt injection
+     must not be able to make the AI's markdown fetch a URL that carries data out. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'">
 <title>DAToolkit</title>
 <link rel="stylesheet" href="/static/vendor/xterm.css">
 <link rel="stylesheet" href="/static/style.css">
@@ -15,6 +18,7 @@
   <span class="spacer"></span>
   <button id="model-btn" class="ghost" title="Choose model"><span id="model-name">Choose model</span> <span id="tier-badge" class="badge"></span></button>
   <button id="attest-btn" class="ghost small hidden" title="Re-check the enclave's attestation"></button>
+  <span id="usage" class="muted small"></span>
   <div class="menu-wrap">
     <button id="export-btn" class="ghost">Export ▾</button>
     <div id="export-menu" class="menu hidden">
@@ -33,7 +37,7 @@
     <div id="chat-log"></div>
     <div id="chat-status" class="hidden"><span class="spinner"></span><span id="chat-status-text">Thinking…</span></div>
     <form id="chat-form">
-      <textarea id="chat-input" rows="3" placeholder="Describe the problem, or reply to the AI…  (Enter to send, Shift+Enter for newline)"></textarea>
+      <textarea id="chat-input" rows="3" placeholder="Describe the problem, or reply to the AI…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
       <div class="chat-actions">
         <button type="button" id="stop-btn" class="danger hidden">Stop</button>
         <button type="submit" id="send-btn" class="primary">Send</button>

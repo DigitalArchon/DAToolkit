@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -26,6 +27,7 @@ from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mo
 from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, list_private_models,
                                offers_private_mode, relay_url)
 from .queue import Queue
+from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
 from .sessions.askpass import AskpassBridge
@@ -65,6 +67,7 @@ class Engine:
         self._models: dict[str, list[str]] = {}
         self._enclaves: dict[str, Enclave] = {}      # provider name -> attested enclave (Private Mode)
         self.attestation: dict | None = None         # latest attestation of the active private model
+        self.last_usage: dict | None = None          # token usage of the last completed turn
         self._attest_task: asyncio.Task | None = None
         self._turn: asyncio.Task | None = None
         self._prompts: dict[str, tuple[asyncio.Future, dict]] = {}
@@ -103,6 +106,7 @@ class Engine:
             "chat": self.chat,
             "busy": self.busy,
             "prompts": [info for _, info in self._prompts.values()],
+            "last_usage": self.last_usage,
         }
 
     def _config_view(self) -> dict:
@@ -313,7 +317,7 @@ class Engine:
 
     def save_settings(self, data: dict) -> None:
         s = self.cfg.settings
-        for key in ("capture_max_lines", "capture_max_chars", "scrollback", "font_size"):
+        for key in ("capture_max_lines", "capture_max_chars", "scrollback", "font_size", "context_warn_tokens"):
             if key in data:
                 value = int(data[key])
                 if value <= 0:
@@ -330,6 +334,35 @@ class Engine:
         self.case = Case.create(name.strip() or "Untitled case", sensitivity, notes.strip())
         self.queue = Queue()
         self.conv, self.chat = [], []
+        self.last_usage = None
+        self._attach_case()
+        self._persist()
+
+    def list_cases(self) -> list[dict]:
+        return Case.list_all()
+
+    def open_case(self, case_id: str) -> None:
+        """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
+        if self.busy:
+            raise UserError("Wait for the AI to finish (or stop it) before opening a case.")
+        try:
+            case = Case.load(case_id)
+            state = case.load_state() or {}
+        except (OSError, ValueError) as e:
+            raise UserError(f"Could not open case {case_id}: {e}") from e
+        self.case = case
+        self.conv = list(state.get("conv", []))
+        self.chat = list(state.get("chat", []))
+        self.queue = Queue.from_list(state.get("queue", []))
+        self.last_usage = None
+        self.log("case_resumed", messages=len(self.chat), queue=len(self.queue.items))
+        self._attach_case()
+        if self.chat:
+            self.chat.append({"kind": "note", "text": f"Case resumed {datetime.now():%Y-%m-%d %H:%M}. "
+                              "Output of earlier commands is captured from the transcript files."})
+        self._persist()
+
+    def _attach_case(self) -> None:
         self.sessions.set_transcript_paths(self.case.transcript_path)
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov and self.cfg.active_model:
@@ -340,6 +373,15 @@ class Engine:
         for s in self.sessions.roster():
             self.log("session_carried_over", **s)
         self._changed()
+
+    def _persist(self) -> None:
+        """Write the resumable state after every change to the conversation or queue."""
+        if not self.case:
+            return
+        try:
+            self.case.save_state(self.conv, self.chat, self.queue.to_list())
+        except OSError as e:
+            self.emit("toast", level="error", text=f"Could not save case state: {e}")
 
     # ---------------------------------------------------------------- sessions
 
@@ -435,17 +477,51 @@ class Engine:
     # ---------------------------------------------------------------- queue
 
     def update_item(self, num: int, **fields) -> None:
+        was_pending = self.queue.get(num).status == "pending"
         p = self.queue.update(num, **fields)
         if "command" in fields and p.edited:
             self.log("proposal_edited", num=num, command=p.command, original=p.original_command, risk=p.risk)
         if "status" in fields:
+            if p.status in ("ran", "inserted") and was_pending:
+                # remember where this command's output starts in the transcript (see capture())
+                p.capture_start = self._transcript_size(p.session_id)
             self.log("proposal_" + p.status, num=num, session_id=p.session_id, command=p.command,
                      note=p.note, risk=p.risk)
         self._queue_changed()
+        self._persist()
 
     def move_item(self, num: int, delta: int) -> None:
         self.queue.move(num, delta)
         self._queue_changed()
+        self._persist()
+
+    def _transcript_size(self, sid: str) -> int | None:
+        if not self.case:
+            return None
+        try:
+            return self.case.transcript_path(sid).stat().st_size
+        except OSError:
+            return 0
+
+    def capture(self, num: int) -> dict:
+        """Output of a ran command taken from the session transcript on disk: the fallback when
+        the terminal buffer no longer has it (page reloaded, session closed, case resumed)."""
+        p = self.queue.get(num)
+        if p.capture_start is None or not self.case:
+            return {"text": "", "error": "No transcript position was recorded for this command."}
+        end = None
+        for other in self.queue.items:
+            if (other.session_id == p.session_id and other.capture_start is not None
+                    and other.capture_start > p.capture_start and (end is None or other.capture_start < end)):
+                end = other.capture_start
+        try:
+            with self.case.transcript_path(p.session_id).open("rb") as f:
+                f.seek(p.capture_start)
+                data = f.read() if end is None else f.read(max(0, end - p.capture_start))
+        except OSError as e:
+            return {"text": "", "error": f"Transcript not readable: {e}"}
+        text = data.decode("utf-8", errors="replace").strip("\n")
+        return {"text": text, "source": "transcript"}
 
     def preview(self, texts: list[str]) -> list[dict]:
         s = self.cfg.settings
@@ -453,7 +529,7 @@ class Engine:
         for t in texts:
             red, n = redact(t or "")
             cut, truncated = head_tail(red, s.capture_max_lines, s.capture_max_chars)
-            out.append({"text": cut, "redactions": n, "truncated": truncated})
+            out.append({"text": cut, "redactions": n, "truncated": truncated, "warnings": suspicious(cut)})
         return out
 
     # ---------------------------------------------------------------- chat
@@ -505,6 +581,7 @@ class Engine:
         self.log("sent_to_ai", provider=prov.name, model=model, tier=tier, content=content)
         self.emit("chat", entry=self.chat[-1])
         self._queue_changed()
+        self._persist()
         self._turn = asyncio.create_task(self._run_turn(prov, model, tier))
 
     def _require_model(self) -> tuple[Provider, str, str]:
@@ -565,8 +642,12 @@ class Engine:
         if error:
             self.chat.append({"kind": "note", "text": f"AI request {error}"})
             self.log("turn_error", error=error)
+        if usage:
+            self.last_usage = usage
+            self.log("usage", model=model, **{k: v for k, v in usage.items() if isinstance(v, int)})
         self.emit("turn_end", entry=entry, error=error, usage=usage, chat=self.chat)
         self._queue_changed()
+        self._persist()
 
     def _record_assistant(self, result, entry: dict) -> bool:
         """Append the assistant turn to history. Returns True if the model should be asked again."""

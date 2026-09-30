@@ -38,7 +38,58 @@ class Case:
         case = cls(name=name, sensitivity=sensitivity, notes=notes, id=case_id, dir=d,
                    started=now.isoformat(timespec="seconds"))
         case.log("case_started", name=name, sensitivity=sensitivity, notes=notes)
+        case.write_meta()
         return case
+
+    @classmethod
+    def load(cls, case_id: str, root: Path | None = None) -> "Case":
+        """Reopen a case directory written by create()."""
+        d = (root or data_dir() / "cases") / case_id
+        meta = _read_meta(d)
+        if meta is None:
+            raise FileNotFoundError(f"No case {case_id}")
+        return cls(name=meta["name"], sensitivity=meta["sensitivity"], notes=meta.get("notes", ""),
+                   id=case_id, dir=d, started=meta.get("started", ""))
+
+    @staticmethod
+    def list_all(root: Path | None = None) -> list[dict]:
+        """Summaries of every case on disk, newest first."""
+        base = root or data_dir() / "cases"
+        out = []
+        if not base.is_dir():
+            return out
+        for d in base.iterdir():
+            if not d.is_dir():
+                continue
+            meta = _read_meta(d)
+            if meta is None:
+                continue
+            state = d / "state.json"
+            summary = {"id": d.name, "name": meta["name"], "sensitivity": meta["sensitivity"],
+                       "notes": meta.get("notes", ""), "started": meta.get("started", ""),
+                       "resumable": state.exists(), "messages": 0}
+            if state.exists():
+                try:
+                    summary["messages"] = len(json.loads(state.read_text(encoding="utf-8")).get("chat", []))
+                except (OSError, ValueError):
+                    pass
+            out.append(summary)
+        out.sort(key=lambda c: c["id"], reverse=True)
+        return out
+
+    def write_meta(self) -> None:
+        _write_json(self.dir / "case.json", {"name": self.name, "sensitivity": self.sensitivity,
+                                             "notes": self.notes, "started": self.started})
+
+    def save_state(self, conv: list[dict], chat: list[dict], queue: list[dict]) -> None:
+        """Persist everything needed to resume the case later."""
+        _write_json(self.dir / "state.json", {"version": 1, "conv": conv, "chat": chat, "queue": queue})
+
+    def load_state(self) -> dict | None:
+        path = self.dir / "state.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def log(self, event: str, **data) -> None:
         rec = {"ts": time.time(), "event": event, **data}
@@ -86,6 +137,31 @@ class Case:
         path = self.dir / "transcript.md"
         path.write_text("\n".join(out) + "\n", encoding="utf-8")
         return path
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_meta(d: Path) -> dict | None:
+    """case.json, or the case_started event of a case written before case.json existed."""
+    meta = d / "case.json"
+    try:
+        if meta.exists():
+            return json.loads(meta.read_text(encoding="utf-8"))
+        events = d / "events.jsonl"
+        if events.exists():
+            with events.open(encoding="utf-8") as f:
+                first = json.loads(f.readline() or "{}")
+            if first.get("event") == "case_started":
+                started = datetime.fromtimestamp(first["ts"]).isoformat(timespec="seconds") if "ts" in first else ""
+                return {"name": first.get("name", d.name), "sensitivity": first.get("sensitivity", "open"),
+                        "notes": first.get("notes", ""), "started": started}
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def fence(text: str, lang: str = "") -> str:

@@ -50,6 +50,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def user_error(_: Request, exc: UserError):
         return JSONResponse({"error": str(exc)}, status_code=400)
 
+    @app.exception_handler(KeyError)
+    async def key_error(_: Request, exc: KeyError):
+        # an unknown queue number, session id or prompt id is a stale client, not a crash
+        return JSONResponse({"error": f"Not found: {exc.args[0] if exc.args else exc}"}, status_code=400)
+
     @app.get("/")
     async def index():
         return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-store"})
@@ -110,6 +115,15 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.new_case(body.get("name", ""), body.get("sensitivity", "open"), body.get("notes", ""))
         return {"ok": True}
 
+    @app.get("/api/cases")
+    async def list_cases(e: Engine = Depends(auth)):
+        return {"cases": e.list_cases()}
+
+    @app.post("/api/case/open")
+    async def open_case(body: dict, e: Engine = Depends(auth)):
+        e.open_case(str(body.get("id", "")))
+        return {"ok": True}
+
     @app.post("/api/sessions")
     async def open_session(body: dict, e: Engine = Depends(auth)):
         return e.open_session(body.get("kind", "local"), body.get("host", ""))
@@ -129,6 +143,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         fields = {k: body[k] for k in ("command", "session_id", "status", "note") if k in body}
         e.update_item(num, **fields)
         return {"ok": True}
+
+    @app.get("/api/queue/{num}/capture")
+    async def capture(num: int, e: Engine = Depends(auth)):
+        return e.capture(num)
 
     @app.post("/api/queue/{num}/move")
     async def move_item(num: int, body: dict, e: Engine = Depends(auth)):

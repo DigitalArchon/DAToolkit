@@ -21,6 +21,9 @@ const S = {
   streaming: null,    // {text, reasoning, model, tier}
   promptModals: {},   // prompt id -> modal
   rows: new Map(),    // queue num -> row element
+  chatHistory: [],    // messages typed by the technician this session (up-arrow recall)
+  histIdx: -1,
+  histDraft: "",
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -65,8 +68,18 @@ async function guarded(fn) {
   try { return await fn(); } catch (e) { toast(e.message, "error"); }
 }
 
+// AI output is untrusted (it can be steered by prompt injection in command output), so it
+// must not be able to load remote resources: no images/media/embeds, and links open outside.
+const MD_OPTS = {
+  FORBID_TAGS: ["img", "picture", "source", "svg", "math", "video", "audio", "iframe", "object", "embed", "form", "input", "button", "style", "link", "meta", "base"],
+  FORBID_ATTR: ["style", "srcset", "poster", "background", "ping", "formaction"],
+  ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
+};
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+});
 function md(text) {
-  return DOMPurify.sanitize(marked.parse(text || "", { breaks: true }));
+  return DOMPurify.sanitize(marked.parse(text || "", { breaks: true }), MD_OPTS);
 }
 
 const store = {
@@ -180,8 +193,10 @@ function handleEvent(ev) {
       S.state.busy = false;
       S.streaming = null;
       S.state.chat = ev.chat;
+      if (ev.usage) S.state.last_usage = ev.usage;
       renderBusy();
       renderChat(true);
+      renderUsage();
       if (ev.error && ev.error !== "stopped") toast(`AI request failed: ${ev.error}`, "error", 12000);
       break;
     case "toast":
@@ -225,8 +240,23 @@ function renderTop() {
   banner.classList.toggle("hidden", !st.keyring_error);
 }
 
+function fmtTokens(n) { return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n); }
+
+function renderUsage() {
+  const el = $("#usage");
+  const u = S.state?.last_usage;
+  if (!u || !u.prompt_tokens) { el.textContent = ""; el.className = "muted small"; el.title = ""; return; }
+  const warn = S.state.config.settings.context_warn_tokens || 100000;
+  const p = u.prompt_tokens;
+  el.textContent = `ctx ${fmtTokens(p)}`;
+  el.className = `muted small usage${p >= warn * 1.5 ? " bad" : p >= warn ? " warn" : ""}`;
+  el.title = `Last request: ${p.toLocaleString()} prompt tokens, ${(u.completion_tokens || 0).toLocaleString()} completion tokens.`
+    + (p >= warn ? `\nThe conversation is getting long (warning threshold ${warn.toLocaleString()} in Settings → General). Consider a new case or a ticket summary.` : "");
+}
+
 function renderAll() {
   renderTop();
+  renderUsage();
   renderChat(true);
   renderSessions();
   renderQueue();
@@ -320,8 +350,27 @@ async function sendChat(ev) {
   if (!message) return;
   await guarded(async () => {
     await api("POST", "/api/send", { message });
+    if (S.chatHistory[S.chatHistory.length - 1] !== message) S.chatHistory.push(message);
+    S.histIdx = -1;
     input.value = "";
   });
+}
+
+// Up/Down at the edge of the chat box recalls earlier messages, like a shell.
+function chatHistoryKey(e) {
+  const input = e.target;
+  const hist = S.chatHistory;
+  if (!hist.length || e.altKey || e.ctrlKey || e.metaKey) return;
+  const atTop = input.selectionStart === 0 && input.selectionEnd === 0;
+  const atEnd = input.selectionStart === input.value.length;
+  if (e.key === "ArrowUp" && (atTop || S.histIdx !== -1)) {
+    if (S.histIdx === -1) { S.histDraft = input.value; S.histIdx = hist.length; }
+    if (S.histIdx > 0) { S.histIdx -= 1; input.value = hist[S.histIdx]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown" && S.histIdx !== -1 && atEnd) {
+    S.histIdx += 1;
+    if (S.histIdx >= hist.length) { S.histIdx = -1; input.value = S.histDraft; } else input.value = hist[S.histIdx];
+    e.preventDefault();
+  }
 }
 
 // ------------------------------------------------------------------ terminals
@@ -346,7 +395,9 @@ function ensureTerm(sess) {
   term.onData((d) => termSend(t, { type: "input", data: d }));
   term.onResize(({ cols, rows }) => termSend(t, { type: "resize", cols, rows }));
   term.attachCustomKeyEventHandler((e) => {
-    if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey) return true;
+    if (e.type !== "keydown") return true;
+    if (isGlobalShortcut(e)) return false;   // let it bubble to the document handler
+    if (!e.ctrlKey || !e.shiftKey) return true;
     if (e.code === "KeyC") { clipWrite(term.getSelection()); return false; }
     if (e.code === "KeyV") { clipRead().then((txt) => txt && term.paste(txt)).catch(() => toast("Clipboard not available", "error")); return false; }
     return true;
@@ -425,13 +476,27 @@ function renderSessionMenu() {
   );
 }
 
-// Text of the terminal buffer from a marker to the next marker (or the cursor).
-function captureFor(item) {
+// Text of the terminal buffer from a marker to the next marker (or the cursor). When the
+// buffer no longer has it (reload, closed session, resumed case) the server slices the
+// transcript file instead.
+async function captureFor(item) {
+  const local = captureFromBuffer(item);
+  if (!local.error) return local;
+  try {
+    const remote = await api("GET", `/api/queue/${item.num}/capture`);
+    if (!remote.error) return { text: remote.text, source: "transcript" };
+    return { text: "", error: `${local.error} (${remote.error})` };
+  } catch (e) {
+    return { text: "", error: `${local.error} (${e.message})` };
+  }
+}
+
+function captureFromBuffer(item) {
   const t = S.terms[item.session_id];
-  if (!t) return { text: "", error: "Session is no longer open; paste the output manually." };
+  if (!t) return { text: "", error: "Session is no longer open" };
   const m = t.markers.get(item.num);
-  if (!m) return { text: "", error: "Not run from this window (or the page was reloaded); paste the output manually." };
-  if (m.isDisposed || m.line < 0) return { text: "", error: "Output has scrolled out of the terminal buffer; paste it manually." };
+  if (!m) return { text: "", error: "Not run from this window" };
+  if (m.isDisposed || m.line < 0) return { text: "", error: "Output has scrolled out of the terminal buffer" };
   const buf = t.term.buffer.normal;
   let end = buf.baseY + buf.cursorY;
   for (const [num, other] of t.markers) {
@@ -507,6 +572,21 @@ async function saveCommand(num, value) {
   await guarded(() => api("POST", `/api/queue/${num}`, { command: value }));
 }
 
+function elapsed(ts) {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+function tickElapsed() {
+  for (const item of S.state?.queue || []) {
+    if (!item.ran_at || !["ran", "inserted"].includes(item.status)) continue;
+    const el = S.rows.get(item.num)?.querySelector(".status");
+    if (el) el.textContent = `${item.status} · ${elapsed(item.ran_at)} ago`;
+  }
+}
+
 function updateRow(row, item) {
   const pending = item.status === "pending";
   row.className = `qitem risk-${item.risk}${item.status === "sent" ? " done" : ""}`;
@@ -526,6 +606,7 @@ function updateRow(row, item) {
   const status = $(".status", row);
   status.className = `status ${item.status}`;
   status.textContent = { pending: "pending", ran: "ran", inserted: "inserted", skipped: "skipped", sent: "sent to AI" }[item.status];
+  if (item.ran_at && (item.status === "ran" || item.status === "inserted")) status.textContent += ` · ${elapsed(item.ran_at)} ago`;
 
   const actions = $(".actions", row);
   const btn = (label, fn, kind = "", title = "") => h("button", { class: `small ${kind}`, title, onclick: () => guarded(fn) }, label);
@@ -545,6 +626,7 @@ function updateRow(row, item) {
   } else if (item.status === "skipped") {
     btns.push(btn("Unskip", () => set("pending", { note: "" }), "ghost"));
   }
+  btns.push(btn("Copy", async () => { await clipWrite(item.command); toast("Command copied.", "ok", 2000); }, "ghost", "Copy the command text"));
   actions.replaceChildren(...btns);
 }
 
@@ -579,12 +661,39 @@ async function runItem(num, mode) {
   activateTab(sess.id);
   const t = S.terms[sess.id];
   if (!t?.ws) throw new Error("Terminal is not connected.");
+  // status first: the server records the transcript position, so the output capture starts here
+  await api("POST", `/api/queue/${num}`, { status: mode === "run" ? "ran" : "inserted" });
   t.markers.get(num)?.dispose();
   t.markers.set(num, t.term.registerMarker(0));
   t.term.paste(item.command);
   if (mode === "run") termSend(t, { type: "input", data: "\r" });
   t.term.focus();
-  await api("POST", `/api/queue/${num}`, { status: mode === "run" ? "ran" : "inserted" });
+}
+
+// Ctrl+Shift+Enter: run the first pending read-only item whose session is open.
+function runNextReadOnly() {
+  const item = (S.state?.queue || []).find((i) => i.status === "pending" && i.risk === "read_only"
+    && (S.state.sessions || []).some((s) => s.id === i.session_id && !s.exited));
+  if (!item) return toast("No pending read-only command with an open session.");
+  flashQueueItem(item.num);
+  guarded(() => runItem(item.num, "run"));
+}
+
+function isGlobalShortcut(e) {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-9]$/.test(e.code)) return true;
+  if (e.ctrlKey && e.shiftKey && (e.key === "Enter" || e.code === "KeyK")) return true;
+  return false;
+}
+
+function globalKeys(e) {
+  if (!isGlobalShortcut(e) || document.querySelector(".overlay")) return;
+  e.preventDefault();
+  if (e.altKey) {
+    const sessions = S.state?.sessions || [];
+    const idx = Number(e.code.slice(5)) - 1;
+    if (sessions[idx]) activateTab(sessions[idx].id);
+  } else if (e.key === "Enter") runNextReadOnly();
+  else if (e.code === "KeyK") $("#chat-input").focus();
 }
 
 function skipItem(item) {
@@ -597,11 +706,20 @@ function skipItem(item) {
   });
 }
 
+function warnList(prev, cap) {
+  const out = [];
+  if (cap?.error) out.push(h("div", { class: "warnbox" }, `${cap.error}; paste the output manually.`));
+  if (cap?.source === "transcript") out.push(h("div", { class: "muted small" }, "Captured from the transcript file (the terminal buffer no longer had it)."));
+  if (prev?.warnings?.length) out.push(h("div", { class: "warnbox" }, h("b", {}, "Possible prompt injection: "),
+    `${prev.warnings.join("; ")}. The AI is told to ignore instructions in output, but check before sending.`));
+  return out;
+}
+
 async function previewCapture(item) {
-  const cap = captureFor(item);
+  const cap = await captureFor(item);
   modal({
     title: `Captured output for #${item.num}`, wide: true,
-    body: h("div", {}, cap.error ? h("div", { class: "warnbox" }, cap.error) : null,
+    body: h("div", {}, ...warnList(null, cap),
       h("pre", { class: "prompt-text", style: "max-height:60vh;overflow:auto" }, cap.text || "(empty)")),
     buttons: [{ label: "Close" }],
   });
@@ -610,7 +728,7 @@ async function previewCapture(item) {
 async function openSendResults() {
   const items = readyItems();
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
-  const caps = items.map((i) => (i.status === "skipped" ? { text: "" } : captureFor(i)));
+  const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" } : captureFor(i))));
   const prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text) })).items;
   const blocks = items.map((item, idx) => {
     const include = h("input", { type: "checkbox", checked: true });
@@ -624,7 +742,7 @@ async function openSendResults() {
       h("label", { class: "head" }, include, h("b", {}, `#${item.num}`),
         h("span", { class: `status ${item.status}` }, item.status.toUpperCase()),
         h("span", { class: "muted" }, item.session_id), h("code", { class: "mono" }, item.command)),
-      caps[idx].error ? h("div", { class: "warnbox" }, caps[idx].error) : null,
+      ...warnList(prev[idx], caps[idx]),
       ta, info.length ? h("div", { class: "muted small" }, info.join(" · ")) : null, note);
     include.addEventListener("change", () => block.classList.toggle("excluded", !include.checked));
     if (ta) setTimeout(() => autosize(ta), 30);
@@ -659,6 +777,7 @@ async function sendSelection() {
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       prev.redactions || prev.truncated ? h("div", { class: "muted small" },
         [prev.redactions ? `${prev.redactions} redaction(s) applied` : "", prev.truncated ? "truncated" : ""].filter(Boolean).join(" · ")) : null,
+      ...warnList(prev, null),
       ta, h("div", { class: "field" }, h("span", {}, "Message"), message)),
     buttons: [{ label: "Cancel" }, {
       label: "Send to AI", kind: "primary",
@@ -713,8 +832,29 @@ function openCaseModal(first) {
       opt("confidential", "Client data involved", "Only end-to-end encrypted models (sealed to an attested enclave, e.g. private/glm-5-3) or local models.", false),
       opt("sovereign", "Data must not leave this network", "Only local models.", false)),
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
-    st.case && st.chat.length ? h("div", { class: "muted small" }, "The current case's log stays on disk. Open sessions carry over; the conversation and queue start fresh.") : null);
-  modal({
+    st.case && st.chat.length ? h("div", { class: "muted small" }, "The current case's log stays on disk and can be resumed later. Open sessions carry over; the conversation and queue start fresh.") : null);
+  const resumeList = h("div", { class: "case-list" }, h("div", { class: "muted small" }, "Loading…"));
+  const resumeBox = h("details", { class: "resume" }, h("summary", {}, "Resume a previous case"), resumeList);
+  body.append(resumeBox);
+  let m;
+  resumeBox.addEventListener("toggle", async () => {
+    if (!resumeBox.open) return;
+    try {
+      const cases = (await api("GET", "/api/cases")).cases.filter((c) => c.id !== st.case?.id);
+      resumeList.replaceChildren(...(cases.length ? cases.slice(0, 40).map((c) => h("div", { class: "case-row" },
+        h("div", {}, h("b", {}, c.name), " ", h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity),
+          h("div", { class: "muted small" }, `${(c.started || c.id).replace("T", " ")} · ${c.resumable ? `${c.messages} message(s)` : "log only (no saved conversation)"}`)),
+        h("button", { class: "small primary", onclick: () => guarded(async () => {
+          await api("POST", "/api/case/open", { id: c.id });
+          m.close();
+          toast(`Resumed ${c.name}.`, "ok");
+        }) }, "Open")))
+        : [h("div", { class: "muted small" }, "No previous cases.")]));
+    } catch (e) {
+      resumeList.replaceChildren(h("div", { class: "warnbox" }, e.message));
+    }
+  });
+  m = modal({
     title: first ? "Start a case" : "New case",
     dismissable: !first,
     body,
@@ -952,7 +1092,7 @@ function openSettings(tab = "providers") {
     const s = S.state.config.settings;
     const num = (v) => h("input", { type: "number", value: v });
     const f = { capture_max_lines: num(s.capture_max_lines), capture_max_chars: num(s.capture_max_chars),
-      scrollback: num(s.scrollback), font_size: num(s.font_size) };
+      scrollback: num(s.scrollback), font_size: num(s.font_size), context_warn_tokens: num(s.context_warn_tokens || 100000) };
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "Max lines per result"), f.capture_max_lines),
@@ -960,6 +1100,9 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "Terminal scrollback (new sessions)"), f.scrollback),
         h("label", { class: "field" }, h("span", {}, "Terminal font size (new sessions)"), f.font_size)),
+      h("div", { class: "row" },
+        h("label", { class: "field" }, h("span", {}, "Warn when prompt tokens exceed"), f.context_warn_tokens)),
+      h("div", { class: "muted small" }, "Shortcuts: Alt+1…9 switch terminal tabs · Ctrl+Shift+Enter runs the next pending read-only command · Ctrl+Shift+K focuses the chat · Ctrl+Shift+C/V copy/paste in the terminal."),
       h("div", { class: "muted small" }, `Case logs are stored under ${S.state.case ? S.state.case.dir.replace(/\/[^/]+$/, "") : "~/.local/share/datoolkit/cases"}.`),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
         await api("POST", "/api/settings", Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])));
@@ -1032,7 +1175,10 @@ function init() {
   $("#chat-form").addEventListener("submit", sendChat);
   $("#chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) sendChat(e);
+    else chatHistoryKey(e);
   });
+  document.addEventListener("keydown", globalKeys);
+  setInterval(tickElapsed, 10000);
   $("#stop-btn").addEventListener("click", () => guarded(() => api("POST", "/api/stop")));
   $("#case-btn").addEventListener("click", () => openCaseModal(false));
   $("#model-btn").addEventListener("click", openModelPicker);

@@ -54,6 +54,8 @@ class Settings:
     capture_max_chars: int = 24000
     scrollback: int = 10000
     font_size: int = 13
+    # warn in the top bar when the last request's prompt used more tokens than this
+    context_warn_tokens: int = 100000
 
 
 @dataclass

@@ -66,7 +66,29 @@ Treat that URL like a password: it grants terminal access.
   to where the next one starts), redacts and truncates it, and shows it for review. The AI
   receives only what you send.
 - **Send terminal selection** sends any highlighted terminal text.
+- If the terminal buffer no longer has a command's output (page reloaded, session closed,
+  case resumed), the output is taken from the session's transcript file instead. The
+  review dialog says when this happened.
+- The review dialog also warns when captured output looks like a prompt injection (text
+  that tries to give the AI instructions). The AI is told to ignore such text, but you see
+  it first and can edit it out.
+- **Resume a case**: the case dialog lists earlier cases. Opening one restores the
+  conversation, chat and queue; open sessions carry over.
+- The top bar shows `ctx 23k`: the prompt size of the last request. It turns amber past the
+  threshold in **Settings → General** (default 100k), which is the cue to export a ticket
+  summary and start a fresh case.
 - Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V.
+
+### Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| Alt+1 … Alt+9 | Switch terminal tab |
+| Ctrl+Shift+Enter | Run the next pending **read-only** command (never a modifying or disruptive one) |
+| Ctrl+Shift+K | Focus the chat box |
+| ↑ / ↓ in the chat box | Recall earlier messages |
+| Enter / Shift+Enter | Send / newline |
+| Ctrl+Shift+C / V | Copy / paste in the terminal |
 
 ## Model tiers and end-to-end encryption
 
@@ -130,6 +152,27 @@ Confidential cases.
 | Secrets | OS keyring, service `datoolkit` |
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |
 
+Inside a case directory: `case.json` (name, sensitivity, notes), `events.jsonl` (audit log),
+`state.json` (conversation, chat and queue, rewritten on every change so the case can be
+resumed), `term-<session>.log` (transcripts), `transcript.md` and `ticket-summary.md` (exports).
+
+## Untrusted output
+
+Everything a command prints is untrusted: a log line, a banner or a web page can carry text
+meant to steer the model. Three layers deal with that:
+
+- the system prompt tells the model to treat output as data;
+- the review dialog flags text that looks like an injection before you send it;
+- the model's reply is rendered with no remote resources at all (no images, media or
+  embeds, and a Content-Security-Policy that only allows this origin), so a steered model
+  cannot leak data by making the page fetch a URL. Links open in your browser.
+
+Local risk rules raise a command to **disruptive** when it fetches and runs code
+(`curl … | sh`, `bash <(wget …)`, `base64 -d | sh`, `Invoke-Expression`, `-EncodedCommand`,
+`DownloadString`), erases (`shred`), opens a reverse shell or sets world-writable
+permissions, and to **modifying** for `eval`, inline interpreter code (`python -c`) and
+switching user (`su`, `sudo -i`).
+
 ## Development
 
 ```bash
@@ -145,5 +188,5 @@ and a Textual/tmux TUI is planned on the same core.
 - TUI (Textual + tmux, Linux)
 - Intel TDX / NVIDIA attestation for `TEE/` models (SealedLore's `tee.py`, `dcap.py`, `nras.py`)
 - IP/hostname pseudonymisation with local reverse mapping
-- Resume past cases; per-client notes library
-- Context compaction for long sessions
+- Per-client notes library
+- Context compaction for long sessions (the usage indicator is the stop-gap)

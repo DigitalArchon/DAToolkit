@@ -231,3 +231,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .toast { background: var(--panel-2); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 8px 12px; max-width: 460px; box-shadow: 0 6px 20px rgba(0,0,0,.4); font-size: 13px; overflow-wrap: anywhere; }
 .toast.error { border-left-color: var(--danger); }
 .toast.ok { border-left-color: var(--ok); }
+
+/* context usage indicator (top bar) */
+#usage.warn { color: var(--warn); }
+#usage.bad { color: var(--danger); font-weight: 600; }
+
+/* resume a case */
+details.resume summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.case-list { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow: auto; margin-top: 8px; }
+.case-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+import time
+from dataclasses import asdict, dataclass, field, fields
 
 from .safety import risk
 
@@ -23,6 +24,8 @@ class Proposal:
     original_command: str = ""
     status: str = "pending"
     note: str = ""
+    ran_at: float | None = None          # time.time() when Run/Insert was clicked
+    capture_start: int | None = None     # byte offset into the session transcript at that moment
 
     @property
     def edited(self) -> bool:
@@ -86,15 +89,29 @@ class Queue:
         if status is not None:
             if status not in STATUSES:
                 raise ValueError(f"Bad status {status}")
+            if status in ("ran", "inserted") and p.status == "pending":
+                p.ran_at = time.time()
+            elif status == "pending":
+                p.ran_at = p.capture_start = None
             p.status = status
         if note is not None:
             p.note = note
         return p
 
     def move(self, num: int, delta: int) -> None:
-        i = next(i for i, p in enumerate(self.items) if p.num == num)
+        i = self.items.index(self.get(num))
         j = max(0, min(len(self.items) - 1, i + delta))
         self.items.insert(j, self.items.pop(i))
 
     def to_list(self) -> list[dict]:
         return [p.to_dict() for p in self.items]
+
+    @classmethod
+    def from_list(cls, items: list[dict]) -> "Queue":
+        """Rebuild a queue saved with to_list() (case resume)."""
+        q = cls()
+        known = {f.name for f in fields(Proposal)}
+        for d in items:
+            q.items.append(Proposal(**{k: v for k, v in d.items() if k in known}))
+        q._next = max((p.num for p in q.items), default=0) + 1
+        return q
