@@ -116,7 +116,7 @@ async def test_markdown_export_returns_content_and_name(env):  # noqa: F811
 
 
 def test_native_save_dialog_writes_where_chosen(tmp_path):
-    from datoolkit.app import JsApi
+    from datoolkit.app import Desktop
 
     class FakeWindow:
         def __init__(self, answer):
@@ -126,10 +126,9 @@ def test_native_save_dialog_writes_where_chosen(tmp_path):
             self.asked = save_filename
             return self.answer
 
-    api = JsApi()
-    api._window = FakeWindow((str(tmp_path / "chosen.zip"),))
-    assert api.save_file("../../etc/case-full-export.zip", base64.b64encode(b"PK-data").decode()) == str(tmp_path / "chosen.zip")
+    desktop = Desktop(FakeWindow((str(tmp_path / "chosen.zip"),)))
+    assert desktop.save_file("../../etc/case-full-export.zip", b"PK-data") == str(tmp_path / "chosen.zip")
     assert (tmp_path / "chosen.zip").read_bytes() == b"PK-data"
-    assert api._window.asked == "case-full-export.zip"          # only a name is suggested, never a path
-    api._window = FakeWindow(None)                               # cancelled
-    assert api.save_file("x.md", "eA==") is None
+    assert desktop._window.asked == "case-full-export.zip"      # only a name is suggested, never a path
+    desktop._window = FakeWindow(None)                           # cancelled
+    assert desktop.save_file("x.md", b"x") is None

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import os
 import secrets
 import signal
@@ -34,16 +33,19 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-class JsApi:
-    """Exposed to the page as window.pywebview.api. WebKitGTK's async clipboard API is
-    unreliable, so terminal copy/paste goes through GTK on the main thread instead. Exports
-    are saved through the native Save dialog. (Underscore attributes are not exposed.)"""
+class Desktop:
+    """What the page can't do itself inside the app window. WebKitGTK's async clipboard API is
+    unreliable, so terminal copy/paste goes through GTK on the main thread, and exports are saved
+    through the native Save dialog. The page reaches these through the local server
+    (/api/desktop/..., main token only): pywebview's own JS bridge builds its functions with
+    `new Function`, which the page's Content-Security-Policy rightly refuses."""
 
-    _window = None
+    def __init__(self, window=None):
+        self._window = window
 
-    def save_file(self, name: str, data_b64: str):
+    def save_file(self, name: str, data: bytes):
         """Ask where to save `name` and write the bytes there; returns the path, or None if
-        the technician cancelled."""
+        the technician cancelled. Blocks until the dialog closes: call it off the event loop."""
         import webview
 
         name = os.path.basename(str(name)) or "export"
@@ -52,7 +54,7 @@ class JsApi:
         if not chosen:
             return None
         path = chosen if isinstance(chosen, str) else chosen[0]
-        Path(path).write_bytes(base64.b64decode(data_b64))
+        Path(path).write_bytes(data)
         return path
 
     @staticmethod
@@ -102,7 +104,8 @@ def main(argv: list[str] | None = None) -> None:
     companion_token = secrets.token_urlsafe(24) if args.companion else None
     port = args.port or _free_port()
     cfg = config.load()
-    app = create_app(token, lambda emit: Engine(cfg, emit, runtime_dir()), companion_token)
+    desktop = None if args.browser else Desktop()
+    app = create_app(token, lambda emit: Engine(cfg, emit, runtime_dir()), companion_token, desktop)
     bind = "0.0.0.0" if args.companion else "127.0.0.1"
     server = uvicorn.Server(uvicorn.Config(app, host=bind, port=port, log_level="warning",
                                            ws_max_size=16 * 1024 * 1024))
@@ -125,10 +128,9 @@ def main(argv: list[str] | None = None) -> None:
         else:
             import webview
 
-            api = JsApi()
-            window = webview.create_window("DAToolkit", url, width=1500, height=950, min_size=(900, 600),
-                                           js_api=api)
-            api._window = window
+            desktop._window = webview.create_window("DAToolkit", url + "&desktop=1", width=1500, height=950,
+                                                    min_size=(900, 600))
+            window = desktop._window
 
             def on_started():
                 from gi.repository import GLib

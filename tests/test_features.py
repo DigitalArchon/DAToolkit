@@ -407,6 +407,40 @@ async def test_companion_token_is_read_mostly(env):  # noqa: F811
         assert (await c.get("/api/companion/state", headers={"x-token": "main"})).status_code == 403
 
 
+async def test_desktop_endpoints_need_the_main_token_and_the_app_window(env):  # noqa: F811
+    engine, _, _ = env
+
+    class FakeDesktop:
+        clip = ""
+
+        def clipboard_get(self):
+            return self.clip
+
+        def clipboard_set(self, text):
+            self.clip = text
+
+        def save_file(self, name, data):
+            self.saved = (name, data)
+            return "/chosen/" + name
+
+    desk = FakeDesktop()
+    app: FastAPI = create_app("main", lambda emit: engine, companion_token="phone", desktop=desk)
+    app.state.engine = engine
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        m = {"x-token": "main"}
+        assert (await c.post("/api/desktop/clipboard", json={"text": "uptime"}, headers=m)).status_code == 200
+        assert (await c.get("/api/desktop/clipboard", headers=m)).json() == {"text": "uptime"}
+        r = await c.post("/api/desktop/save?name=a.zip", content=b"PK", headers=m)
+        assert r.json() == {"path": "/chosen/a.zip"} and desk.saved == ("a.zip", b"PK")
+        for h in ({"x-token": "phone"}, {}):              # the companion token, or none, reaches nothing
+            assert (await c.get("/api/desktop/clipboard", headers=h)).status_code == 403
+            assert (await c.post("/api/desktop/save?name=b", content=b"x", headers=h)).status_code == 403
+    browser: FastAPI = create_app("main", lambda emit: engine)  # --browser: no desktop, no endpoints
+    browser.state.engine = engine
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=browser), base_url="http://t") as c:
+        assert (await c.get("/api/desktop/clipboard", headers={"x-token": "main"})).status_code == 404
+
+
 # ---------------------------------------------------------------- replay CLI
 
 def test_replay_reports_rule_changes(tmp_path):

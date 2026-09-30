@@ -4,6 +4,15 @@
 
 // ------------------------------------------------------------------ token & helpers
 
+// In the app window the server reaches GTK for the clipboard and the Save dialog (see app.Desktop).
+const DESKTOP = (() => {
+  const fromUrl = new URLSearchParams(location.search).get("desktop") === "1";
+  try {
+    if (fromUrl) sessionStorage.setItem("dat-desktop", "1");
+    return fromUrl || sessionStorage.getItem("dat-desktop") === "1";
+  } catch { return fromUrl; }
+})();
+
 const TOKEN = (() => {
   const fromUrl = new URLSearchParams(location.search).get("t");
   try {
@@ -90,7 +99,7 @@ const store = {
 
 async function clipWrite(text) {
   try {
-    if (window.pywebview?.api?.clipboard_set) return await window.pywebview.api.clipboard_set(text);
+    if (DESKTOP) return await api("POST", "/api/desktop/clipboard", { text });
     await navigator.clipboard.writeText(text);
   } catch {
     const ta = h("textarea", { value: text });
@@ -99,7 +108,7 @@ async function clipWrite(text) {
 }
 
 async function clipRead() {
-  if (window.pywebview?.api?.clipboard_get) return (await window.pywebview.api.clipboard_get()) || "";
+  if (DESKTOP) return (await api("GET", "/api/desktop/clipboard")).text || "";
   return await navigator.clipboard.readText();
 }
 
@@ -2495,14 +2504,11 @@ function openSettings(tab = "providers") {
 // Save a file where the technician chooses: the native Save dialog in the app window, the
 // browser's download otherwise. Returns the path (app window), "downloaded", or null.
 async function saveFile(name, blob) {
-  if (window.pywebview?.api?.save_file) {
-    const b64 = await new Promise((res, rej) => {
-      const fr = new FileReader();
-      fr.onload = () => res(String(fr.result).split(",", 2)[1] || "");
-      fr.onerror = () => rej(fr.error);
-      fr.readAsDataURL(blob);
-    });
-    const path = await window.pywebview.api.save_file(name, b64);
+  if (DESKTOP) {
+    const res = await fetch(`/api/desktop/save?name=${encodeURIComponent(name)}`, { method: "POST", headers: { "X-Token": TOKEN }, body: blob });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || data.detail || `${res.status} ${res.statusText}`);
+    const path = data.path;
     if (path) toast(`Saved: ${path}`, "ok", 8000);
     return path || null;
   }

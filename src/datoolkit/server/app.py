@@ -22,9 +22,10 @@ WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
 
 def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
-               companion_token: str | None = None) -> FastAPI:
+               companion_token: str | None = None, desktop=None) -> FastAPI:
     """`companion_token` gates the read-mostly phone view: it can see chat, queue and hypotheses
-    and mark items done/skipped, and nothing else. It never reaches a terminal."""
+    and mark items done/skipped, and nothing else. It never reaches a terminal.
+    `desktop` (app.Desktop, only in the app window) serves the clipboard and the Save dialog."""
     listeners: set[asyncio.Queue] = set()
 
     def emit(event: dict) -> None:
@@ -103,6 +104,20 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
     # ------------------------------------------------------------ REST
+
+    if desktop is not None:
+        @app.get("/api/desktop/clipboard")
+        async def desktop_clip_get(e: Engine = Depends(auth)):
+            return {"text": await asyncio.to_thread(desktop.clipboard_get)}
+
+        @app.post("/api/desktop/clipboard")
+        async def desktop_clip_set(body: dict, e: Engine = Depends(auth)):
+            await asyncio.to_thread(desktop.clipboard_set, str(body.get("text", "")))
+            return {"ok": True}
+
+        @app.post("/api/desktop/save")
+        async def desktop_save(name: str, request: Request, e: Engine = Depends(auth)):
+            return {"path": await asyncio.to_thread(desktop.save_file, name, await request.body())}
 
     @app.get("/api/state")
     async def state(e: Engine = Depends(auth)):
