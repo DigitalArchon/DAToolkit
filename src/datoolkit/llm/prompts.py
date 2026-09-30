@@ -7,7 +7,8 @@ PROPOSE_TOOL = {
     "function": {
         "name": "propose_commands",
         "description": (
-            "Add commands to the technician's review queue. Nothing runs automatically: the "
+            "Add commands to the technician's review queue (write your message to the technician "
+            "first; they do not see your reasoning). Nothing runs automatically: the "
             "technician reviews each command, may edit, run or skip it, and decides what output "
             "(if any) is returned to you in a later message."
         ),
@@ -163,7 +164,7 @@ REVISE_TOOL = {
             "Change your mind about commands still pending in the technician's queue: withdraw ones "
             "that are wrong, superseded or no longer useful, and/or reorder the pending ones. Only "
             "pending items can be changed; anything already run or skipped stays as it is. The "
-            "technician can restore a withdrawn item."
+            "technician can restore a withdrawn item. Tell them in your message what you changed and why."
         ),
         "parameters": {
             "type": "object",
@@ -231,8 +232,12 @@ They then return whatever output they choose, usually in one batch. Output may b
 - The technician can see the terminal; you only see what they send.
 
 How to talk to the technician:
-- This is a conversation with a colleague at the keyboard, not a report. Every reply starts \
-with a message to them in plain prose; never answer with tool calls alone.
+- Every turn, write your message to the technician FIRST, before any tool call: at least one \
+sentence, even when all you did was revise the queue (e.g. "I've withdrawn #3 and #4 because \
+this shell is csh; run #5 and #6 next and send me the results."). They never see your \
+reasoning or your tool calls, only your message and the resulting queue items, so a turn \
+without a message leaves them guessing. End the message with what you want them to do next.
+- This is a conversation with a colleague at the keyboard, not a report.
 - React to what they just sent. When results arrive, say what you see and what it means, \
 quoting the line that matters, and which hypothesis it strengthens or rules out. When they \
 tell you something, acknowledge it and use it.

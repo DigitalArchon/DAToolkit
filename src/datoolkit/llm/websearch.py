@@ -6,6 +6,7 @@ technician to approve each one. Results are untrusted text, like command output.
 
 from __future__ import annotations
 
+import html
 import json
 from urllib.parse import urlsplit
 
@@ -20,7 +21,9 @@ _ERRORS = {400: "invalid parameters", 401: "API key rejected", 402: "insufficien
 
 
 class SearchError(Exception):
-    pass
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code        # NanoGPT's error code, e.g. "zero_data_retention"
 
 
 def is_nanogpt(base_url: str) -> bool:
@@ -35,7 +38,8 @@ def search_url(base_url: str) -> str:
 
 
 async def web_search(base_url: str, api_key: str, query: str, provider: str = "kagi",
-                     http: httpx.AsyncClient | None = None) -> list[dict]:
+                     http: httpx.AsyncClient | None = None) -> dict:
+    """{"results": [...], "provider": str, "cost": float | None}"""
     body = {"query": query, "provider": provider, "outputType": "searchResults"}
     client = http or httpx.AsyncClient(timeout=TIMEOUT)
     try:
@@ -46,21 +50,24 @@ async def web_search(base_url: str, api_key: str, query: str, provider: str = "k
         if http is None:
             await client.aclose()
     if r.status_code != 200:
-        detail = _ERRORS.get(r.status_code, r.reason_phrase)
+        detail, code = _ERRORS.get(r.status_code, r.reason_phrase), ""
         try:
-            msg = r.json().get("error")
-            if isinstance(msg, dict):
-                msg = msg.get("message")
+            err = r.json().get("error")
+            msg = err.get("message") if isinstance(err, dict) else err
+            code = str(err.get("code") or "") if isinstance(err, dict) else ""
             if msg:
                 detail += f": {msg}"
-        except ValueError:
+        except (ValueError, AttributeError):
             pass
-        raise SearchError(f"{provider} search failed ({r.status_code} {detail})")
+        raise SearchError(f"{provider} search failed ({r.status_code} {detail})", code)
     try:
         payload = r.json()
     except ValueError as e:
         raise SearchError("search returned something that is not JSON") from e
-    return normalize(payload.get("data", payload) if isinstance(payload, dict) else payload)
+    meta = payload.get("metadata") if isinstance(payload, dict) else None
+    cost = meta.get("cost") if isinstance(meta, dict) and isinstance(meta.get("cost"), (int, float)) else None
+    return {"results": normalize(payload.get("data", payload) if isinstance(payload, dict) else payload),
+            "provider": provider, "cost": cost}
 
 
 _TITLE = ("title", "name", "heading")
@@ -73,7 +80,7 @@ def _pick(d: dict, keys) -> str:
     for k in keys:
         v = d.get(k)
         if isinstance(v, str) and v.strip():
-            return v.strip()
+            return html.unescape(v.strip())
     return ""
 
 

@@ -72,7 +72,10 @@ Treat that URL like a password: it grants terminal access.
   and exact syntax. By default each query appears in the AI's message for you to edit,
   approve or skip; "search without asking" applies to Open cases only, Confidential cases
   always ask, and Sovereign cases never search, because queries reach the search provider in
-  the clear. Searches are billed to the NanoGPT key.
+  the clear. Searches are billed to the NanoGPT key (at the time of writing Kagi $0.025,
+  Perplexity $0.005, Linkup $0.006 per search; each search card shows its cost). If the
+  account has Zero Data Retention required, NanoGPT only allows Linkup, so DAToolkit falls
+  back to it and says so on the card.
 - The line above the chat box always says whose turn it is: *AI is responding* (with the
   phase, e.g. "Preparing commands", and a note if no text has arrived for a few seconds) or
   *✓ AI finished. Your turn*, with what is waiting for you.

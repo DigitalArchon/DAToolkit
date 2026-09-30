@@ -411,7 +411,7 @@ const SEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval",
   declined: "skipped by you", cancelled: "cancelled" };
 
 function searchCard(rec) {
-  const state = rec.status === "done" ? `${rec.results.length} result${rec.results.length === 1 ? "" : "s"}${rec.edited_by_technician ? " · query edited by you" : ""}`
+  const state = rec.status === "done" ? `${rec.results.length} result${rec.results.length === 1 ? "" : "s"}${typeof rec.cost === "number" ? ` · $${rec.cost.toFixed(3)}` : ""}${rec.edited_by_technician ? " · query edited by you" : ""}`
     : rec.status === "failed" || rec.status === "unavailable" ? `not run: ${rec.error}` : SEARCH_STATE[rec.status] || rec.status;
   const el = h("div", { class: `scard s-${rec.status}` },
     h("div", { class: "phead" }, h("span", {}, "🔎 Web search"), h("span", { class: "muted small" }, rec.provider),
@@ -425,7 +425,8 @@ function searchCard(rec) {
       h("div", { class: "pactions" }, h("button", { type: "button", class: "small primary", onclick: () => answer(true) }, "Search"),
         h("button", { type: "button", class: "small", onclick: () => answer(false) }, "Skip")));
   } else {
-    el.append(h("div", { class: "pcmd" }, rec.query), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null);
+    el.append(h("div", { class: "pcmd" }, rec.query), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
+      rec.note ? h("div", { class: "small warn" }, rec.note) : null);
   }
   if (rec.status === "done" && rec.results.length) {
     el.append(h("details", {}, h("summary", {}, "Results"), h("ol", { class: "sresults" }, rec.results.map((r) =>
@@ -1788,7 +1789,8 @@ function openSettings(tab = "providers") {
         await api("POST", "/api/settings", Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])));
         try {
           const r = await api("POST", "/api/web-search-test", { query: testQ.value });
-          testOut.replaceChildren(`✓ ${r.provider}: ${r.count} result(s). `, ...r.results.map((x) => h("div", {}, `· ${x.title || "(untitled)"} ${x.url}`)));
+          testOut.replaceChildren(`✓ ${r.provider}: ${r.count} result(s)${typeof r.cost === "number" ? `, cost $${r.cost.toFixed(3)}` : ""}. ${r.note ? r.note + "." : ""}`,
+            ...r.results.map((x) => h("div", {}, `· ${x.title || "(untitled)"} ${x.url}`)));
         } catch (e) { testOut.textContent = `✗ ${e.message}`; }
       }) }, "Save & test search")),
       testOut,

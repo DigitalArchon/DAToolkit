@@ -84,7 +84,8 @@ async def test_tool_calls_without_a_message_get_one_nudge(env):  # noqa: F811
     engine.send("router")
     await wait_turn(engine)
     assert len(fake.requests) == 2
-    assert NO_MESSAGE_NUDGE.strip()[:20] in fake.requests[1]["messages"][-1]["content"]
+    nudge = fake.requests[1]["messages"][-1]["content"]
+    assert NO_MESSAGE_NUDGE.strip()[:20] in nudge and "(queued #1)" in nudge
     assert engine.chat[-1]["text"] == "Run #1 to identify the OS." and engine.chat[-1]["proposals"] == [1]
 
 
@@ -242,3 +243,22 @@ def test_normalize_accepts_common_shapes():
     assert websearch.normalize(None) == []
     assert websearch.search_url("https://nano-gpt.com/api/v1") == "https://nano-gpt.com/api/web"
     assert websearch.is_nanogpt("https://api.nano-gpt.com/v1") and not websearch.is_nanogpt("https://evil-nano-gpt.com")
+
+
+async def test_zero_data_retention_falls_back_to_linkup(search):
+    engine, fake, _, fs = search
+    engine.cfg.settings.search_mode = "auto"
+    zdr = {"error": {"type": "invalid_request_error", "code": "zero_data_retention", "message": "not compatible with ZDR"}}
+
+    def handler(request):
+        body = json.loads(request.content)
+        fs.calls.append(body)
+        if body["provider"] != "linkup":
+            return httpx.Response(400, json=zdr)
+        return httpx.Response(200, json={"data": [{"title": "It&#x27;s fixed", "url": "https://x.example", "content": "a &amp; b"}],
+                                         "metadata": {"cost": 0.006}})
+    engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    r = await engine.test_search("q")
+    assert [c["provider"] for c in fs.calls] == ["kagi", "linkup"]
+    assert r["provider"] == "linkup" and r["cost"] == 0.006 and "Zero Data Retention" in r["note"]
+    assert r["results"][0]["title"] == "It's fixed" and r["results"][0]["snippet"] == "a & b"

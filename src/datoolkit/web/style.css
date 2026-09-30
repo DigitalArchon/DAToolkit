@@ -334,6 +334,7 @@ p.small.warn { color: var(--warn); }
 .scard.s-done .sstate { color: var(--ok); }
 .scard.s-declined, .scard.s-cancelled { opacity: .6; }
 .scard .pactions { display: flex; gap: 4px; }
+.scard .warn { color: var(--warn); }
 .sresults { margin: 4px 0; padding-left: 20px; font-size: 12.5px; }
 .sresults a { color: var(--accent); }
 .surl { overflow-wrap: anywhere; }

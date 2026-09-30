@@ -17,7 +17,7 @@ WEB = Path(__file__).resolve().parents[1] / "src" / "datoolkit" / "web"
 def test_prompt_asks_for_conversation_and_offers_questions():
     names = [t["function"]["name"] for t in prompts.TOOLS]
     assert "ask_technician" in names
-    assert "never answer with tool calls alone" in prompts.SYSTEM_PROMPT
+    assert "write your message to the technician FIRST, before any tool call" in prompts.SYSTEM_PROMPT
     assert "skips a command" in prompts.SYSTEM_PROMPT
 
 
