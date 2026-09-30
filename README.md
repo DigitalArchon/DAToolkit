@@ -180,7 +180,11 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
   text-only chat model, set a **vision helper** in Settings → Model: it describes each image
   once (text transcribed exactly, then the rest) and the chat model gets the description,
   shown under the image in the chat. That adds a request per image, so replies with images
-  are slower. With neither, every image feature is disabled and says why; the top bar shows
+  are slower. The helper (and the second-opinion reviewer) is chosen with the same searchable
+  picker as the chat model; the helper's lists only vision models. An end-to-end encrypted
+  helper is attested like the chat model before any image is sealed to it, and its state shows
+  in the top bar and Settings → Model. TEE models, as chat model or helper, are labelled
+  "not attested": DAToolkit doesn't verify TEE attestations yet (see the roadmap). With neither, every image feature is disabled and says why; the top bar shows
   the current state (👁, 👁 via helper, or "no images").
 - Screenshots are drawn at a whole-number 2× scale, cropped to the rows in use, with plain
   (not sub-pixel) text smoothing, and are not resampled again unless over 2048 px.

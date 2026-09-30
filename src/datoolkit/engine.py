@@ -136,6 +136,8 @@ class Engine:
         self._models: dict[str, list[str]] = {}
         self._enclaves: dict[str, Enclave] = {}      # provider name -> attested enclave (Private Mode)
         self.attestation: dict | None = None         # latest attestation of the active private model
+        self.helper_attestation: dict | None = None  # the same for the vision helper, when one is in use
+        self._helper_attest_task: asyncio.Task | None = None
         self.last_usage: dict | None = None          # token usage of the last completed turn
         self.hypotheses: list[dict] = []             # the model's board, with technician marks
         self._runbooks: str = ""                     # runbook text from similar past cases (system prompt)
@@ -165,9 +167,12 @@ class Engine:
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov:
             self._schedule_caps(prov)
+            if detect_tier(self.cfg.active_model, prov.base_url, prov.tier_overrides) == "tee":
+                self.attestation = self._tee_state(self.cfg.active_model)
+        self._refresh_helper_attestation()
 
     async def stop(self) -> None:
-        for task in (self._turn, self._attest_task):
+        for task in (self._turn, self._attest_task, self._helper_attest_task):
             if task:
                 task.cancel()
         self.sessions.close_all()
@@ -188,6 +193,7 @@ class Engine:
             "config": self._config_view(),
             "active_tier": self.active_tier(),
             "attestation": self.attestation,
+            "helper_attestation": self.helper_attestation,
             "case": self.case.to_dict() if self.case else None,
             "sessions": self.sessions.roster(),
             "queue": self.queue.to_list(),
@@ -411,30 +417,75 @@ class Engine:
         self.log("model_selected", provider=provider_name, model=model, tier=self.active_tier())
         self._schedule_caps(prov)
         self.attestation = None
-        if is_private_mode(model):
-            self._start_attestation(prov, model)
+        self._attestation_for(prov, model, "chat")
+        self._refresh_helper_attestation()
         self._changed()
 
-    def _start_attestation(self, prov: Provider, model: str) -> None:
-        if self._attest_task and not self._attest_task.done():
-            self._attest_task.cancel()
-        self.attestation = {"status": "checking", "model": model}
-        self._attest_task = asyncio.create_task(self._attest(prov, model))
+    def _start_attestation(self, prov: Provider, model: str, slot: str = "chat") -> None:
+        task = self._attest_task if slot == "chat" else self._helper_attest_task
+        if task and not task.done():
+            task.cancel()
+        self._set_attestation(slot, {"status": "checking", "model": model})
+        task = asyncio.create_task(self._attest(prov, model, slot))
+        if slot == "chat":
+            self._attest_task = task
+        else:
+            self._helper_attest_task = task
 
-    async def _attest(self, prov: Provider, model: str) -> dict:
-        """Attest the enclave a Private Mode model runs in; the result is shown and logged."""
+    def _set_attestation(self, slot: str, value: dict | None) -> None:
+        if slot == "chat":
+            self.attestation = value
+        else:
+            self.helper_attestation = value
+
+    async def _attest(self, prov: Provider, model: str, slot: str = "chat") -> dict:
+        """Attest the enclave a Private Mode model runs in (the chat model, or the vision
+        helper); the result is shown and logged."""
         try:
             client = self._client(prov, model)
             att = await client.attest()
-            self.attestation = {"status": "verified", "model": model, **att.to_dict()}
-            self.log("enclave_attested", **self.attestation)
+            result = {"status": "verified", "model": model, **att.to_dict()}
+            self.log("enclave_attested", role=slot, **result)
         except Exception as e:  # noqa: BLE001
-            self.attestation = {"status": "failed", "model": model, "error": str(e)}
-            self.log("enclave_attestation_failed", model=model, error=str(e))
+            result = {"status": "failed", "model": model, "error": str(e)}
+            self.log("enclave_attestation_failed", role=slot, model=model, error=str(e))
+        self._set_attestation(slot, result)
         self._changed()
-        return self.attestation
+        return result
 
-    async def attest_now(self) -> dict:
+    @staticmethod
+    def _tee_state(model: str) -> dict:
+        return {"status": "unattested", "model": model, "kind": "tee",
+                "note": ("TEE models are not attested by DAToolkit yet (Intel TDX / NVIDIA verification is on the "
+                         "roadmap), and their prompts pass NanoGPT's gateway in the clear. Only private/ models are "
+                         "attested and end-to-end encrypted.")}
+
+    def _attestation_for(self, prov: Provider, model: str, slot: str) -> None:
+        """Start whatever attestation fits the model: E2EE → attest; TEE → say it isn't; else none."""
+        if is_private_mode(model):
+            self._start_attestation(prov, model, slot)
+        elif detect_tier(model, prov.base_url, prov.tier_overrides) == "tee":
+            self._set_attestation(slot, self._tee_state(model))
+        else:
+            self._set_attestation(slot, None)
+
+    def _refresh_helper_attestation(self) -> None:
+        helper = self._vision_helper()
+        chat = self.cfg.provider(self.cfg.active_provider)
+        if not isinstance(helper, tuple) or not chat or self.vision_of(chat, self.cfg.active_model):
+            self.helper_attestation = None           # no helper in use
+            return
+        prov, model, _ = helper
+        if (self.helper_attestation or {}).get("model") == model and self.helper_attestation.get("status") != "failed":
+            return
+        self._attestation_for(prov, model, "helper")
+
+    async def attest_now(self, slot: str = "chat") -> dict:
+        if slot == "helper":
+            helper = self._vision_helper()
+            if not isinstance(helper, tuple) or not is_private_mode(helper[1]):
+                raise UserError("The vision helper isn't an end-to-end encrypted (private/) model.")
+            return await self._attest(helper[0], helper[1], "helper")
         prov = self.cfg.provider(self.cfg.active_provider)
         if not prov or not is_private_mode(self.cfg.active_model):
             raise UserError("The active model isn't an end-to-end encrypted (private/) model.")
@@ -531,6 +582,7 @@ class Engine:
             if want and ("|" not in want or not self.cfg.provider(want.split("|", 1)[0])):
                 raise UserError("The vision helper must be given as provider|model.")
             s.vision_model = want
+            self._refresh_helper_attestation()
         self._save_config(self.cfg)
         self._changed()
 
@@ -1881,13 +1933,27 @@ class Engine:
                          if context.strip() else "The technician sent this image without a message."},
                         {"type": "image_url", "image_url": {"url": data_url}}]}]
         self.log("sent_to_ai", purpose="describe_image", provider=hprov.name, model=hmodel, tier=htier, file=name)
+        client = self._client(hprov, hmodel)
+        sealed = ""
         try:
-            text = await self._client(hprov, hmodel).complete(hmodel, messages, self._params(hprov, hmodel))
+            if isinstance(client, PrivateModeClient):
+                att = await client.attest()      # nothing is sealed until the helper's enclave has proved itself
+                if (self.helper_attestation or {}).get("hpke_key_sha256") != att.hpke_key_sha256:
+                    self.helper_attestation = {"status": "verified", "model": hmodel, **att.to_dict()}
+                    self.log("enclave_attested", role="helper", **self.helper_attestation)
+                    self._changed()
+                sealed = att.summary
+        except Exception as e:  # noqa: BLE001
+            self.helper_attestation = {"status": "failed", "model": hmodel, "error": str(e)}
+            self._changed()
+            raise UserError(f"The vision helper {hmodel} could not be attested, so the image was not sent: {e}") from e
+        try:
+            text = await client.complete(hmodel, messages, self._params(hprov, hmodel))
         except Exception as e:  # noqa: BLE001
             self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"error": str(e)})
             raise UserError(f"The vision helper {hmodel} failed: {e}") from e
         self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"content": text})
-        desc = {"model": hmodel, "text": text.strip()}
+        desc = {"model": hmodel, "text": text.strip(), **({"sealed": sealed} if sealed else {})}
         self._img_desc[name] = desc
         for e in self.chat:
             if e.get("kind") == "user" and name in (e.get("images") or []):

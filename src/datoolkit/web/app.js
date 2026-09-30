@@ -263,18 +263,26 @@ function renderTop() {
   tb.className = `badge ${st.active_tier || ""}`;
   const ab = $("#attest-btn");
   const att = st.attestation && st.attestation.model === st.config.active_model ? st.attestation : null;
-  ab.classList.toggle("hidden", !att);
-  if (att) {
-    ab.className = `ghost small ${att.status === "verified" ? "ok" : att.status === "failed" ? "bad" : ""}`;
-    ab.textContent = { verified: att.latest_release ? "🔐 attested (older release)" : "🔐 attested",
-      checking: "Attesting enclave…", failed: "⚠ attestation failed" }[att.status];
-    ab.title = att.status === "verified"
-      ? `End-to-end encrypted to an attested enclave.\n${att.summary}\nKey sha256: ${att.hpke_key_sha256.slice(0, 16)}…\nClick to re-check.`
-      : att.status === "failed" ? `${att.error}\nNothing is sent until attestation succeeds. Click to retry.` : "Verifying the enclave…";
+  const lab = attestLabel(att);
+  ab.classList.toggle("hidden", !lab);
+  if (lab) {
+    ab.className = `ghost small ${lab.cls}`;
+    ab.textContent = lab.text;
+    ab.title = lab.title + (att.status === "verified" || att.status === "failed" ? "\nClick to re-check." : "");
   }
   const banner = $("#keyring-banner");
   banner.textContent = st.keyring_error ? `⚠ ${st.keyring_error} API keys and passwords cannot be stored.` : "";
   banner.classList.toggle("hidden", !st.keyring_error);
+}
+
+// Attestation state of a model, as short text and a CSS class (chat model and vision helper).
+function attestLabel(att) {
+  if (!att) return null;
+  if (att.status === "unattested") return { text: "TEE · not attested", cls: "warn", title: att.note };
+  if (att.status === "checking") return { text: "attesting…", cls: "", title: "Verifying the enclave…" };
+  if (att.status === "failed") return { text: "⚠ attestation failed", cls: "bad", title: `${att.error}\nNothing is sent to it until attestation succeeds.` };
+  return { text: att.latest_release ? "🔐 attested (older release)" : "🔐 attested", cls: "ok",
+    title: `End-to-end encrypted to an attested enclave.\n${att.summary}\nKey sha256: ${(att.hpke_key_sha256 || "").slice(0, 16)}…` };
 }
 
 // Can images be used with the current model? native: it reads them; helper: a vision model
@@ -284,10 +292,11 @@ function visionState() { return S.state?.vision || { mode: "none", why: "Choose 
 function renderVision() {
   const v = visionState();
   const b = $("#vision-btn");
-  b.textContent = { native: "👁", helper: `👁 via ${v.helper}`, none: "no images" }[v.mode];
-  b.className = `ghost small vision ${v.mode}`;
+  const hl = v.mode === "helper" ? attestLabel(S.state.helper_attestation) : null;
+  b.textContent = { native: "👁", helper: `👁 via ${v.helper}${hl ? ` · ${hl.text}` : ""}`, none: "no images" }[v.mode];
+  b.className = `ghost small vision ${v.mode}${hl ? ` att-${hl.cls}` : ""}`;
   b.title = v.mode === "native" ? `${v.model} reads images directly.`
-    : v.mode === "helper" ? `${v.model} can't read images: ${v.helper} describes each image first and ${v.model} gets the description. Replies with images take longer. Change in Settings → Model.`
+    : v.mode === "helper" ? `${v.model} can't read images: ${v.helper} describes each image first and ${v.model} gets the description. Replies with images take longer. Change in Settings → Model.${hl ? `\n\nVision helper: ${hl.title}` : ""}`
     : `${v.why}\nImage features are off. Choose a vision model, or set a vision helper in Settings → Model.`;
   for (const el of document.querySelectorAll("[data-needs-vision]")) {
     if (!el.dataset.title) el.dataset.title = el.title;
@@ -1905,16 +1914,20 @@ function openCaseModal(first) {
 
 // ------------------------------------------------------------------ model picker
 
-async function openModelPicker() {
+// One model picker for every place a model is chosen: search, provider switch, capability and
+// tier badges, blocked models the case's sensitivity doesn't allow. `filter` narrows the list
+// (the vision helper shows only vision models); `onPick(provider, model)` does the choosing.
+function pickModel({ title, current = "", filter = null, filterNote = "", note = "", onPick, extraButtons = [] }) {
   const st = S.state;
   const providers = st.config.providers;
   if (!providers.length) {
     toast("Add an AI provider first.");
     return openSettings("providers");
   }
-  let prov = st.config.active_provider || providers[0].name;
+  const [curProv, curModel] = current.includes("|") ? current.split("|", 2) : ["", ""];
+  let prov = curProv && providers.some((p) => p.name === curProv) ? curProv : (st.config.active_provider || providers[0].name);
   let models = [];
-  const search = h("input", { type: "text", placeholder: "Filter models… (e.g. opus, glm, tee)" });
+  const search = h("input", { type: "text", placeholder: "Filter models… (e.g. opus, glm, kimi, tee)" });
   const provSel = h("select", {}, providers.map((p) => h("option", { value: p.name, selected: p.name === prov }, p.name)));
   const listEl = h("div", { class: "model-list" }, h("div", { class: "muted" }, "Loading…"));
   const sens = st.case?.sensitivity || "open";
@@ -1927,21 +1940,24 @@ async function openModelPicker() {
   const render = () => {
     const q = search.value.trim().toLowerCase();
     const recent = st.config.recent_models.filter((r) => r.startsWith(prov + "|")).map((r) => r.split("|")[1]);
-    const shown = models.filter((x) => !q || x.id.toLowerCase().includes(q) || x.tier.includes(q));
+    const pool = filter ? models.filter(filter) : models;
+    const shown = pool.filter((x) => !q || x.id.toLowerCase().includes(q) || x.tier.includes(q));
     shown.sort((a, b) => (b.allowed - a.allowed) || ((recent.indexOf(a.id) + 1 || 99) - (recent.indexOf(b.id) + 1 || 99)) || a.id.localeCompare(b.id));
     listEl.replaceChildren(...shown.slice(0, 400).map((x) => h("div", {
-      class: `model-row${x.allowed ? "" : " blocked"}${x.id === st.config.active_model && prov === st.config.active_provider ? " current" : ""}`,
+      class: `model-row${x.allowed ? "" : " blocked"}${x.id === curModel && prov === curProv ? " current" : ""}`,
       title: x.allowed ? x.id : `Not permitted for a ${sens} case`,
       onclick: async () => {
         if (!x.allowed) return;
-        await guarded(async () => { await api("POST", "/api/model", { provider: prov, model: x.id }); m.close(); });
+        await guarded(async () => { await onPick(prov, x.id); m.close(); });
       },
     }, h("span", { class: "id" }, x.id), recent.includes(x.id) ? h("span", { class: "muted small" }, "recent") : null,
     x.reasoning ? h("span", { class: "cap", title: `Reasoning model${x.efforts?.length ? `: effort ${x.efforts.join(" / ")}` : ""}` }, "🧠") : null,
     h("span", { class: `cap${x.vision ? "" : " off"}`, title: x.vision === true ? "Reads images" : x.vision === false ? "Text only: can't read images" : "Unknown whether it reads images (set it under Settings → Providers)" },
       x.vision === true ? "👁" : x.vision === false ? "text only" : "?"),
     h("span", { class: `badge ${x.tier}` }, x.tier))));
-    if (!shown.length) listEl.append(h("div", { class: "muted" }, "No matching models."));
+    if (!shown.length) {
+      listEl.append(h("div", { class: "muted" }, pool.length || !filter ? "No matching models." : `No ${filterNote || "matching"} models from ${prov}.`));
+    }
   };
   const load = async (refresh) => {
     listEl.replaceChildren(h("div", { class: "muted" }, "Loading…"));
@@ -1955,16 +1971,41 @@ async function openModelPicker() {
   search.addEventListener("input", render);
   provSel.addEventListener("change", () => { prov = provSel.value; load(false); });
   m = modal({
-    title: "Choose model", wide: true,
+    title, wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      note ? h("div", { class: "small" }, note) : null,
       h("div", { class: "muted small" }, legend, " Tier is detected from the model id; override it in Settings → Providers."),
-      h("div", { class: "muted small" }, "👁 reads images · text only: needs a vision helper (Settings → Model) for screenshots and photos · 🧠 reasoning model."),
+      h("div", { class: "muted small" }, filter ? `Showing ${filterNote} models only.` : "👁 reads images · text only: needs a vision helper (Settings → Model) for screenshots and photos · 🧠 reasoning model."),
       h("div", { class: "row" }, providers.length > 1 ? provSel : null, search,
         h("button", { type: "button", onclick: () => load(true) }, "Refresh")),
       listEl),
-    buttons: [{ label: "Close" }],
+    buttons: [...extraButtons.map((b) => ({ ...b, onClick: async () => { await b.onClick(); } })), { label: "Close" }],
   });
+  setTimeout(() => search.focus(), 40);
   load(false);
+  return m;
+}
+
+function openModelPicker() {
+  const c = S.state.config;
+  pickModel({ title: "Choose model", current: c.active_model ? `${c.active_provider}|${c.active_model}` : "",
+    onPick: (prov, model) => api("POST", "/api/model", { provider: prov, model }) });
+}
+
+// A setting that holds a model ("provider|model"): shows the choice, opens the picker, and
+// offers "none". Saves as soon as a model is picked.
+function modelSetting({ key, value, noneLabel, pickTitle, filter, filterNote, note, onSaved }) {
+  const shown = h("span", { class: "mono" }, value ? value.replace("|", " · ") : noneLabel);
+  const save = async (v) => {
+    await api("POST", "/api/settings", { [key]: v });
+    shown.textContent = v ? v.replace("|", " · ") : noneLabel;
+    toast("Saved.", "ok", 2000);
+    onSaved?.(v);
+  };
+  return h("div", { class: "model-setting" }, shown, h("span", { class: "spacer" }),
+    h("button", { type: "button", onclick: () => pickModel({ title: pickTitle, current: value, filter, filterNote, note,
+      onPick: (prov, model) => save(`${prov}|${model}`) }) }, "Choose…"),
+    h("button", { type: "button", class: "ghost", onclick: () => guarded(() => save("")) }, noneLabel.startsWith("None") ? "None" : "Clear"));
 }
 
 // ------------------------------------------------------------------ settings
@@ -2192,6 +2233,20 @@ function openSettings(tab = "providers") {
     return box;
   }
 
+  function helperAttestation() {
+    const v = visionState();
+    const lab = v.mode === "helper" ? attestLabel(S.state.helper_attestation) : null;
+    if (!lab) return h("span", {});
+    const att = S.state.helper_attestation;
+    return h("div", { class: `vision-now ${lab.cls === "ok" ? "native" : lab.cls === "bad" ? "none" : "helper"}` },
+      h("b", {}, `Vision helper ${v.helper}: ${lab.text}`), h("div", { class: "muted small pre" }, lab.title),
+      att.status === "verified" || att.status === "failed" ? h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
+        const r = await api("POST", "/api/attest", { slot: "helper" });
+        toast(r.status === "verified" ? `Vision helper attested: ${r.summary}` : `Attestation failed: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
+        show("model");
+      }) }, "Re-check") : null);
+  }
+
   function modelPane() {
     const g = S.state.config.settings.generation || {};
     const num = (key, attrs = {}) => h("input", { type: "number", value: g[key] ?? "", placeholder: "model default", ...attrs });
@@ -2206,27 +2261,15 @@ function openSettings(tab = "providers") {
         ["medium", "medium"], ["high", "high"], ["xhigh", "extra high"], ["max", "max"]].map(([v, l]) => h("option", { value: v, selected: (g.reasoning_effort || "") === v }, l))),
     };
     const field = (label, el, hint) => h("label", { class: "field" }, h("span", {}, label), el, hint ? h("div", { class: "muted small" }, hint) : null);
-    const helper = h("select", {}, h("option", { value: "" }, "Loading vision models…"));
-    const current = S.state.config.settings.vision_model || "";
-    const loadHelpers = async () => {
-      const opts = [h("option", { value: "", selected: !current }, "None (image features off for text-only models)")];
-      for (const p of S.state.config.providers) {
-        try {
-          const models = (await api("GET", `/api/models?provider=${encodeURIComponent(p.name)}`)).models;
-          for (const m of models.filter((x) => x.vision === true && x.allowed)) {
-            const v = `${p.name}|${m.id}`;
-            opts.push(h("option", { value: v, selected: v === current }, `${m.id}  (${p.name}, ${m.tier})`));
-          }
-        } catch { /* provider unreachable: skip */ }
-      }
-      if (current && !opts.some((o) => o.value === current)) opts.push(h("option", { value: current, selected: true }, `${current} (not available now)`));
-      helper.replaceChildren(...opts);
-    };
-    loadHelpers();
+    const helper = modelSetting({ key: "vision_model", value: S.state.config.settings.vision_model || "",
+      noneLabel: "None (image features off for text-only models)", pickTitle: "Choose a vision helper",
+      filter: (m) => m.vision === true, filterNote: "vision",
+      note: "The vision helper describes each image for a chat model that can't read images. Only models that read images are listed.",
+      onSaved: () => setTimeout(() => show("model"), 300) });
     const v = visionState();
     const save = async () => {
       const generation = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
-      await api("POST", "/api/settings", { generation, vision_model: helper.value });
+      await api("POST", "/api/settings", { generation });
       toast("Model settings saved.", "ok");
     };
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
@@ -2242,14 +2285,19 @@ function openSettings(tab = "providers") {
       h("div", { class: `vision-now ${v.mode}` }, v.mode === "native" ? `The current model (${v.model}) reads images directly.`
         : v.mode === "helper" ? `The current model (${v.model}) can't read images; ${v.helper} describes them for it.`
         : `Image features are off: ${v.why}`),
+      helperAttestation(),
       field("Vision helper", helper, "Used only when the chat model can't read images: it describes each image once (text exactly, then the rest), and the chat model gets the description. That adds a request per image, so replies with images take longer. It must be allowed by the case's sensitivity. With no helper, image features are disabled for text-only models."),
-      h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(save) }, "Save")));
+      h("h3", {}, "Second opinion"),
+      field("Reviewer for disruptive commands", modelSetting({ key: "review_model", value: S.state.config.settings.review_model || "",
+        noneLabel: "Clear (use the chat model)", pickTitle: "Choose the second-opinion reviewer",
+        note: "The reviewer sees only the command and case notes, never the proposer's reasoning. A different model gives a more independent opinion." }),
+        "It must be allowed by the case's sensitivity. With none set, the chat model reviews."),
+      h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(save) }, "Save generation settings")));
   }
 
   function generalPane() {
     const s = S.state.config.settings;
     const num = (v) => h("input", { type: "number", value: v });
-    const review = h("input", { type: "text", value: s.review_model || "", placeholder: "provider|model  e.g. NanoGPT|private/glm-5-3" });
     const f = { capture_max_lines: num(s.capture_max_lines), capture_max_chars: num(s.capture_max_chars),
       scrollback: num(s.scrollback), font_size: num(s.font_size), context_warn_tokens: num(s.context_warn_tokens || 100000) };
     const sel = (value, opts) => h("select", {}, opts.map(([v, l]) => h("option", { value: v, selected: v === value }, l)));
@@ -2270,8 +2318,7 @@ function openSettings(tab = "providers") {
         h("label", { class: "field" }, h("span", {}, "Terminal font size (new sessions)"), f.font_size)),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "Warn when prompt tokens exceed"), f.context_warn_tokens),
-        h("label", { class: "field" }, h("span", {}, "Second-opinion reviewer (provider|model)"), review)),
-      h("div", { class: "muted small" }, "The reviewer sees only the command and case notes, never the proposer's reasoning. It must be allowed by the case sensitivity. Leave empty to use the active model."),
+        h("span", { class: "field" })),
       h("h3", {}, "Web search"),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "AI web searches"), search.search_mode),
@@ -2291,7 +2338,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, "Shortcuts: Alt+1…9 switch terminal tabs · Ctrl+Shift+Enter runs the next pending read-only command · Ctrl+Shift+K focuses the chat · Ctrl+Shift+C/V copy/paste in the terminal."),
       h("div", { class: "muted small" }, `Case logs are stored under ${S.state.case ? S.state.case.dir.replace(/\/[^/]+$/, "") : "~/.local/share/datoolkit/cases"}.`),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
-        await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])), review_model: review.value.trim(),
+        await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])),
           ...Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])) });
         toast("Settings saved.", "ok");
       }) }, "Save")));
@@ -2437,6 +2484,7 @@ function init() {
   $("#case-btn").addEventListener("click", () => openCaseModal(false));
   $("#model-btn").addEventListener("click", openModelPicker);
   $("#attest-btn").addEventListener("click", () => guarded(async () => {
+    if (S.state.attestation?.status === "unattested") return toast(S.state.attestation.note, "info", 12000);
     const r = await api("POST", "/api/attest");
     toast(r.status === "verified" ? `Enclave attested: ${r.summary}` : `Attestation failed: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
   }));

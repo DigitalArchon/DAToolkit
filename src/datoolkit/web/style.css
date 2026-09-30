@@ -380,3 +380,7 @@ p.small.warn { color: var(--warn); }
 .vision-now.helper { border-color: var(--warn); }
 .vision-now.none { border-color: var(--danger); }
 button[data-needs-vision]:disabled { opacity: .35; }
+
+.model-setting { display: flex; gap: 8px; align-items: center; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+#vision-btn.att-bad { color: var(--danger); }
+#attest-btn.warn { color: var(--warn); border-color: var(--warn); }

@@ -178,3 +178,82 @@ async def test_retry_after_stop_drops_the_partial_reply(env):  # noqa: F811
     await wait_turn(engine)
     assert [m["role"] for m in fake.requests[-1]["messages"]] == ["system", "user"]
     await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------- attestation of the vision helper
+
+class _Att:
+    def __init__(self, key="k1"):
+        self.hpke_key_sha256 = key
+        self.summary = "router-0.tinfoil.sh runs the router, measured by AMD SEV-SNP"
+
+    def to_dict(self):
+        return {"hpke_key_sha256": self.hpke_key_sha256, "summary": self.summary, "enclave": "router-0.tinfoil.sh"}
+
+
+def _fake_private_client(engine, fake_api, fail=False):
+    """A PrivateModeClient stand-in: attests (or refuses), then answers like the fake API."""
+    from datoolkit.llm.private_mode import PrivateModeClient
+
+    class Fake(PrivateModeClient):
+        def __init__(self):
+            self.calls = []
+
+        async def attest(self):
+            self.calls.append("attest")
+            if fail:
+                raise RuntimeError("measurement mismatch")
+            return _Att()
+
+        async def complete(self, model, messages, params=None):
+            self.calls.append("complete")
+            return fake_api.completions.pop(0)
+    return Fake()
+
+
+async def test_tee_models_say_they_are_not_attested(env):  # noqa: F811
+    engine, fake, _ = env
+    engine.new_case("t", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    assert engine.attestation["status"] == "unattested" and "not attested" in engine.attestation["note"]
+    engine.cfg.providers[0].vision_overrides = {"TEE/glm-5.3": "no", "TEE/kimi-k3": "yes"}
+    engine.save_settings({"vision_model": "Fake|TEE/kimi-k3"})
+    assert engine.helper_attestation["status"] == "unattested" and engine.helper_attestation["model"] == "TEE/kimi-k3"
+
+
+async def test_private_helper_is_attested_before_an_image_is_sealed(env, monkeypatch):  # noqa: F811
+    engine, fake, _ = env
+    engine.cfg.providers[0].vision_overrides = {"text/model": "no", "private/kimi-k3": "yes"}
+    engine.new_case("p", "open")
+    engine.select_model("Fake", "text/model")
+    helper = _fake_private_client(engine, fake)
+    real = engine._client
+    monkeypatch.setattr(engine, "_client", lambda prov, model="": helper if model == "private/kimi-k3" else real(prov, model))
+    engine.save_settings({"vision_model": "Fake|private/kimi-k3"})
+    await asyncio.sleep(0.05)                                  # the background attestation
+    assert engine.helper_attestation["status"] == "verified"
+    assert engine.snapshot()["helper_attestation"]["model"] == "private/kimi-k3"
+    fake.completions.append("A console menu.")
+    fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
+    helper.calls.clear()
+    engine.send("look", images=[_png()])
+    await wait_turn(engine)
+    assert helper.calls == ["attest", "complete"]              # attested, then sealed
+    assert "router-0.tinfoil.sh" in engine.chat[-2]["image_notes"]["img-1.png"]["sealed"]
+
+
+async def test_image_not_sent_to_a_helper_that_fails_attestation(env, monkeypatch):  # noqa: F811
+    engine, fake, _ = env
+    engine.cfg.providers[0].vision_overrides = {"text/model": "no", "private/kimi-k3": "yes"}
+    engine.new_case("f", "open")
+    engine.select_model("Fake", "text/model")
+    helper = _fake_private_client(engine, fake, fail=True)
+    real = engine._client
+    monkeypatch.setattr(engine, "_client", lambda prov, model="": helper if model == "private/kimi-k3" else real(prov, model))
+    engine.save_settings({"vision_model": "Fake|private/kimi-k3"})
+    await asyncio.sleep(0.05)
+    assert engine.helper_attestation["status"] == "failed"
+    engine.send("look", images=[_png()])
+    await wait_turn(engine)
+    assert "complete" not in helper.calls                      # nothing sealed to an unproven enclave
+    assert "could not be attested" in engine._last_turn_error and engine.can_retry

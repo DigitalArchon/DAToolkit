@@ -128,8 +128,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         return {"ok": True}
 
     @app.post("/api/attest")
-    async def attest(e: Engine = Depends(auth)):
-        return await e.attest_now()
+    async def attest(request: Request, e: Engine = Depends(auth)):
+        body = await request.json() if int(request.headers.get("content-length") or 0) else {}
+        return await e.attest_now(str(body.get("slot", "chat")))
 
     @app.post("/api/hosts")
     async def save_host(body: dict, e: Engine = Depends(auth)):
