@@ -29,6 +29,8 @@ def is_private_mode(model_id: str) -> bool:
 
 
 def is_local_url(base_url: str) -> bool:
+    if base_url.startswith("training://"):
+        return True  # scripted training provider: nothing leaves the machine
     host = (urlparse(base_url).hostname or "").lower()
     if host in ("localhost", "") or host.endswith(".local") or host.endswith(".lan"):
         return True

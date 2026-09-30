@@ -20,7 +20,10 @@ from ..engine import Engine, UserError
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
 
-def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine]) -> FastAPI:
+def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
+               companion_token: str | None = None) -> FastAPI:
+    """`companion_token` gates the read-mostly phone view: it can see chat, queue and hypotheses
+    and mark items done/skipped, and nothing else. It never reaches a terminal."""
     listeners: set[asyncio.Queue] = set()
 
     def emit(event: dict) -> None:
@@ -41,10 +44,24 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     def check(t: str | None) -> bool:
         return t is not None and hmac.compare_digest(t, token)
 
+    def check_companion(t: str | None) -> bool:
+        return bool(companion_token) and t is not None and hmac.compare_digest(t, companion_token)
+
     def auth(request: Request) -> Engine:
         if not check(request.headers.get("x-token")):
             raise HTTPException(403, "bad token")
         return request.app.state.engine
+
+    def auth_companion(request: Request) -> Engine:
+        if not check_companion(request.headers.get("x-token")):
+            raise HTTPException(403, "bad token")
+        return request.app.state.engine
+
+    def companion_view(e: Engine) -> dict:
+        snap = e.snapshot()
+        return {"case": snap["case"], "chat": snap["chat"][-30:], "queue": snap["queue"], "busy": snap["busy"],
+                "hypotheses": snap["hypotheses"], "sessions": [{k: s[k] for k in ("id", "kind", "target", "exited")}
+                                                               for s in snap["sessions"]]}
 
     @app.exception_handler(UserError)
     async def user_error(_: Request, exc: UserError):
@@ -58,6 +75,29 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.get("/")
     async def index():
         return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/companion")
+    async def companion_page():
+        if not companion_token:
+            raise HTTPException(404)
+        return FileResponse(WEB_DIR / "companion.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/companion/state")
+    async def companion_state(e: Engine = Depends(auth_companion)):
+        return companion_view(e)
+
+    @app.post("/api/companion/queue/{num}")
+    async def companion_mark(num: int, body: dict, e: Engine = Depends(auth_companion)):
+        status = body.get("status")
+        if status not in ("ran", "skipped", "pending"):
+            raise HTTPException(400, "companion can only mark items ran, skipped or pending")
+        e.update_item(num, status=status, note=str(body.get("note", ""))[:200])
+        return {"ok": True}
+
+    @app.post("/api/companion/hypotheses/{hid}")
+    async def companion_mark_h(hid: str, body: dict, e: Engine = Depends(auth_companion)):
+        e.mark_hypothesis(hid, str(body.get("mark", "")))
+        return {"ok": True}
 
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
@@ -155,12 +195,120 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/preview")
     async def preview(body: dict, e: Engine = Depends(auth)):
-        return {"items": e.preview([str(t) for t in body.get("texts", [])])}
+        return {"items": e.preview([str(t) for t in body.get("texts", [])], body.get("nums"))}
 
     @app.post("/api/send")
     async def send(body: dict, e: Engine = Depends(auth)):
-        e.send(body.get("message", ""), body.get("results"), body.get("snippets"))
+        e.send(body.get("message", ""), body.get("results"), body.get("snippets"), body.get("images"))
         return {"ok": True}
+
+    # queue helpers
+    @app.post("/api/queue/{num}/dry-run")
+    async def dry_run(num: int, e: Engine = Depends(auth)):
+        return e.dry_run_item(num)
+
+    @app.post("/api/queue/{num}/watch")
+    async def watch(num: int, body: dict, e: Engine = Depends(auth)):
+        return e.watch_item(num, int(body.get("interval", 10)), int(body.get("count", 30)))
+
+    @app.post("/api/queue/{num}/review")
+    async def review(num: int, e: Engine = Depends(auth)):
+        return await e.review_command(num)
+
+    @app.get("/api/queue/group/{group}")
+    async def group_items(group: str, e: Engine = Depends(auth)):
+        return {"nums": e.run_group(group)}
+
+    @app.get("/api/rollback")
+    async def rollback_list(e: Engine = Depends(auth)):
+        return {"items": e.rollback_candidates()}
+
+    @app.post("/api/rollback/queue")
+    async def rollback_queue(body: dict, e: Engine = Depends(auth)):
+        return {"items": e.queue_rollbacks([int(n) for n in body.get("nums", [])])}
+
+    # recipes
+    @app.get("/api/recipes")
+    async def list_recipes(e: Engine = Depends(auth)):
+        return {"recipes": e.list_recipes()}
+
+    @app.post("/api/recipes/{rid}/queue")
+    async def queue_recipe(rid: str, body: dict, e: Engine = Depends(auth)):
+        added = e.queue_recipe(rid, str(body.get("session_id", "")), bool(body.get("include_install")))
+        return {"nums": [p.num for p in added]}
+
+    # hypotheses
+    @app.post("/api/hypotheses/{hid}/mark")
+    async def mark_hypothesis(hid: str, body: dict, e: Engine = Depends(auth)):
+        e.mark_hypothesis(hid, str(body.get("mark", "")))
+        return {"ok": True}
+
+    # baselines
+    @app.get("/api/baselines")
+    async def baselines(e: Engine = Depends(auth)):
+        return {"baselines": e.list_baselines()}
+
+    @app.post("/api/baselines/save")
+    async def baseline_save(body: dict, e: Engine = Depends(auth)):
+        return e.save_baseline(str(body.get("session_id", "")))
+
+    @app.post("/api/baselines/diff")
+    async def baseline_diff(body: dict, e: Engine = Depends(auth)):
+        return e.diff_baseline(str(body.get("session_id", "")), str(body.get("baseline", "")))
+
+    # tool cache
+    @app.get("/api/tools")
+    async def tools(e: Engine = Depends(auth)):
+        return {"tools": e.list_tools()}
+
+    @app.post("/api/tools")
+    async def add_tool(body: dict, e: Engine = Depends(auth)):
+        return e.add_tool(str(body.get("path", "")), str(body.get("name", "")), str(body.get("os", "windows")),
+                          str(body.get("notes", "")), str(body.get("run", "")))
+
+    @app.delete("/api/tools/{name}")
+    async def remove_tool(name: str, e: Engine = Depends(auth)):
+        e.remove_tool(name)
+        return {"ok": True}
+
+    @app.post("/api/tools/{name}/transfer")
+    async def transfer_tool(name: str, body: dict, e: Engine = Depends(auth)):
+        return e.transfer_tool(name, str(body.get("session_id", "")))
+
+    # context, timeline, search, files
+    @app.get("/api/context")
+    async def context(e: Engine = Depends(auth)):
+        return e.context_view()
+
+    @app.post("/api/context/drop")
+    async def context_drop(body: dict, e: Engine = Depends(auth)):
+        e.drop_context([int(g) for g in body.get("groups", [])])
+        return {"ok": True}
+
+    @app.get("/api/case/timeline")
+    async def timeline(e: Engine = Depends(auth)):
+        return e.timeline()
+
+    @app.get("/api/case/transcript")
+    async def transcript(sid: str, upto: int | None = None, e: Engine = Depends(auth)):
+        return {"text": e.transcript_text(sid, upto)}
+
+    @app.get("/api/case/file/{name}")
+    async def case_file(name: str, e: Engine = Depends(auth)):
+        return FileResponse(e.case_file(name), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/search")
+    async def search_cases(q: str, e: Engine = Depends(auth)):
+        from ..search import search
+
+        hits = search(q, exclude_id=e.case.id if e.case else "", limit=10)
+        return {"cases": [{k: v for k, v in h.items() if k != "runbook"} | {"runbook_preview": h["runbook"][:600]} for h in hits]}
+
+    @app.get("/api/training/scenarios")
+    async def training_scenarios(e: Engine = Depends(auth)):
+        from ..llm.training import scenarios
+
+        return {"scenarios": scenarios()}
 
     @app.post("/api/stop")
     async def stop(e: Engine = Depends(auth)):
@@ -180,6 +328,14 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def export_summary(e: Engine = Depends(auth)):
         return await e.ticket_summary()
 
+    @app.post("/api/export/client")
+    async def export_client(e: Engine = Depends(auth)):
+        return await e.client_update()
+
+    @app.post("/api/export/runbook")
+    async def export_runbook(e: Engine = Depends(auth)):
+        return await e.distill_runbook()
+
     @app.post("/api/open-folder")
     async def open_folder(e: Engine = Depends(auth)):
         if e.case:
@@ -190,14 +346,19 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.websocket("/ws/events")
     async def ws_events(ws: WebSocket):
-        if not check(ws.query_params.get("t")):
+        t = ws.query_params.get("t")
+        companion = not check(t)
+        if companion and not check_companion(t):
             await ws.close(code=4403)
             return
         await ws.accept()
         q: asyncio.Queue = asyncio.Queue()
         listeners.add(q)
         try:
-            await ws.send_text(json.dumps({"type": "state", "state": app.state.engine.snapshot()}))
+            if companion:
+                await ws.send_text(json.dumps({"type": "state", "state": companion_view(app.state.engine)}))
+            else:
+                await ws.send_text(json.dumps({"type": "state", "state": app.state.engine.snapshot()}))
             receiver = asyncio.create_task(ws.receive_text())
             while True:
                 getter = asyncio.create_task(q.get())
@@ -207,7 +368,13 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                     receiver.result()  # raises on disconnect
                     receiver = asyncio.create_task(ws.receive_text())
                     continue
-                await ws.send_text(json.dumps(getter.result(), default=str))
+                ev = getter.result()
+                if companion:
+                    # the phone never gets config, prompts or credential dialogs: just a refresh cue
+                    if ev.get("type") in ("state", "queue", "chat", "turn_end", "hypotheses", "turn_start", "sessions"):
+                        await ws.send_text(json.dumps({"type": "state", "state": companion_view(app.state.engine)}))
+                    continue
+                await ws.send_text(json.dumps(ev, default=str))
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:

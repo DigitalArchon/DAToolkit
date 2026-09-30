@@ -110,6 +110,67 @@ MODIFYING: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# Commands that cut the connection you are issuing them over. Keyed by session kind.
+# (These are the classic self-inflicted outages of remote work.)
+_SSH_CUTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bsystemctl\s+(\S+\s+)*(stop|restart|disable|mask|kill)\s+(\S+\s+)*(ssh|sshd|openssh-server|networking|NetworkManager|systemd-networkd|network|wicked|netbird|tailscaled|wg-quick@\S+)\b"), "stops or restarts the SSH/network service you are connected through"),
+    (re.compile(r"\bservice\s+(ssh|sshd|networking|network|NetworkManager)\s+(stop|restart)\b"), "stops or restarts the SSH/network service you are connected through"),
+    (re.compile(r"\b(pkill|killall)\s+(-\S+\s+)*(sshd?|ssh-agent)\b"), "kills sshd"),
+    (re.compile(r"\bip\s+link\s+set\s+(dev\s+)?\S+\s+down\b"), "brings an interface down"),
+    (re.compile(r"\b(ifdown|nmcli\s+(dev|device|con|connection)\s+down)\b"), "brings an interface down"),
+    (re.compile(r"\bip\s+(addr|address|route)\s+(flush|del|delete)\b"), "removes addresses or routes"),
+    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-P\s+INPUT\s+DROP\b"), "default-drops inbound traffic"),
+    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-[AI]\s+INPUT\b(?!.*--dport\s+(?!22\b))(?=.*-j\s+(DROP|REJECT))"), "drops inbound traffic, possibly including SSH"),
+    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-F\b"), "flushes the firewall (default policy may drop SSH)"),
+    (re.compile(r"\bnft\s+(flush|delete)\s+(ruleset|table)\b"), "flushes the firewall"),
+    (re.compile(r"\bufw\s+(enable|reset|deny\s+(22|ssh)\b|default\s+deny\s+incoming)"), "may block SSH"),
+    (re.compile(r"\bfirewall-cmd\b.*--remove-service=ssh\b"), "removes the SSH firewall allowance"),
+    (re.compile(r"\bsed\s+(-\S+\s+)*-i\b.*\bsshd_config\b"), "edits sshd_config in place (a bad edit locks you out on restart)"),
+    (re.compile(r"\b(usermod\s+-L|passwd\s+-l|chage\s+-E\s*0)\b.*\b(root|\$USER)\b"), "locks the account you may be using"),
+    (re.compile(r"\b(shutdown|reboot|poweroff|halt|init\s+[06]|telinit\s+[06])\b"), "reboots or halts the host"),
+    (re.compile(r"\b(wg-quick\s+down|tailscale\s+down|openvpn\b.*--rmtun|ipsec\s+(stop|down))\b"), "tears down the VPN this session may traverse"),
+]
+_WINRM_CUTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(Stop|Restart)-Service\b.*\bWinRM\b", _I), "stops or restarts WinRM, which carries this session"),
+    (re.compile(r"\b(Disable|Restart)-NetAdapter\b", _I), "disables or restarts a network adapter"),
+    (re.compile(r"\b(Disable-PSRemoting|winrm\s+delete|Remove-Item\b.*\bWSMan:)", _I), "disables PowerShell remoting"),
+    (re.compile(r"\bSet-NetFirewallProfile\b.*-DefaultInboundAction\s+Block", _I), "blocks inbound traffic by default"),
+    (re.compile(r"\b(Disable-NetFirewallRule|Remove-NetFirewallRule)\b.*\b(WinRM|WINRM|5985|5986)\b", _I), "removes the WinRM firewall rule"),
+    (re.compile(r"\bNew-NetFirewallRule\b.*-Direction\s+Inbound\b.*-Action\s+Block", _I), "adds an inbound block rule"),
+    (re.compile(r"\b(Remove-NetIPAddress|Remove-NetRoute|Set-NetIPInterface\b.*-Dhcp\s+Disabled)", _I), "changes the addressing this session depends on"),
+    (re.compile(r"\b(Restart-Computer|Stop-Computer|shutdown\s+/[rs])\b", _I), "reboots or halts the host"),
+    (re.compile(r"\bipconfig\s+/release\b", _I), "releases the DHCP lease"),
+    (re.compile(r"\bnetsh\s+(interface|int)\b.*\b(disable|disabled)\b", _I), "disables an interface"),
+    (re.compile(r"\bnet\s+stop\s+winrm\b", _I), "stops WinRM"),
+    (re.compile(r"\bsc(\.exe)?\s+stop\s+winrm\b", _I), "stops WinRM"),
+]
+_NETDEV_CUTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"^\s*reload\b", _I | re.M), "reloads the device"),
+    (re.compile(r"\b(no\s+)?(ip\s+ssh|line\s+vty|transport\s+input)\b", _I), "changes vty/SSH access"),
+    (re.compile(r"^\s*shutdown\s*$", _I | re.M), "shuts the interface you may be connected through"),
+    (re.compile(r"\b(no\s+ip\s+address|no\s+ip\s+route|no\s+interface)\b", _I), "removes addressing or routing"),
+    (re.compile(r"\b(write\s+erase|erase\s+startup)", _I), "erases the configuration"),
+    (re.compile(r"/system\s+(reboot|reset-configuration)|/ip\s+service\s+(disable|set).*ssh|/ip\s+firewall\s+filter\s+(remove|add\s+.*action=drop)", _I), "cuts management access"),
+]
+
+
+def session_impact(command: str, session_kind: str) -> str | None:
+    """Reason this command would cut the session it is run in, or None.
+
+    session_kind is "local", "ssh", "winrm". SSH sessions may reach a network device rather
+    than a Linux host, so device rules are checked too."""
+    if session_kind == "ssh":
+        rules = _SSH_CUTS + _NETDEV_CUTS
+    elif session_kind == "winrm":
+        rules = _WINRM_CUTS
+    else:
+        return None
+    for pat, why in rules:
+        if pat.search(command):
+            return why
+    return None
+
+
 def classify(command: str) -> tuple[str, list[str]]:
     """Return (level, reasons) for the command according to local rules."""
     reasons = [why for pat, why in DISRUPTIVE if pat.search(command)]

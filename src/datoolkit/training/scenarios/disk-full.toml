@@ -1,0 +1,49 @@
+title = "Linux server: disk full"
+finished = "That's the end of this scenario. Root cause was journald logs plus a deleted-but-open log file. Export a ticket summary to finish the exercise."
+summary = """Problem: /var reported 100% full; services failing to write logs.
+Investigation: df showed / at 99%; du pointed at /var/log; lsof showed a deleted 9 GB log held open by rsyslogd.
+Root cause: journald had no size cap and an old rsyslog file was deleted while still open (confidence: high).
+Actions taken: journalctl --vacuum-size=500M; restarted rsyslog to release the deleted file.
+Outcome / next steps: / at 41%; set SystemMaxUse in journald.conf to keep it bounded."""
+
+[[turn]]
+say = "Let's confirm which filesystem is full and where the space went. I'll start read-only."
+hypotheses = [
+  { id = "logs", text = "Logs (journald or /var/log) have grown unbounded", confidence = 0.5, status = "open" },
+  { id = "deleted-open", text = "A deleted file is still held open by a process", confidence = 0.3, status = "open" },
+  { id = "docker", text = "Container images or volumes are filling the disk", confidence = 0.2, status = "open" },
+]
+propose = [
+  { command = "df -hT -x tmpfs -x devtmpfs", purpose = "Which filesystem is full", risk = "read_only" },
+  { command = "sudo du -xh --max-depth=2 / 2>/dev/null | sort -h | tail -15", purpose = "Largest directories", risk = "read_only" },
+]
+
+[[turn]]
+say = "Thanks. /var/log dominates and du and df disagree by several GB, which points at a deleted file that is still open. Two more read-only checks, then I'll propose the fix."
+hypotheses = [
+  { id = "logs", text = "Logs (journald or /var/log) have grown unbounded", confidence = 0.7, status = "supported" },
+  { id = "deleted-open", text = "A deleted file is still held open by a process", confidence = 0.6, status = "supported" },
+  { id = "docker", text = "Container images or volumes are filling the disk", confidence = 0.05, status = "ruled_out" },
+]
+propose = [
+  { command = "journalctl --disk-usage", purpose = "How much journald holds", risk = "read_only" },
+  { command = "sudo lsof +L1 | head -20", purpose = "Deleted-but-open files", risk = "read_only" },
+]
+
+[[turn]]
+say = "Journald holds 6 GB and rsyslogd has a deleted 9 GB file open. Both fixes are recoverable: vacuuming the journal keeps the last 500 MB, and restarting rsyslog releases the deleted file. Note the second one is flagged disruptive because it restarts a service; logging pauses for a second."
+hypotheses = [
+  { id = "logs", text = "journald has no size cap (6 GB)", confidence = 0.95, status = "supported" },
+  { id = "deleted-open", text = "rsyslogd holds a deleted 9 GB file open", confidence = 0.95, status = "supported" },
+]
+propose = [
+  { command = "sudo journalctl --vacuum-size=500M", purpose = "Trim the journal to 500 MB", risk = "modifying", rollback = "Not reversible; the vacuumed entries are gone. Export first with journalctl -o export > /root/journal.bak if needed." },
+  { command = "sudo systemctl restart rsyslog", purpose = "Release the deleted log file", risk = "disruptive", rollback = "The service restarts itself; no rollback needed." },
+  { command = "df -h /", purpose = "Confirm space was freed", risk = "read_only" },
+]
+
+[[turn]]
+say = "Root is back to 41%. To keep it bounded, set SystemMaxUse=500M in /etc/systemd/journald.conf and restart journald. That's the root cause and the fix; use Export → Ticket summary to write it up."
+propose = [
+  { command = "sudo sed -i 's/^#\\?SystemMaxUse=.*/SystemMaxUse=500M/' /etc/systemd/journald.conf && grep SystemMaxUse /etc/systemd/journald.conf", purpose = "Cap the journal size", risk = "modifying", rollback = "sudo sed -i 's/^SystemMaxUse=.*/#SystemMaxUse=/' /etc/systemd/journald.conf" },
+]

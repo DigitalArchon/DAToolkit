@@ -26,6 +26,13 @@ class Proposal:
     note: str = ""
     ran_at: float | None = None          # time.time() when Run/Insert was clicked
     capture_start: int | None = None     # byte offset into the session transcript at that moment
+    rollback: str = ""                   # how to undo it (required from the model for changes)
+    group: str = ""                      # paired probes: items with the same group run together
+    recipe: str = ""                     # recipe id this step came from
+    recipe_key: str = ""                 # stable step key (baseline diffs)
+    watch: bool = False                  # command was wrapped in a bounded watch loop
+    cuts_session: str = ""               # local rule: this would cut the session it runs in
+    dry_run_of: int | None = None        # this item rehearses another item
 
     @property
     def edited(self) -> bool:
@@ -43,16 +50,17 @@ class Queue:
         self._next = 1
 
     def add(self, call_id: str, raw_items: list[dict], known_sessions: set[str] | None = None,
-            fallback_session: str = "") -> list[Proposal]:
+            fallback_session: str = "", session_kinds: dict[str, str] | None = None,
+            insert_before: int | None = None) -> list[Proposal]:
         """Queue proposals. An unknown or missing session id falls back to `fallback_session`
-        (the only open session, when there is exactly one)."""
+        (the only open session, when there is exactly one). `session_kinds` (id -> kind) lets
+        the blast-radius rule see which session a command would cut."""
         added = []
         for raw in raw_items:
             command = str(raw.get("command", "")).strip()
             if not command:
                 continue
             model_risk = str(raw.get("risk", "modifying"))
-            level, reasons = risk.effective(model_risk, command)
             session_id = str(raw.get("session_id") or "")
             if fallback_session and known_sessions is not None and session_id not in known_sessions:
                 session_id = fallback_session
@@ -63,14 +71,36 @@ class Queue:
                 command=command,
                 purpose=str(raw.get("purpose", "")),
                 model_risk=model_risk,
-                risk=level,
-                risk_reasons=reasons,
+                risk="modifying",
                 original_command=command,
+                rollback=str(raw.get("rollback", "") or ""),
+                group=str(raw.get("group", "") or ""),
+                recipe=str(raw.get("recipe", "") or ""),
+                recipe_key=str(raw.get("recipe_key", "") or ""),
+                dry_run_of=raw.get("dry_run_of"),
             )
+            self._classify(p, session_kinds)
             self._next += 1
-            self.items.append(p)
+            if insert_before is not None:
+                self.items.insert(self.items.index(self.get(insert_before)), p)
+            else:
+                self.items.append(p)
             added.append(p)
         return added
+
+    @staticmethod
+    def _classify(p: Proposal, session_kinds: dict[str, str] | None) -> None:
+        p.risk, p.risk_reasons = risk.effective(p.model_risk, p.command)
+        if p.dry_run_of is not None and p.risk != "disruptive":
+            # a rehearsal (apt -s, rsync -n, -WhatIf, plan) trips the same local rules as the
+            # real command; it is read-only by construction, but never below disruptive
+            p.risk, p.risk_reasons = "read_only", []
+        cut = risk.session_impact(p.command, (session_kinds or {}).get(p.session_id, "local"))
+        p.cuts_session = cut or ""
+        if cut:
+            p.risk = "disruptive"
+            if cut not in p.risk_reasons:
+                p.risk_reasons = p.risk_reasons + [f"cuts this session: {cut}"]
 
     def get(self, num: int) -> Proposal:
         for p in self.items:
@@ -79,13 +109,17 @@ class Queue:
         raise KeyError(f"No queue item #{num}")
 
     def update(self, num: int, *, command: str | None = None, session_id: str | None = None,
-               status: str | None = None, note: str | None = None) -> Proposal:
+               status: str | None = None, note: str | None = None,
+               session_kinds: dict[str, str] | None = None, watch: bool | None = None) -> Proposal:
         p = self.get(num)
         if command is not None and command.strip() and p.status == "pending":
             p.command = command.strip()
-            p.risk, p.risk_reasons = risk.effective(p.model_risk, p.command)
+            if watch is not None:
+                p.watch = watch
+            self._classify(p, session_kinds)
         if session_id is not None and p.status == "pending":
             p.session_id = session_id
+            self._classify(p, session_kinds)
         if status is not None:
             if status not in STATUSES:
                 raise ValueError(f"Bad status {status}")

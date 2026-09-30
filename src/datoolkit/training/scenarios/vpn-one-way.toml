@@ -1,0 +1,44 @@
+title = "VPN: one side can't reach the other"
+finished = "End of scenario. The far side's firewall dropped ICMP and the MTU was too high for the tunnel; lowering it and allowing ping fixed it."
+summary = """Problem: users at Site B could not reach the file server at Site A over the site-to-site VPN; Site A could reach B.
+Investigation: ping from B timed out; from A worked. Paired probes showed A's packets arriving at B but replies dropped by B's firewall; large packets failed (MTU).
+Root cause: B's firewall blocked ICMP echo from the tunnel network, and the tunnel MTU was 1500 causing fragmentation drops (confidence: high).
+Actions taken: allowed ICMP from 10.1.0.0/24 on B; set MTU 1400 on B's tunnel interface.
+Outcome / next steps: SMB access from B restored; add the MTU setting to B's config management."""
+
+[[turn]]
+say = "One-way reachability over a VPN is usually a firewall or a route on the far side. I need both sides at once, so please open a session on each end if you haven't, then run these."
+hypotheses = [
+  { id = "fw", text = "Site B's firewall drops traffic from the tunnel", confidence = 0.4, status = "open" },
+  { id = "route", text = "Site B lacks a return route to Site A", confidence = 0.3, status = "open" },
+  { id = "mtu", text = "MTU on the tunnel causes large packets to be dropped", confidence = 0.3, status = "open" },
+]
+propose = [
+  { command = "ip route get 10.1.0.10", purpose = "Which interface B uses to reach A's server", risk = "read_only" },
+  { command = "ping -c 4 -W 2 10.1.0.10", purpose = "Reachability from B", risk = "read_only" },
+  { command = "ping -c 3 -M do -s 1372 10.1.0.10", purpose = "Does a 1400-byte packet make it", risk = "read_only" },
+]
+
+[[turn]]
+say = "Small pings fail too, so it isn't only MTU. Let's watch B's firewall counters while A pings, as a pair: run the counter command on B and the ping on A at the same time."
+hypotheses = [
+  { id = "fw", text = "Site B's firewall drops traffic from the tunnel", confidence = 0.6, status = "supported" },
+  { id = "route", text = "Site B lacks a return route to Site A", confidence = 0.1, status = "ruled_out" },
+  { id = "mtu", text = "MTU on the tunnel causes large packets to be dropped", confidence = 0.5, status = "open" },
+]
+propose = [
+  { command = "sudo iptables -L INPUT -v -n --line-numbers | head -30", purpose = "Input rules and counters on B", risk = "read_only" },
+  { command = "ping -c 10 -i 0.5 10.2.0.10", purpose = "Traffic from A while B counts", risk = "read_only" },
+]
+
+[[turn]]
+say = "The DROP rule's counter rose by exactly 10, so B's firewall drops the tunnel traffic. Allowing the tunnel network fixes reachability; I'll also propose lowering the MTU. Both are firewall or interface changes, so they're flagged. Each has a rollback."
+hypotheses = [
+  { id = "fw", text = "Site B's firewall drops traffic from the tunnel", confidence = 0.95, status = "supported" },
+  { id = "mtu", text = "MTU on the tunnel causes large packets to be dropped", confidence = 0.7, status = "supported" },
+]
+propose = [
+  { command = "sudo iptables -I INPUT 1 -s 10.1.0.0/24 -j ACCEPT", purpose = "Allow traffic from Site A's LAN", risk = "modifying", rollback = "sudo iptables -D INPUT -s 10.1.0.0/24 -j ACCEPT" },
+  { command = "sudo ip link set dev wg0 mtu 1400", purpose = "Lower the tunnel MTU", risk = "modifying", rollback = "sudo ip link set dev wg0 mtu 1500" },
+  { command = "ping -c 4 10.1.0.10 && ping -c 3 -M do -s 1372 10.1.0.10", purpose = "Confirm both fixes", risk = "read_only" },
+]

@@ -6,6 +6,7 @@ import asyncio
 import codecs
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -30,11 +31,13 @@ class TranscriptWriter:
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._pending = ""
         self._file = None
+        self._times = None   # sidecar: "<unix time> <byte offset>" per write, for timeline replay
 
     def open(self, path: Path | None) -> None:
         self.close()
         if path is not None:
             self._file = path.open("a", encoding="utf-8")
+            self._times = path.with_suffix(path.suffix + ".times").open("a", encoding="utf-8")
 
     def write(self, data: bytes) -> None:
         if self._file is None:
@@ -48,13 +51,21 @@ class TranscriptWriter:
             self._pending = ""
         text = _ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "")
         text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
+        if not text:
+            return
         self._file.write(text)
         self._file.flush()
+        if self._times:
+            self._times.write(f"{time.time():.3f} {self._file.tell()}\n")
+            self._times.flush()
 
     def close(self) -> None:
         if self._file:
             self._file.close()
             self._file = None
+        if self._times:
+            self._times.close()
+            self._times = None
 
 
 @dataclass

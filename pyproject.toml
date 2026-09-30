@@ -32,12 +32,13 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
 
 [project.scripts]
 datoolkit = "datoolkit.app:main"
+datoolkit-replay = "datoolkit.replay:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-datoolkit = ["web/*.html", "web/*.js", "web/*.css", "web/vendor/*"]
+datoolkit = ["web/*.html", "web/*.js", "web/*.css", "web/vendor/*", "training/scenarios/*.toml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

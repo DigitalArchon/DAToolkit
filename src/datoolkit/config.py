@@ -56,6 +56,8 @@ class Settings:
     font_size: int = 13
     # warn in the top bar when the last request's prompt used more tokens than this
     context_warn_tokens: int = 100000
+    # "provider|model" used for second opinions on disruptive commands; empty = the active model
+    review_model: str = ""
 
 
 @dataclass

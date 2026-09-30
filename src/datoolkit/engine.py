@@ -8,25 +8,31 @@ the PTY like any keystroke.
 from __future__ import annotations
 
 import asyncio
+import base64
+import difflib
 import itertools
 import json
 import os
 import platform
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from . import config as config_mod
-from . import creds
-from .case import Case, fence
-from .config import Config, Host, Provider
+from . import creds, recipes, search, tools_cache
+from .case import Case, _slug, fence
+from .config import Config, Host, Provider, data_dir
 from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
 from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, list_private_models,
                                offers_private_mode, relay_url)
+from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
+from .safety import watch as watch_mod
+from .safety.dryrun import dry_run
 from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
@@ -68,6 +74,9 @@ class Engine:
         self._enclaves: dict[str, Enclave] = {}      # provider name -> attested enclave (Private Mode)
         self.attestation: dict | None = None         # latest attestation of the active private model
         self.last_usage: dict | None = None          # token usage of the last completed turn
+        self.hypotheses: list[dict] = []             # the model's board, with technician marks
+        self._runbooks: str = ""                     # runbook text from similar past cases (system prompt)
+        self._similar: list[dict] = []
         self._attest_task: asyncio.Task | None = None
         self._turn: asyncio.Task | None = None
         self._prompts: dict[str, tuple[asyncio.Future, dict]] = {}
@@ -107,6 +116,8 @@ class Engine:
             "busy": self.busy,
             "prompts": [info for _, info in self._prompts.values()],
             "last_usage": self.last_usage,
+            "hypotheses": self.hypotheses,
+            "similar_cases": [{k: v for k, v in c.items() if k != "runbook"} for c in self._similar],
         }
 
     def _config_view(self) -> dict:
@@ -178,6 +189,8 @@ class Engine:
 
     def _client(self, provider: Provider, model: str = "") -> LLMClient | PrivateModeClient:
         key = creds.get_secret("provider", provider.name)
+        if is_training_url(provider.base_url):
+            return TrainingClient(provider.base_url)
         if is_private_mode(model):
             enclave = self._enclaves.get(provider.name)
             if enclave is None or enclave.relay != relay_url(provider.base_url):
@@ -323,6 +336,8 @@ class Engine:
                 if value <= 0:
                     raise UserError(f"{key} must be positive.")
                 setattr(s, key, value)
+        if "review_model" in data:
+            s.review_model = str(data["review_model"] or "").strip()
         self._save_config(self.cfg)
         self._changed()
 
@@ -335,6 +350,7 @@ class Engine:
         self.queue = Queue()
         self.conv, self.chat = [], []
         self.last_usage = None
+        self.hypotheses, self._runbooks, self._similar = [], "", []
         self._attach_case()
         self._persist()
 
@@ -355,6 +371,8 @@ class Engine:
         self.chat = list(state.get("chat", []))
         self.queue = Queue.from_list(state.get("queue", []))
         self.last_usage = None
+        self.hypotheses = list(state.get("hypotheses", []))
+        self._runbooks, self._similar = "", []
         self.log("case_resumed", messages=len(self.chat), queue=len(self.queue.items))
         self._attach_case()
         if self.chat:
@@ -379,7 +397,7 @@ class Engine:
         if not self.case:
             return
         try:
-            self.case.save_state(self.conv, self.chat, self.queue.to_list())
+            self.case.save_state(self.conv, self.chat, self.queue.to_list(), self.hypotheses)
         except OSError as e:
             self.emit("toast", level="error", text=f"Could not save case state: {e}")
 
@@ -476,9 +494,12 @@ class Engine:
 
     # ---------------------------------------------------------------- queue
 
+    def _session_kinds(self) -> dict[str, str]:
+        return {s["id"]: s["kind"] for s in self.sessions.roster()}
+
     def update_item(self, num: int, **fields) -> None:
         was_pending = self.queue.get(num).status == "pending"
-        p = self.queue.update(num, **fields)
+        p = self.queue.update(num, session_kinds=self._session_kinds(), **fields)
         if "command" in fields and p.edited:
             self.log("proposal_edited", num=num, command=p.command, original=p.original_command, risk=p.risk)
         if "status" in fields:
@@ -523,27 +544,426 @@ class Engine:
         text = data.decode("utf-8", errors="replace").strip("\n")
         return {"text": text, "source": "transcript"}
 
-    def preview(self, texts: list[str]) -> list[dict]:
+    def preview(self, texts: list[str], nums: list[int | None] | None = None) -> list[dict]:
         s = self.cfg.settings
         out = []
-        for t in texts:
-            red, n = redact(t or "")
+        for i, t in enumerate(texts):
+            t = t or ""
+            collapsed = 0
+            num = nums[i] if nums and i < len(nums) else None
+            if num is not None:
+                try:
+                    if self.queue.get(int(num)).watch:
+                        t, collapsed = watch_mod.collapse(t)
+                except (KeyError, ValueError):
+                    pass
+            red, n = redact(t)
             cut, truncated = head_tail(red, s.capture_max_lines, s.capture_max_chars)
-            out.append({"text": cut, "redactions": n, "truncated": truncated, "warnings": suspicious(cut)})
+            out.append({"text": cut, "redactions": n, "truncated": truncated, "warnings": suspicious(cut),
+                        "collapsed": collapsed})
         return out
+
+    # ---------------------------------------------------------------- queue: recipes, dry runs, watch, rollback
+
+    def _need_case(self) -> Case:
+        if not self.case:
+            raise UserError("Start a case first.")
+        return self.case
+
+    def queue_recipe(self, recipe_id: str, session_id: str, include_install: bool = False,
+                     call_id: str = "recipe") -> list:
+        self._need_case()
+        r = recipes.get(recipe_id)
+        if not r:
+            raise UserError(f"Unknown recipe {recipe_id}")
+        if session_id not in self.sessions.sessions:
+            raise UserError(f"Session {session_id} is not open.")
+        items = []
+        if include_install and r.install:
+            items.append({"session_id": session_id, "command": r.install, "purpose": f"Install for recipe {r.name}",
+                          "risk": "modifying", "recipe": r.id, "recipe_key": "install"})
+        for st in r.steps:
+            items.append({"session_id": session_id, "command": st.command, "purpose": st.purpose, "risk": st.risk,
+                          "recipe": r.id, "recipe_key": st.key or st.command})
+        added = self.queue.add(call_id, items, session_kinds=self._session_kinds())
+        for p in added:
+            self.log("proposal", **p.to_dict())
+        self.log("recipe_queued", recipe=r.id, session_id=session_id, nums=[p.num for p in added])
+        self._queue_changed()
+        self._persist()
+        return added
+
+    def list_recipes(self) -> list[dict]:
+        return [r.to_dict() for r in recipes.load_all()]
+
+    def dry_run_item(self, num: int) -> dict:
+        """Insert the rehearsal variant of a pending item before it."""
+        p = self.queue.get(num)
+        dr = dry_run(p.command)
+        if not dr:
+            raise UserError("No dry-run form is known for this command.")
+        cmd, desc = dr
+        added = self.queue.add("dryrun", [{"session_id": p.session_id, "command": cmd, "purpose": f"Dry run of #{num}: {desc}",
+                                           "risk": "read_only", "dry_run_of": num}],
+                               session_kinds=self._session_kinds(), insert_before=num)
+        self.log("dry_run_queued", of=num, num=added[0].num, command=cmd)
+        self._queue_changed()
+        self._persist()
+        return added[0].to_dict()
+
+    def watch_item(self, num: int, interval: int, count: int) -> dict:
+        p = self.queue.get(num)
+        if p.status != "pending":
+            raise UserError("Only pending items can be turned into a watch.")
+        if p.risk != "read_only":
+            raise UserError("Only read-only commands can be watched.")
+        if p.watch:
+            raise UserError("This item is already a watch.")
+        sess = self.sessions.sessions.get(p.session_id)
+        shell = "powershell" if (sess and recipes.os_family(sess.roster()) == "windows") else "sh"
+        wrapped = watch_mod.wrap(p.command, interval, count, shell)
+        self.queue.update(num, command=wrapped, watch=True, session_kinds=self._session_kinds())
+        p.purpose = f"[watch every {interval}s x{count}] {p.purpose}"
+        self.log("watch_set", num=num, interval=interval, count=count)
+        self._queue_changed()
+        self._persist()
+        return p.to_dict()
+
+    def rollback_candidates(self) -> list[dict]:
+        """Ran/sent changes with a rollback, newest first: the undo ledger."""
+        out = []
+        for p in self.queue.items:
+            if p.status in ("ran", "inserted", "sent") and p.risk != "read_only" and not p.dry_run_of:
+                out.append({**p.to_dict(), "has_rollback": bool(p.rollback.strip())})
+        return list(reversed(out))
+
+    def queue_rollbacks(self, nums: list[int]) -> list[dict]:
+        items = []
+        for n in nums:
+            p = self.queue.get(int(n))
+            rb = p.rollback.strip()
+            if not rb:
+                continue
+            looks_like_command = "\n" not in rb and not re.match(r"(?i)^(not\s|no\s|cannot|can't|n/a|none|the service)", rb)
+            if not looks_like_command:
+                continue
+            items.append({"session_id": p.session_id, "command": rb, "purpose": f"Rollback of #{p.num}: {p.purpose}",
+                          "risk": "modifying" if p.risk == "modifying" else "disruptive"})
+        added = self.queue.add("rollback", items, session_kinds=self._session_kinds())
+        for p in added:
+            self.log("proposal", **p.to_dict())
+        self._queue_changed()
+        self._persist()
+        return [p.to_dict() for p in added]
+
+    def run_group(self, group: str) -> list[int]:
+        """Numbers of the pending items in a group; the frontend types them all at once."""
+        return [p.num for p in self.queue.items if p.group == group and p.status == "pending"]
+
+    # ---------------------------------------------------------------- hypotheses
+
+    def _set_hypotheses(self, items: list[dict]) -> None:
+        marks = {h.get("id"): h.get("tech_mark") for h in self.hypotheses if h.get("tech_mark")}
+        new = []
+        for it in items:
+            if not isinstance(it, dict) or not it.get("id"):
+                continue
+            h = {"id": str(it["id"]), "text": str(it.get("text", "")),
+                 "confidence": max(0.0, min(1.0, float(it.get("confidence", 0) or 0))),
+                 "status": it.get("status") if it.get("status") in ("open", "supported", "ruled_out") else "open",
+                 "evidence": str(it.get("evidence", "") or "")}
+            if marks.get(h["id"]):
+                h["tech_mark"] = marks[h["id"]]
+            new.append(h)
+        self.hypotheses = new
+        self.log("hypotheses", items=new)
+        self.emit("hypotheses", items=new)
+        self._persist()
+
+    def mark_hypothesis(self, hid: str, mark: str) -> None:
+        if mark not in ("", "pinned", "ruled_out"):
+            raise UserError("Mark must be pinned, ruled_out or empty.")
+        for h in self.hypotheses:
+            if h["id"] == hid:
+                if mark:
+                    h["tech_mark"] = mark
+                else:
+                    h.pop("tech_mark", None)
+                self.log("hypothesis_marked", id=hid, mark=mark)
+                self.emit("hypotheses", items=self.hypotheses)
+                self._persist()
+                return
+        raise KeyError(hid)
+
+    # ---------------------------------------------------------------- baselines
+
+    def _baseline_root(self) -> Path:
+        return data_dir() / "baselines"
+
+    def _host_key(self, sid: str) -> str:
+        sess = self.sessions.sessions.get(sid)
+        if not sess:
+            raise UserError(f"Session {sid} is not open.")
+        return _slug(sess.host_name or (sess.target if sess.kind != "local" else platform.node() or "local"))
+
+    def _baseline_items(self, sid: str) -> dict[str, tuple[str, str]]:
+        """recipe key -> (command, captured text) for baseline-recipe items ran in a session."""
+        out = {}
+        for p in self.queue.items:
+            if p.session_id != sid or p.status not in ("ran", "inserted", "sent") or not p.recipe_key:
+                continue
+            r = recipes.get(p.recipe)
+            if not r or not r.baseline or p.recipe_key == "install":
+                continue
+            cap = self.capture(p.num)
+            if cap.get("error"):
+                continue
+            text = cap["text"]
+            lines = text.split("\n")
+            if lines and p.command.split("\n")[0][:40] in lines[0]:
+                lines = lines[1:]                  # drop the echoed command
+            while lines and re.search(r"[$#>]\s*$", lines[-1]):
+                lines = lines[:-1]                 # drop the trailing prompt
+            out[p.recipe_key] = (p.command, "\n".join(lines).strip("\n"))
+        return out
+
+    def save_baseline(self, sid: str) -> dict:
+        self._need_case()
+        items = self._baseline_items(sid)
+        if not items:
+            raise UserError("No ran baseline-recipe items for that session. Queue the Baseline snapshot recipe and run it first.")
+        key = self._host_key(sid)
+        d = self._baseline_root() / key
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = d / f"{datetime.now():%Y%m%d-%H%M%S}.json"
+        data = {"host": key, "taken": datetime.now().isoformat(timespec="seconds"), "case": self.case.id,
+                "sections": {k: {"command": c, "text": t} for k, (c, t) in items.items()}}
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        self.log("baseline_saved", host=key, path=str(path), sections=sorted(items))
+        return {"host": key, "path": str(path), "sections": sorted(items)}
+
+    def list_baselines(self) -> list[dict]:
+        out = []
+        root = self._baseline_root()
+        if root.is_dir():
+            for d in sorted(root.iterdir()):
+                for f in sorted(d.glob("*.json")):
+                    try:
+                        data = json.loads(f.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        continue
+                    out.append({"host": d.name, "taken": data.get("taken", f.stem), "path": str(f),
+                                "sections": sorted(data.get("sections", {}))})
+        return out
+
+    def diff_baseline(self, sid: str, baseline_path: str = "") -> dict:
+        self._need_case()
+        key = self._host_key(sid)
+        if baseline_path:
+            path = Path(baseline_path)
+            if path.resolve().parent.parent != self._baseline_root().resolve():
+                raise UserError("Baseline path must be inside the baselines directory.")
+        else:
+            files = sorted((self._baseline_root() / key).glob("*.json"))
+            if not files:
+                raise UserError(f"No saved baseline for {key}.")
+            path = files[-1]
+        base = json.loads(path.read_text(encoding="utf-8"))
+        current = self._baseline_items(sid)
+        if not current:
+            raise UserError("No ran baseline-recipe items for that session. Queue the Baseline snapshot recipe and run it first.")
+        parts, changed, same, missing = [], [], [], []
+        for k, (cmd, now) in current.items():
+            old = base.get("sections", {}).get(k)
+            if old is None:
+                missing.append(k)
+                continue
+            diff = list(difflib.unified_diff(old["text"].splitlines(), now.splitlines(),
+                                             fromfile=f"{k} @ {base.get('taken', '?')}", tofile=f"{k} now", lineterm="", n=1))
+            if diff:
+                changed.append(k)
+                parts.append("\n".join(diff))
+            else:
+                same.append(k)
+        summary = (f"Baseline diff for {key} against snapshot taken {base.get('taken', '?')} (case {base.get('case', '?')}).\n"
+                   f"Changed sections: {', '.join(changed) or 'none'}. Unchanged: {', '.join(same) or 'none'}."
+                   + (f" Not in baseline: {', '.join(missing)}." if missing else ""))
+        text = summary + ("\n\n" + "\n\n".join(parts) if parts else "")
+        self.log("baseline_diffed", host=key, baseline=str(path), changed=changed)
+        return {"host": key, "baseline": str(path), "taken": base.get("taken"), "changed": changed, "same": same,
+                "missing": missing, "text": text}
+
+    # ---------------------------------------------------------------- tool cache
+
+    def list_tools(self) -> list[dict]:
+        return tools_cache.verify()
+
+    def add_tool(self, path: str, name: str, os_: str, notes: str = "", run: str = "") -> dict:
+        if os_ not in ("windows", "linux", "any"):
+            raise UserError("Tool OS must be windows, linux or any.")
+        try:
+            t = tools_cache.add(Path(path), name, os_, notes, run)
+        except (OSError, ValueError) as e:
+            raise UserError(str(e)) from e
+        self.log("tool_added", name=t.name, sha256=t.sha256)
+        return tools_cache.verify()[-1]
+
+    def remove_tool(self, name: str) -> None:
+        tools_cache.remove(name)
+
+    def transfer_tool(self, name: str, session_id: str) -> dict:
+        """Queue the transfer command for the technician: scp in a local session for SSH hosts,
+        an inline PowerShell write for WinRM sessions."""
+        self._need_case()
+        tool = next((t for t in tools_cache.load() if t.name == name), None)
+        if not tool:
+            raise UserError(f"Unknown tool {name}")
+        sess = self.sessions.sessions.get(session_id)
+        if not sess:
+            raise UserError(f"Session {session_id} is not open.")
+        host = self.cfg.host(sess.host_name) if sess.host_name else None
+        try:
+            spec = tools_cache.transfer_command(tool, host, sess.kind)
+        except (OSError, ValueError) as e:
+            raise UserError(str(e)) from e
+        target_sid = session_id
+        if spec["session"] == "local":
+            local = next((s for s in self.sessions.sessions.values() if s.kind == "local" and not s.exited), None)
+            if not local:
+                raise UserError("scp runs from a local session: open a local shell first.")
+            target_sid = local.id
+        items = [{"session_id": target_sid, "command": spec["command"], "purpose": spec["purpose"], "risk": spec["risk"]}]
+        if tool.run:
+            items.append({"session_id": session_id, "command": tool.run, "purpose": f"Run {tool.name} (from the tool cache)",
+                          "risk": "modifying"})
+        added = self.queue.add("tool", items, session_kinds=self._session_kinds())
+        for p in added:
+            self.log("proposal", **p.to_dict())
+        self.log("tool_transfer_queued", tool=tool.name, session_id=session_id, sha256=tool.sha256)
+        self._queue_changed()
+        self._persist()
+        return {"nums": [p.num for p in added], "expected_sha256": tool.sha256}
+
+    # ---------------------------------------------------------------- context view
+
+    def context_view(self) -> dict:
+        """What the model will receive on the next turn, grouped by technician turn, with size estimates."""
+        est = lambda m: (len(json.dumps(m, ensure_ascii=False)) + 3) // 4  # noqa: E731 - rough tokens
+        system = self._system_prompt() if self.case else ""
+        groups, cur = [], None
+        for i, m in enumerate(self.conv):
+            if m.get("role") == "user" or cur is None:
+                cur = {"index": len(groups), "start": i, "end": i, "tokens": 0, "summary": "", "messages": 0}
+                groups.append(cur)
+                c = m.get("content")
+                if isinstance(c, list):
+                    c = " ".join(part.get("text", "[image]") if part.get("type") == "text" else "[image]" for part in c)
+                cur["summary"] = (str(c or "")[:140]).replace("\n", " ")
+            cur["end"] = i
+            cur["tokens"] += est(m)
+            cur["messages"] += 1
+        return {"system_tokens": est(system), "system": system, "groups": groups,
+                "total_tokens": est(system) + sum(g["tokens"] for g in groups)}
+
+    def drop_context(self, group_indices: list[int]) -> None:
+        """Remove whole technician turns (message + the model's replies to it) from what the
+        model sees. The chat display and the audit log keep them."""
+        if self.busy:
+            raise UserError("Wait for the AI to finish first.")
+        groups = self.context_view()["groups"]
+        drop = set()
+        for gi in group_indices:
+            g = groups[int(gi)]
+            drop.update(range(g["start"], g["end"] + 1))
+        if not drop:
+            return
+        kept = [m for i, m in enumerate(self.conv) if i not in drop]
+        first = min(drop)
+        kept.insert(min(first, len(kept)), {"role": "user", "content": "[An earlier exchange was removed from your context by the technician to save space.]"})
+        # never start with a dangling tool reply
+        while kept and kept[0].get("role") in ("tool", "assistant"):
+            kept.pop(0)
+        self.conv = kept
+        self.chat.append({"kind": "note", "text": f"Removed {len(group_indices)} exchange(s) from the AI's context."})
+        self.log("context_dropped", groups=sorted(int(g) for g in group_indices), removed_messages=len(drop))
+        self.emit("chat", entry=self.chat[-1])
+        self._persist()
+
+    # ---------------------------------------------------------------- timeline
+
+    def timeline(self) -> dict:
+        case = self._need_case()
+        events = []
+        for line in (case.dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            ev = e.get("event", "")
+            text = {"sent_to_ai": lambda: "Technician → AI: " + str(e.get("content", ""))[:400],
+                    "assistant": lambda: "AI: " + str(e.get("text", ""))[:400] + (f" (proposed {e.get('proposals')})" if e.get("proposals") else ""),
+                    "proposal": lambda: f"Queued #{e.get('num')} [{e.get('risk')}] {e.get('command')}",
+                    "proposal_ran": lambda: f"Ran #{e.get('num')} on {e.get('session_id')}: {e.get('command')}",
+                    "proposal_inserted": lambda: f"Inserted #{e.get('num')} on {e.get('session_id')}: {e.get('command')}",
+                    "proposal_skipped": lambda: f"Skipped #{e.get('num')}: {e.get('command')}" + (f" ({e.get('note')})" if e.get("note") else ""),
+                    "proposal_edited": lambda: f"Edited #{e.get('num')}: {e.get('command')}",
+                    "session_opened": lambda: f"Opened session {e.get('id')} ({e.get('kind')} {e.get('target', '')})",
+                    "session_closed": lambda: f"Closed session {e.get('session_id')}",
+                    "credential_prompt": lambda: f"Prompt on {e.get('session_id')}: {e.get('prompt')}",
+                    "hypotheses": lambda: "Hypotheses: " + "; ".join(f"{h.get('id')} {h.get('confidence', 0):.2f} {h.get('status')}" for h in e.get("items", [])),
+                    "turn_error": lambda: f"AI error: {e.get('error')}",
+                    "baseline_diffed": lambda: f"Baseline diff on {e.get('host')}: changed {e.get('changed')}",
+                    "model_selected": lambda: f"Model: {e.get('model')} ({e.get('tier')})",
+                    }.get(ev)
+            if text:
+                events.append({"ts": e.get("ts"), "kind": ev, "text": text()})
+        sessions = {}
+        for f in case.dir.glob("term-*.log.times"):
+            sid = f.name[len("term-"):-len(".log.times")]
+            times = []
+            for line in f.read_text(encoding="utf-8").splitlines():
+                try:
+                    ts, off = line.split()
+                    times.append([float(ts), int(off)])
+                except ValueError:
+                    continue
+            sessions[sid] = times
+        return {"case": case.to_dict(), "events": events, "sessions": sessions}
+
+    def transcript_text(self, sid: str, upto: int | None = None) -> str:
+        case = self._need_case()
+        path = case.dir / f"term-{_slug(sid)}.log"
+        if not path.exists():
+            return ""
+        data = path.read_bytes()
+        if upto is not None:
+            data = data[:max(0, upto)]
+        return data.decode("utf-8", errors="replace")
+
+    def case_file(self, name: str) -> Path:
+        case = self._need_case()
+        if not re.fullmatch(r"img-\d+\.(jpg|jpeg|png|webp)", name):
+            raise UserError("Not a case image.")
+        path = case.dir / name
+        if not path.exists():
+            raise KeyError(name)
+        return path
 
     # ---------------------------------------------------------------- chat
 
     def send(self, message: str = "", results: list[dict] | None = None,
-             snippets: list[dict] | None = None) -> None:
-        results, snippets = results or [], snippets or []
+             snippets: list[dict] | None = None, images: list[str] | None = None) -> None:
+        results, snippets, images = results or [], snippets or [], images or []
         if self.busy:
             raise UserError("The AI is still responding.")
         if not self.case:
             raise UserError("Start a case first.")
         prov, model, tier = self._require_model()
-        if not (message.strip() or results or snippets):
+        if not (message.strip() or results or snippets or images):
             raise UserError("Nothing to send.")
+        saved_images = self._save_images(images)
+        if not self.conv and message.strip():
+            self._find_similar(message)
 
         parts, shown = [], []
         if message.strip():
@@ -557,6 +977,12 @@ class Engine:
             text = str(r.get("text", ""))
             label = {"ran": "RAN", "inserted": "RAN (edited in terminal)", "skipped": "SKIPPED"}[status]
             head = f"#{p.num} on session `{p.session_id}` {label}: `{p.command}`"
+            if p.ran_at:
+                head += f" (started {datetime.fromtimestamp(p.ran_at):%H:%M:%S})"
+            if p.group:
+                head += f" [group {p.group}]"
+            if p.watch:
+                head += " [watch: only changed iterations shown]"
             if p.edited:
                 head += f" (edited by technician; originally `{p.original_command}`)"
             block = [head]
@@ -572,10 +998,17 @@ class Engine:
                          + fence(str(s.get("text", ""))))
         content = "\n\n".join(parts)
 
-        self.conv.append({"role": "user", "content": content})
+        if saved_images:
+            user_content: list[dict] = [{"type": "text", "text": content or "(photo attached)"}]
+            for _, data_url in saved_images:
+                user_content.append({"type": "image_url", "image_url": {"url": data_url}})
+            self.conv.append({"role": "user", "content": user_content})
+        else:
+            self.conv.append({"role": "user", "content": content})
         self.chat.append({"kind": "user", "text": message.strip(), "results": shown,
                           "snippets": [{"session_id": s.get("session_id", ""), "text": s.get("text", "")}
-                                       for s in snippets]})
+                                       for s in snippets],
+                          "images": [name for name, _ in saved_images]})
         for r in shown:
             self.queue.update(r["num"], status="sent")
         self.log("sent_to_ai", provider=prov.name, model=model, tier=tier, content=content)
@@ -583,6 +1016,40 @@ class Engine:
         self._queue_changed()
         self._persist()
         self._turn = asyncio.create_task(self._run_turn(prov, model, tier))
+
+    def _save_images(self, images: list[str]) -> list[tuple[str, str]]:
+        """Store attached photos in the case directory; returns (file name, data URL) pairs.
+        The audit log records the file name, never the bytes."""
+        out = []
+        for data_url in images[:4]:
+            m = re.match(r"data:image/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=]+)$", data_url or "")
+            if not m:
+                raise UserError("Photos must be JPEG, PNG or WebP.")
+            raw = base64.b64decode(m.group(2))
+            if len(raw) > 6 * 1024 * 1024:
+                raise UserError("Photo is over 6 MB; the app should have resized it.")
+            n = 1 + sum(1 for _ in self.case.dir.glob("img-*"))
+            ext = "jpg" if m.group(1) in ("jpeg", "jpg") else m.group(1)
+            name = f"img-{n}.{ext}"
+            (self.case.dir / name).write_bytes(raw)
+            self.log("image_attached", file=name, bytes=len(raw))
+            out.append((name, data_url))
+        return out
+
+    def _find_similar(self, message: str) -> None:
+        try:
+            hits = search.search(message, exclude_id=self.case.id if self.case else "")
+        except OSError:
+            hits = []
+        self._similar = hits
+        self._runbooks = search.runbook_context(hits)
+        if hits:
+            names = ", ".join(f"{h['name']} ({h['started'][:10]})" for h in hits[:3])
+            self.chat.append({"kind": "note", "text": f"Similar past cases: {names}. "
+                              + ("Their runbooks are in the AI's context." if self._runbooks else "No runbooks were distilled from them.")})
+            self.log("similar_cases", ids=[h["id"] for h in hits])
+            self.emit("chat", entry=self.chat[-1])
+            self.emit("similar", cases=self.snapshot()["similar_cases"])
 
     def _require_model(self) -> tuple[Provider, str, str]:
         prov = self.cfg.provider(self.cfg.active_provider)
@@ -596,7 +1063,11 @@ class Engine:
             self._turn.cancel()
 
     def _system_prompt(self) -> str:
-        return prompts.build_system(self.sessions.roster(), self.case.name, self.case.notes)
+        roster = self.sessions.roster()
+        families = {recipes.os_family(s) for s in roster if not s.get("exited")} or {"linux", "windows"}
+        rs = [r for r in recipes.load_all() if r.os == "any" or r.os in families]
+        return prompts.build_system(roster, self.case.name, self.case.notes, recipes=recipes.roster_text(rs),
+                                    hypotheses=self.hypotheses, runbooks=self._runbooks)
 
     async def _run_turn(self, prov: Provider, model: str, tier: str) -> None:
         self.emit("turn_start", model=model, tier=tier)
@@ -615,7 +1086,7 @@ class Engine:
             for _ in range(MAX_TOOL_ROUNDS):
                 messages = [{"role": "system", "content": self._system_prompt()}] + self.conv
                 result = None
-                async for kind, val in client.stream(model, messages, [prompts.PROPOSE_TOOL]):
+                async for kind, val in client.stream(model, messages, prompts.TOOLS):
                     if kind == "text":
                         entry["text"] += val
                         self.emit("delta", kind="text", text=val)
@@ -661,7 +1132,31 @@ class Engine:
         self.conv.append(msg)
         retry = False
         for call in result.tool_calls:
-            if call.name != prompts.PROPOSE_TOOL["function"]["name"]:
+            if call.name == "update_hypotheses":
+                try:
+                    items = call.parsed()["items"]
+                    if not isinstance(items, list):
+                        raise TypeError("items must be an array")
+                    self._set_hypotheses(items)
+                    reply = f"Hypothesis board updated ({len(self.hypotheses)} items)."
+                except Exception as e:  # noqa: BLE001
+                    reply = f"Invalid update_hypotheses arguments ({e}); board unchanged."
+            elif call.name == "run_recipe":
+                try:
+                    args = call.parsed()
+                    open_ids = [r["id"] for r in self.sessions.roster() if not r["exited"]]
+                    sid = args.get("session_id") or ""
+                    if sid not in open_ids and len(open_ids) == 1:
+                        sid = open_ids[0]
+                    added = self.queue_recipe(str(args.get("recipe_id", "")), sid, bool(args.get("include_install")),
+                                              call_id=call.id)
+                    nums = [p.num for p in added]
+                    entry["proposals"] += nums
+                    reply = (f"Recipe queued for technician review as {', '.join(f'#{n}' for n in nums)}. "
+                             "Results will arrive in a later message.")
+                except (UserError, ValueError, KeyError, TypeError) as e:
+                    reply = f"run_recipe failed: {e}. Use a recipe id from the list, or propose_commands."
+            elif call.name != prompts.PROPOSE_TOOL["function"]["name"]:
                 reply, retry = f"Unknown tool {call.name}. Use propose_commands.", True
             else:
                 try:
@@ -670,7 +1165,8 @@ class Engine:
                         raise TypeError("items must be an array")
                     open_ids = [r["id"] for r in self.sessions.roster() if not r["exited"]]
                     added = self.queue.add(call.id, items, known_sessions=set(open_ids),
-                                           fallback_session=open_ids[0] if len(open_ids) == 1 else "")
+                                           fallback_session=open_ids[0] if len(open_ids) == 1 else "",
+                                           session_kinds=self._session_kinds())
                     if not added:
                         raise ValueError("no commands in items")
                 except Exception as e:  # noqa: BLE001
@@ -687,8 +1183,15 @@ class Engine:
                     if unknown:
                         reply += (f" Note: session id(s) {', '.join(unknown)} do not exist; the technician "
                                   "must pick a target for those.")
+                    no_rb = [p.num for p in added if p.risk != "read_only" and not p.rollback.strip()]
+                    if no_rb:
+                        reply += f" Items {', '.join(f'#{n}' for n in no_rb)} change state but have no rollback; include one next time."
+                    cuts = [p for p in added if p.cuts_session]
+                    if cuts:
+                        reply += " WARNING: " + "; ".join(f"#{p.num} {p.cuts_session}" for p in cuts) + ". Offer a safer alternative."
                     self._queue_changed()
             self.conv.append({"role": "tool", "tool_call_id": call.id, "content": reply})
+        self._persist()
         return retry
 
     # ---------------------------------------------------------------- export
@@ -696,32 +1199,91 @@ class Engine:
     def export_markdown(self) -> str:
         if not self.case:
             raise UserError("No case to export.")
-        path = self.case.export_markdown(self.chat, self.queue.to_list())
+        path = self.case.export_markdown(self.chat, self.queue.to_list(), self.hypotheses)
         self.log("exported_markdown", path=str(path))
         return str(path)
 
-    async def ticket_summary(self) -> dict:
-        if not self.case:
-            raise UserError("No case to summarise.")
-        if not self.conv:
-            raise UserError("Nothing to summarise yet.")
-        prov, model, tier = self._require_model()
+    def _transcript_for_model(self) -> str:
         transcript = []
         for m in self.conv:
             if m["role"] == "user":
-                transcript.append("TECHNICIAN:\n" + m["content"])
+                c = m["content"]
+                if isinstance(c, list):
+                    c = " ".join(part.get("text", "") for part in c if part.get("type") == "text") + " [photo attached]"
+                transcript.append("TECHNICIAN:\n" + c)
             elif m["role"] == "assistant" and m.get("content"):
                 transcript.append("AI:\n" + m["content"])
             elif m["role"] == "assistant":
-                transcript.append("AI proposed: " + "; ".join(c["function"]["arguments"] for c in m["tool_calls"]))
-        messages = [{"role": "system", "content": prompts.SUMMARY_PROMPT},
-                    {"role": "user", "content": f"Case: {self.case.name}\n\n" + "\n\n".join(transcript)}]
-        self.log("sent_to_ai", purpose="ticket_summary", provider=prov.name, model=model, tier=tier)
+                transcript.append("AI proposed: " + "; ".join(c["function"]["arguments"] for c in m.get("tool_calls", [])))
+        if self.hypotheses:
+            transcript.append("HYPOTHESIS BOARD:\n" + prompts.hypotheses_text(self.hypotheses))
+        return "\n\n".join(transcript)
+
+    async def _document(self, purpose: str, system_prompt: str, filename: str) -> dict:
+        if not self.case:
+            raise UserError("No case.")
+        if not self.conv:
+            raise UserError("Nothing to write up yet.")
+        prov, model, tier = self._require_model()
+        messages = [{"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Case: {self.case.name}\n\n" + self._transcript_for_model()}]
+        self.log("sent_to_ai", purpose=purpose, provider=prov.name, model=model, tier=tier)
         try:
             text = await self._client(prov, model).complete(model, messages)
         except Exception as e:  # noqa: BLE001
-            raise UserError(f"Summary request failed: {e}") from e
-        path = self.case.dir / "ticket-summary.md"
+            raise UserError(f"{purpose} request failed: {e}") from e
+        path = self.case.dir / filename
         path.write_text(text + "\n", encoding="utf-8")
-        self.log("ticket_summary", path=str(path), text=text)
+        self.log(purpose, path=str(path), text=text)
         return {"text": text, "path": str(path)}
+
+    async def ticket_summary(self) -> dict:
+        return await self._document("ticket_summary", prompts.SUMMARY_PROMPT, "ticket-summary.md")
+
+    async def client_update(self) -> dict:
+        return await self._document("client_update", prompts.CLIENT_PROMPT, "client-update.md")
+
+    async def distill_runbook(self) -> dict:
+        return await self._document("runbook", prompts.RUNBOOK_PROMPT, "runbook.md")
+
+    def _review_target(self) -> tuple[Provider, str, str, bool]:
+        """(provider, model, tier, is_different) for the second-opinion reviewer."""
+        prov, model, tier = self._require_model()
+        want = (self.cfg.settings.review_model or "").strip()
+        if want and "|" in want:
+            pname, rmodel = want.split("|", 1)
+            rprov = self.cfg.provider(pname)
+            if rprov:
+                rtier = self._check_tier(rprov, rmodel)
+                return rprov, rmodel, rtier, (rprov.name, rmodel) != (prov.name, model)
+        return prov, model, tier, False
+
+    async def review_command(self, num: int) -> dict:
+        """Second opinion on one command before it runs; the reviewer never sees the proposer's reasoning."""
+        self._need_case()
+        p = self.queue.get(num)
+        prov, model, tier, different = self._review_target()
+        sess = self.sessions.sessions.get(p.session_id)
+        context = [f"Case: {self.case.name}"]
+        if self.case.notes:
+            context.append(f"Site notes: {self.case.notes}")
+        if sess:
+            context.append(f"Session: {sess.kind} to {sess.target}; OS/device: {sess.os_hint or 'unknown'}; shell: {sess.shell}")
+        if self.hypotheses:
+            context.append(prompts.hypotheses_text(self.hypotheses))
+        context.append(f"Command (#{p.num}, labelled {p.risk}): {p.command}\nStated purpose: {p.purpose}")
+        if p.rollback:
+            context.append(f"Stated rollback: {p.rollback}")
+        if p.cuts_session:
+            context.append(f"Local rule says: {p.cuts_session}")
+        messages = [{"role": "system", "content": prompts.REVIEW_PROMPT}, {"role": "user", "content": "\n\n".join(context)}]
+        self.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num)
+        try:
+            text = await self._client(prov, model).complete(model, messages)
+        except Exception as e:  # noqa: BLE001
+            raise UserError(f"Review request failed: {e}") from e
+        verdict = re.search(r"VERDICT:\s*(.+)$", text, re.I | re.M)
+        out = {"num": num, "model": model, "tier": tier, "different_model": different, "text": text.strip(),
+               "verdict": verdict.group(1).strip() if verdict else ""}
+        self.log("second_opinion", **out)
+        return out

@@ -81,9 +81,11 @@ class Case:
         _write_json(self.dir / "case.json", {"name": self.name, "sensitivity": self.sensitivity,
                                              "notes": self.notes, "started": self.started})
 
-    def save_state(self, conv: list[dict], chat: list[dict], queue: list[dict]) -> None:
+    def save_state(self, conv: list[dict], chat: list[dict], queue: list[dict],
+                   hypotheses: list[dict] | None = None) -> None:
         """Persist everything needed to resume the case later."""
-        _write_json(self.dir / "state.json", {"version": 1, "conv": conv, "chat": chat, "queue": queue})
+        _write_json(self.dir / "state.json", {"version": 2, "conv": conv, "chat": chat, "queue": queue,
+                                              "hypotheses": hypotheses or []})
 
     def load_state(self) -> dict | None:
         path = self.dir / "state.json"
@@ -103,7 +105,7 @@ class Case:
         return {"id": self.id, "name": self.name, "sensitivity": self.sensitivity,
                 "notes": self.notes, "dir": str(self.dir), "started": self.started}
 
-    def export_markdown(self, chat: list[dict], queue: list[dict]) -> Path:
+    def export_markdown(self, chat: list[dict], queue: list[dict], hypotheses: list[dict] | None = None) -> Path:
         out = [f"# {self.name}", "",
                f"- Case id: `{self.id}`", f"- Started: {self.started}",
                f"- Sensitivity: {self.sensitivity}", ""]
@@ -124,16 +126,25 @@ class Case:
                         out += [fence(r["text"]), ""]
                 for s in entry.get("snippets", []):
                     out += [f"Terminal excerpt from `{s['session_id']}`:", "", fence(s["text"]), ""]
+                for img in entry.get("images", []):
+                    out += [f"![photo]({img})", ""]
             elif kind == "assistant":
                 out += [f"### AI ({entry.get('model', '')}, {entry.get('tier', '')})", "", entry.get("text", ""), ""]
                 if entry.get("proposals"):
                     out += ["Proposed: " + ", ".join(f"#{n}" for n in entry["proposals"]), ""]
             elif kind == "note":
                 out += [f"_{entry.get('text', '')}_", ""]
-        out += ["## Command queue", "", "| # | Session | Command | Risk | Status | Note |", "|---|---|---|---|---|---|"]
+        if hypotheses:
+            out += ["## Hypotheses", ""]
+            for hyp in hypotheses:
+                mark = f" ({hyp['tech_mark']} by technician)" if hyp.get("tech_mark") else ""
+                out.append(f"- **{hyp.get('id')}** {hyp.get('text')} — {hyp.get('confidence', 0):.2f}, {hyp.get('status')}{mark}")
+            out.append("")
+        out += ["## Command queue", "", "| # | Session | Command | Risk | Status | Rollback | Note |", "|---|---|---|---|---|---|---|"]
         for q in queue:
             cmd = q["command"].replace("|", "\\|").replace("\n", " ")
-            out.append(f"| {q['num']} | {q['session_id']} | `{cmd}` | {q['risk']} | {q['status']} | {q['note']} |")
+            rb = (q.get("rollback") or "").replace("|", "\\|").replace("\n", " ")
+            out.append(f"| {q['num']} | {q['session_id']} | `{cmd}` | {q['risk']} | {q['status']} | {rb} | {q['note']} |")
         path = self.dir / "transcript.md"
         path.write_text("\n".join(out) + "\n", encoding="utf-8")
         return path

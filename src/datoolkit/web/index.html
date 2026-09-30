@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- Everything is served from this origin. In particular no remote images: a prompt injection
      must not be able to make the AI's markdown fetch a URL that carries data out. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'">
 <title>DAToolkit</title>
 <link rel="stylesheet" href="/static/vendor/xterm.css">
 <link rel="stylesheet" href="/static/style.css">
@@ -24,6 +24,13 @@
     <div id="export-menu" class="menu hidden">
       <button data-act="markdown">Export transcript (Markdown)</button>
       <button data-act="summary">Ticket summary (AI)</button>
+      <button data-act="client">Client update (AI)</button>
+      <button data-act="runbook">Distil runbook (AI)</button>
+      <div class="sep"></div>
+      <button data-act="timeline">Timeline replay</button>
+      <button data-act="context">What the AI knows…</button>
+      <button data-act="similar">Similar past cases…</button>
+      <div class="sep"></div>
       <button data-act="folder">Open case folder</button>
     </div>
   </div>
@@ -34,11 +41,18 @@
 
 <main id="workspace">
   <section id="chat-pane">
+    <div id="hyp-board" class="hidden">
+      <div class="hyp-head"><button id="hyp-toggle" class="ghost small" title="Show/hide">Hypotheses</button><span class="muted small">pin 📌 or rule out ✕ to steer the AI</span></div>
+      <div id="hyp-list"></div>
+    </div>
     <div id="chat-log"></div>
     <div id="chat-status" class="hidden"><span class="spinner"></span><span id="chat-status-text">Thinking…</span></div>
     <form id="chat-form">
       <textarea id="chat-input" rows="3" placeholder="Describe the problem, or reply to the AI…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
+      <div id="attachments" class="hidden"></div>
       <div class="chat-actions">
+        <button type="button" id="attach-btn" class="ghost" title="Attach a photo (screen, LED panel, label). Sent to the model unredacted.">📷</button>
+        <input type="file" id="photo-input" accept="image/*" multiple class="hidden">
         <button type="button" id="stop-btn" class="danger hidden">Stop</button>
         <button type="submit" id="send-btn" class="primary">Send</button>
       </div>
@@ -66,6 +80,19 @@
     <span class="title">Command queue</span>
     <span id="queue-count" class="muted"></span>
     <label class="muted small"><input type="checkbox" id="show-done"> show sent</label>
+    <div class="menu-wrap">
+      <button id="tools-btn" class="ghost">Recipes ▾</button>
+      <div id="tools-menu" class="menu hidden">
+        <button data-act="recipes">Recipe library…</button>
+        <div class="sep"></div>
+        <div class="label">Baseline (active session)</div>
+        <button data-act="baseline-queue">Queue baseline snapshot</button>
+        <button data-act="baseline-save">Save baseline from ran items</button>
+        <button data-act="baseline-diff">Diff against saved baseline…</button>
+        <div class="sep"></div>
+        <button data-act="rollback">Rollback ledger…</button>
+      </div>
+    </div>
     <span class="spacer"></span>
     <button id="send-selection-btn" class="ghost" title="Send the text selected in the terminal to the AI">Send terminal selection</button>
     <button id="send-results-btn" class="primary">Send results</button>

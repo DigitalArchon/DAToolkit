@@ -79,6 +79,106 @@ Treat that URL like a password: it grants terminal access.
   summary and start a fresh case.
 - Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V.
 
+### Hypothesis board
+
+The AI keeps an explicit list of hypotheses with a confidence each, updated after every
+result, shown above the chat. Pin one (📌) to tell the AI to focus on it, or rule it out (✕);
+your marks are shown to the AI and survive its updates. The board goes into the ticket
+summary and the Markdown export.
+
+### Recipes
+
+**Recipes ▾ → Recipe library** lists pre-written procedures for the active session's OS:
+where the disk went (the WinDirStat question), who is on the LAN (the Advanced IP Scanner
+question, run it in a session on the far side of a VPN to see that side), path and latency,
+disk health, DNS and reachability, baseline snapshots and watch helpers. Each step lands in
+the queue as a normal item; "Queue with install" adds the tool's install command as a
+separate modifying item first. The AI can queue a recipe too (`run_recipe`). Your own
+recipes go in `~/.config/datoolkit/recipes/*.toml`:
+
+```toml
+[[recipe]]
+id = "printer-linux"
+name = "Printer queue"
+os = "linux"          # linux | windows | any
+tags = ["print"]
+steps = [
+  { command = "lpstat -p -d", purpose = "Printers and default", risk = "read_only" },
+]
+```
+
+### Baselines
+
+Queue the **Baseline snapshot** recipe on a healthy host, run the items, then **Recipes ▾ →
+Save baseline**. Later, run the same recipe and **Diff against saved baseline**: a unified
+diff per section (services, ports, routes, disks, packages, firewall, cron, users, …) that
+you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines/<host>/`.
+
+### Safer changes
+
+- **Blast radius.** A command that would cut the session it runs in (restarting sshd or the
+  network on the SSH host, disabling the adapter that carries WinRM, a firewall default-drop,
+  `reload` on a device, …) is marked in red and the confirmation says so.
+- **Rollback ledger.** The AI must give a rollback for every modifying or disruptive command;
+  missing ones are shown in amber. **Recipes ▾ → Rollback ledger** lists the changes that
+  ran, newest first, and queues their rollbacks for you to run one by one.
+- **Dry run.** For commands with a rehearsal form (`rsync -n`, `apt -s`, `-WhatIf`,
+  `terraform plan`, `kubectl --dry-run`, `ansible --check`, `ls` before `rm`, a firewall
+  backup before a firewall change), the **Dry run** button queues the rehearsal before the
+  real item.
+- **Second opinion.** **2nd opinion** on any state-changing item, or from the disruptive
+  confirmation, asks a reviewer model what could go wrong and ends with a verdict. Set a
+  different model under **Settings → General** (it must be allowed by the case sensitivity);
+  the reviewer sees only the command and the case notes, never the proposer's reasoning.
+- **Paired probes.** When the AI gives two commands the same `group` (a capture on one side,
+  a ping from the other), **Run group** types them into their sessions at the same moment and
+  the results carry start times.
+- **Watch.** **Watch** on a read-only item wraps it in a bounded loop (every N seconds, M
+  samples). When you send the result, iterations identical to the previous one are dropped.
+
+### Photos, replay, context
+
+- **📷** (or paste an image) attaches a photo of a screen, LED panel or label to the next
+  message. Photos are resized locally, stored in the case directory and sent to the model
+  unredacted, under the same sensitivity gate as text.
+- **Export ▾ → Timeline replay** plays the case back: events on the left, the terminal
+  transcript on the right, on one slider.
+- **Export ▾ → What the AI knows** shows the exact context the model gets next turn, with a
+  size estimate per exchange, and lets you remove exchanges from it. The chat and the audit
+  log keep them.
+- **Export ▾ → Client update** writes the plain-language version of the ticket note.
+- **Export ▾ → Distil runbook** turns a solved case into `runbook.md`. When a new case's
+  first message resembles a past case, the similar cases are noted in the chat and their
+  runbooks go into the AI's context as leads. **Similar past cases…** searches by hand.
+
+### Companion view
+
+`datoolkit --companion` also serves a phone-sized, read-mostly page on the LAN and prints
+its URL: the AI's last message (optionally read aloud), the hypothesis board and the queue,
+with "I ran it" and "Skip". Its token cannot reach a terminal, open sessions or change
+settings. The main URL is reachable on the LAN too while this flag is on, so keep it private.
+
+### Tool cache
+
+**Settings → Tool cache** holds vetted portable CLI tools (WizTree, nmap, Sysinternals, …)
+with a SHA-256 each. **Send to session** queues the transfer: `scp` from a local shell for
+SSH hosts, or an inline PowerShell write (under 4 MB) for WinRM sessions, followed by the
+tool's run command. The hash is checked on arrival and nothing runs without your click.
+
+### Training provider
+
+**Settings → AI providers → Add training provider** adds a scripted fake model
+(`training://disk-full`, `training://vpn-one-way`). It walks through a canned case one turn
+per message, proposes commands and updates the hypothesis board, so a new technician can
+learn Run, Skip and Send with no API cost and nothing leaving the machine. It counts as a
+Local-tier model. Scenarios are TOML files under `src/datoolkit/training/scenarios/`.
+
+### Rules replay
+
+`datoolkit-replay` runs today's risk, blast-radius, redaction and injection rules over past
+cases' event logs and prints what would now be classified differently. Use it after editing
+the rules.
+
 ### Keyboard shortcuts
 
 | Keys | Action |
@@ -185,6 +285,8 @@ and a Textual/tmux TUI is planned on the same core.
 
 ## Roadmap
 
+- Connectors: ConnectWise (push ticket notes and transcripts) and Confluence (pull site
+  notes, push runbooks). Outbound and read-only respectively, keys in the keyring.
 - TUI (Textual + tmux, Linux)
 - Intel TDX / NVIDIA attestation for `TEE/` models (SealedLore's `tee.py`, `dcap.py`, `nras.py`)
 - IP/hostname pseudonymisation with local reverse mapping

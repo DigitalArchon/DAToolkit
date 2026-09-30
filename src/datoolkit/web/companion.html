@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:; frame-src 'none'; object-src 'none'">
+<title>DAToolkit companion</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body { display: block; overflow: auto; padding: 12px; font-size: 16px; }
+  .comp h1 { font-size: 18px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .comp .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+  .comp .cmd { font-family: var(--mono); font-size: 14px; white-space: pre-wrap; word-break: break-all; background: var(--bg); padding: 8px; border-radius: 6px; margin: 6px 0; }
+  .comp .big { display: flex; gap: 8px; }
+  .comp .big button { flex: 1; padding: 14px 8px; font-size: 16px; }
+  .comp .hyp { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
+  .comp .bar { height: 6px; background: var(--border); border-radius: 3px; flex: 1; overflow: hidden; }
+  .comp .bar > div { height: 100%; background: var(--accent); }
+  .comp .ai { white-space: pre-wrap; }
+  .comp .row { display: flex; align-items: center; gap: 8px; }
+</style>
+</head>
+<body class="comp">
+<h1>DAToolkit <span id="case" class="muted small"></span> <span class="spacer"></span>
+  <label class="small muted"><input type="checkbox" id="speak"> read aloud</label></h1>
+<div id="ai" class="card"><div class="muted small">Last AI message</div><div class="ai" id="ai-text">—</div></div>
+<div id="hyps" class="card hidden"><div class="muted small">Hypotheses</div><div id="hyp-list"></div></div>
+<div id="queue"></div>
+<div id="toasts"></div>
+<script src="/static/companion.js"></script>
+</body>
+</html>

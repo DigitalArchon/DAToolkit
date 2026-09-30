@@ -202,6 +202,13 @@ function handleEvent(ev) {
     case "toast":
       toast(ev.text, ev.level || "info", 10000);
       break;
+    case "hypotheses":
+      S.state.hypotheses = ev.items;
+      renderHypotheses();
+      break;
+    case "similar":
+      S.state.similar_cases = ev.cases;
+      break;
     case "prompt":
       showCredentialPrompt(ev.prompt);
       break;
@@ -257,12 +264,33 @@ function renderUsage() {
 function renderAll() {
   renderTop();
   renderUsage();
+  renderHypotheses();
   renderChat(true);
   renderSessions();
   renderQueue();
   renderBusy();
   for (const p of S.state.prompts || []) if (!S.promptModals[p.id]) showCredentialPrompt(p);
   if (!S.state.case && !document.querySelector(".case-modal")) openCaseModal(true);
+}
+
+// ------------------------------------------------------------------ hypothesis board
+
+function renderHypotheses() {
+  const box = $("#hyp-board");
+  const items = S.state?.hypotheses || [];
+  box.classList.toggle("hidden", !items.length);
+  if (!items.length) return;
+  const mark = (id, m) => guarded(() => api("POST", `/api/hypotheses/${encodeURIComponent(id)}/mark`, { mark: m }));
+  $("#hyp-list").replaceChildren(...items.map((x) => {
+    const pinned = x.tech_mark === "pinned", killed = x.tech_mark === "ruled_out" || x.status === "ruled_out";
+    return h("div", { class: `hyp${killed ? " dead" : ""}${pinned ? " pinned" : ""}`, title: x.evidence || "" },
+      h("span", { class: `badge ${x.status === "supported" ? "read_only" : x.status === "ruled_out" ? "" : "modifying"}` }, x.status.replace("_", " ")),
+      h("span", { class: "text" }, x.text),
+      h("div", { class: "bar", title: `confidence ${Math.round(x.confidence * 100)}%` }, h("div", { style: `width:${Math.round(x.confidence * 100)}%` })),
+      h("span", { class: "pct" }, `${Math.round(x.confidence * 100)}%`),
+      h("button", { class: `small ghost${pinned ? " on" : ""}`, title: "Pin: tell the AI to focus on this", onclick: () => mark(x.id, pinned ? "" : "pinned") }, "📌"),
+      h("button", { class: `small ghost${x.tech_mark === "ruled_out" ? " on" : ""}`, title: "Rule out: tell the AI to drop this", onclick: () => mark(x.id, x.tech_mark === "ruled_out" ? "" : "ruled_out") }, "✕"));
+  }));
 }
 
 // ------------------------------------------------------------------ chat
@@ -282,6 +310,15 @@ function renderEntry(e) {
     }
     for (const s of e.snippets || []) {
       box.append(h("details", {}, h("summary", {}, `Terminal excerpt · ${s.session_id}`), h("pre", {}, s.text)));
+    }
+    if (e.images?.length) {
+      const strip = h("div", { class: "thumbs" });
+      for (const name of e.images) {
+        const img = h("img", { class: "thumb", alt: name, title: name });
+        caseImage(name).then((url) => { if (url) img.src = url; });
+        strip.append(img);
+      }
+      box.append(strip);
     }
     return box;
   }
@@ -343,14 +380,53 @@ function renderBusy() {
   $("#send-results-btn").disabled = busy || readyItems().length === 0;
 }
 
+const imageCache = new Map();
+async function caseImage(name) {
+  if (imageCache.has(name)) return imageCache.get(name);
+  try {
+    const r = await fetch(`/api/case/file/${encodeURIComponent(name)}`, { headers: { "X-Token": TOKEN } });
+    if (!r.ok) return null;
+    const url = URL.createObjectURL(await r.blob());
+    imageCache.set(name, url);
+    return url;
+  } catch { return null; }
+}
+
+// Photos attached to the next message: resized on this machine, sent as data URLs.
+const pendingImages = [];
+function renderAttachments() {
+  const strip = $("#attachments");
+  strip.replaceChildren(...pendingImages.map((d, i) => h("div", { class: "att" }, h("img", { src: d, class: "thumb" }),
+    h("button", { class: "small ghost", title: "Remove", onclick: () => { pendingImages.splice(i, 1); renderAttachments(); } }, "×"))));
+  strip.classList.toggle("hidden", !pendingImages.length);
+}
+function attachPhoto(file) {
+  if (!file || !file.type.startsWith("image/")) return;
+  if (pendingImages.length >= 4) return toast("Up to four photos per message.");
+  const img = new Image();
+  img.onload = () => {
+    const max = 1600, scale = Math.min(1, max / Math.max(img.width, img.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    pendingImages.push(c.toDataURL("image/jpeg", 0.85));
+    URL.revokeObjectURL(img.src);
+    renderAttachments();
+    if (S.state?.case?.sensitivity !== "open" && S.state?.active_tier === "standard") toast("Photos go to the model unredacted. Check nothing sensitive is in frame.", "info", 8000);
+  };
+  img.src = URL.createObjectURL(file);
+}
+
 async function sendChat(ev) {
   ev?.preventDefault();
   const input = $("#chat-input");
   const message = input.value.trim();
-  if (!message) return;
+  if (!message && !pendingImages.length) return;
   await guarded(async () => {
-    await api("POST", "/api/send", { message });
-    if (S.chatHistory[S.chatHistory.length - 1] !== message) S.chatHistory.push(message);
+    await api("POST", "/api/send", { message, images: pendingImages.slice() });
+    pendingImages.length = 0;
+    renderAttachments();
+    if (message && S.chatHistory[S.chatHistory.length - 1] !== message) S.chatHistory.push(message);
     S.histIdx = -1;
     input.value = "";
   });
@@ -560,8 +636,8 @@ function buildRow(item) {
   const row = h("div", { class: "qitem", "data-num": item.num },
     h("div", { class: "num" }, `#${item.num}`),
     sel,
-    h("div", {}, cmd, h("div", { class: "purpose" }), h("div", { class: "note" })),
-    h("div", { class: "meta" }, h("span", { class: "badge risk" }), h("span", { class: "status" })),
+    h("div", {}, cmd, h("div", { class: "purpose" }), h("div", { class: "rollback" }), h("div", { class: "cuts" }), h("div", { class: "note" })),
+    h("div", { class: "meta" }, h("span", { class: "badge risk" }), h("span", { class: "group" }), h("span", { class: "status" })),
     h("div", { class: "actions" }));
   return row;
 }
@@ -597,8 +673,14 @@ function updateRow(row, item) {
   const sel = $(".sess", row);
   sel.replaceChildren(...sessionOptions(item));
   sel.disabled = !pending;
-  $(".purpose", row).textContent = item.purpose + (item.edited ? "  (edited)" : "");
+  $(".purpose", row).textContent = item.purpose + (item.edited ? "  (edited)" : "") + (item.recipe ? `  [recipe ${item.recipe}]` : "");
+  $(".rollback", row).textContent = item.rollback ? `Rollback: ${item.rollback}` : (item.risk !== "read_only" && !item.dry_run_of ? "No rollback given" : "");
+  $(".rollback", row).classList.toggle("missing", !item.rollback && item.risk !== "read_only" && !item.dry_run_of);
+  $(".cuts", row).textContent = item.cuts_session ? `⚠ Cuts this session: ${item.cuts_session}` : "";
   $(".note", row).textContent = item.note ? `Note: ${item.note}` : "";
+  const grp = $(".group", row);
+  grp.textContent = item.group ? `⇄ ${item.group}` : "";
+  grp.title = item.group ? "Paired probe: run the whole group together" : "";
   const badge = $(".risk", row);
   badge.className = `badge risk ${item.risk}`;
   badge.textContent = item.risk.replace("_", " ");
@@ -617,8 +699,12 @@ function updateRow(row, item) {
     const run = btn("Run", () => runItem(item.num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
     const ins = btn("Insert", () => runItem(item.num, "insert"), "", "Type into the terminal without pressing Enter");
     run.disabled = ins.disabled = !sessOpen;
-    btns.push(run, ins,
-      btn("Skip", () => skipItem(item)),
+    btns.push(run, ins);
+    if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
+    if (item.risk !== "read_only" && !item.dry_run_of) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", "Queue the rehearsal form of this command first"));
+    if (item.risk === "read_only" && !item.watch) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
+    if (item.risk !== "read_only") btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what could go wrong"));
+    btns.push(btn("Skip", () => skipItem(item)),
       btn("↑", () => api("POST", `/api/queue/${item.num}/move`, { delta: -1 }), "ghost", "Move up"),
       btn("↓", () => api("POST", `/api/queue/${item.num}/move`, { delta: 1 }), "ghost", "Move down"));
   } else if (item.status === "ran" || item.status === "inserted") {
@@ -652,9 +738,18 @@ async function runItem(num, mode) {
   if (!sess || sess.exited) throw new Error(`Session ${item.session_id} is not open. Pick another target.`);
   if (item.risk === "disruptive") {
     const reasons = item.risk_reasons.length ? ` (${item.risk_reasons.join(", ")})` : "";
-    const ok = await confirmModal("Disruptive command",
+    const review = h("div", { class: "review hidden" });
+    const ok = await confirmModal(item.cuts_session ? "This will cut your own session" : "Disruptive command",
       h("div", {}, h("p", {}, `This command is flagged DISRUPTIVE${reasons}. It may interrupt service, lose data or cut off access.`),
-        h("pre", { class: "prompt-text" }, item.command), h("p", {}, `Target: ${sess.id} (${sess.target})`)),
+        item.cuts_session ? h("div", { class: "warnbox" }, `Blast radius: it ${item.cuts_session}. You will lose this terminal; make sure you can get back in (console, another path, or a scheduled re-enable).`) : null,
+        h("pre", { class: "prompt-text" }, item.command),
+        item.rollback ? h("p", { class: "small" }, `Rollback: ${item.rollback}`) : h("p", { class: "small warn" }, "No rollback was given for this command."),
+        h("p", {}, `Target: ${sess.id} (${sess.target})`),
+        h("button", { type: "button", class: "small", onclick: async (e) => {
+          e.target.disabled = true; review.classList.remove("hidden"); review.textContent = "Asking the reviewer…";
+          try { const r = await api("POST", `/api/queue/${num}/review`); review.replaceChildren(h("b", {}, `Second opinion (${r.model}${r.different_model ? "" : ", same model as the proposer"}): `), h("div", { class: "pre" }, r.text)); }
+          catch (err) { review.textContent = err.message; }
+        } }, "Get a second opinion"), review),
       mode === "run" ? "Run it" : "Insert it", "danger");
     if (!ok) return;
   }
@@ -668,6 +763,226 @@ async function runItem(num, mode) {
   t.term.paste(item.command);
   if (mode === "run") termSend(t, { type: "input", data: "\r" });
   t.term.focus();
+}
+
+async function runGroup(group) {
+  const nums = (await api("GET", `/api/queue/group/${encodeURIComponent(group)}`)).nums;
+  if (!nums.length) return toast("Nothing pending in that group.");
+  const items = nums.map((n) => S.state.queue.find((i) => i.num === n));
+  if (items.some((i) => i.risk !== "read_only")) {
+    const ok = await confirmModal("Run paired probes", h("div", {}, h("p", {}, "This group contains non read-only commands:"),
+      h("pre", { class: "prompt-text" }, items.map((i) => `#${i.num} [${i.risk}] ${i.session_id}: ${i.command}`).join("\n"))), "Run all", "danger");
+    if (!ok) return;
+  }
+  for (const i of items) {
+    const sess = (S.state.sessions || []).find((s) => s.id === i.session_id);
+    if (!sess || sess.exited || !S.terms[sess.id]?.ws) throw new Error(`Session ${i.session_id} is not open.`);
+  }
+  // record all start positions first, then type everything in one go so the starts line up
+  await Promise.all(items.map((i) => api("POST", `/api/queue/${i.num}`, { status: "ran" })));
+  for (const i of items) {
+    const t = S.terms[i.session_id];
+    t.markers.get(i.num)?.dispose();
+    t.markers.set(i.num, t.term.registerMarker(0));
+    t.term.paste(i.command);
+    termSend(t, { type: "input", data: "\r" });
+  }
+  toast(`Started ${items.length} probes together.`, "ok", 3000);
+}
+
+function watchItem(item) {
+  const interval = h("input", { type: "number", value: 10, min: 1, style: "width:80px" });
+  const count = h("input", { type: "number", value: 30, min: 1, max: 720, style: "width:80px" });
+  modal({
+    title: `Watch #${item.num}`,
+    body: h("div", { class: "field" }, h("pre", { class: "prompt-text" }, item.command),
+      h("div", { class: "row" }, h("label", {}, "every ", interval, " s"), h("label", {}, " for ", count, " samples")),
+      h("div", { class: "muted small" }, "The command is wrapped in a bounded loop. When you send the result, iterations identical to the previous one are dropped, so the AI sees only what changed.")),
+    buttons: [{ label: "Cancel" }, { label: "Make it a watch", kind: "primary",
+      onClick: () => api("POST", `/api/queue/${item.num}/watch`, { interval: Number(interval.value), count: Number(count.value) }) }],
+  });
+}
+
+async function secondOpinion(item) {
+  const body = h("div", { class: "muted" }, h("span", { class: "spinner" }), " Asking the reviewer…");
+  const m = modal({ title: `Second opinion on #${item.num}`, wide: true, body, buttons: [{ label: "Close" }] });
+  try {
+    const r = await api("POST", `/api/queue/${item.num}/review`);
+    m.box.querySelector(".content").replaceChildren(h("pre", { class: "prompt-text" }, item.command),
+      h("div", { class: "muted small" }, `Reviewer: ${r.model} (${r.tier})${r.different_model ? "" : " — same model as the proposer; set a different reviewer in Settings → General"}`),
+      h("div", { class: "pre" }, r.text));
+  } catch (e) {
+    m.box.querySelector(".content").replaceChildren(h("div", { class: "warnbox" }, e.message));
+  }
+}
+
+// ------------------------------------------------------------------ recipes, rollback ledger, baselines
+
+function activeSession() {
+  return (S.state?.sessions || []).find((s) => s.id === S.activeSid && !s.exited) || null;
+}
+
+function osFamily(sess) {
+  const t = `${sess?.kind || ""} ${sess?.shell || ""} ${sess?.os_hint || ""}`.toLowerCase();
+  return sess?.kind === "winrm" || t.includes("windows") || t.includes("powershell") ? "windows" : "linux";
+}
+
+async function openRecipes() {
+  hideMenus();
+  const sess = activeSession();
+  if (!sess) return toast("Open and select a session first.");
+  const all = (await api("GET", "/api/recipes")).recipes;
+  const fam = osFamily(sess);
+  const list = h("div", { class: "recipe-list" });
+  const search = h("input", { type: "text", placeholder: "Filter…" });
+  const render = () => {
+    const q = search.value.toLowerCase();
+    const shown = all.filter((r) => (r.os === "any" || r.os === fam) && (!q || `${r.id} ${r.name} ${r.tags.join(" ")}`.toLowerCase().includes(q)));
+    list.replaceChildren(...shown.map((r) => h("details", { class: "recipe" },
+      h("summary", {}, h("b", {}, r.name), " ", h("span", { class: "muted small" }, `${r.id} · ${r.steps.length} step(s)${r.baseline ? " · baseline" : ""}${r.source !== "builtin" ? ` · ${r.source}` : ""}`)),
+      r.description ? h("div", { class: "muted small" }, r.description) : null,
+      h("ol", { class: "steps" }, r.steps.map((st) => h("li", {}, h("code", { class: "mono" }, st.command), h("div", { class: "muted small" }, `${st.purpose} · ${st.risk.replace("_", " ")}`)))),
+      h("div", { class: "row" },
+        h("button", { class: "small primary", onclick: () => guarded(async () => { await api("POST", `/api/recipes/${r.id}/queue`, { session_id: sess.id }); toast(`Queued ${r.name} for ${sess.id}.`, "ok"); }) }, `Queue for ${sess.id}`),
+        r.install ? h("button", { class: "small", title: r.install, onclick: () => guarded(async () => { await api("POST", `/api/recipes/${r.id}/queue`, { session_id: sess.id, include_install: true }); toast(`Queued with install step.`, "ok"); }) }, "Queue with install") : null))));
+    if (!shown.length) list.append(h("div", { class: "muted" }, "No recipes match."));
+  };
+  search.addEventListener("input", render);
+  render();
+  modal({ title: `Recipes for ${sess.id} (${fam})`, wide: true,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, "Each step lands in the queue as a normal item. Your own recipes go in ~/.config/datoolkit/recipes/*.toml."), search, list),
+    buttons: [{ label: "Close" }] });
+}
+
+async function openRollbackLedger() {
+  hideMenus();
+  const items = (await api("GET", "/api/rollback")).items;
+  if (!items.length) return toast("No state-changing commands have run in this case.");
+  const checks = items.map((i) => h("input", { type: "checkbox", checked: i.has_rollback, disabled: !i.has_rollback }));
+  modal({ title: "Rollback ledger", wide: true,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, "Changes that ran, newest first. Queuing rollbacks adds them as normal items in this order; nothing runs until you click Run."),
+      ...items.map((i, idx) => h("label", { class: `result-block${i.has_rollback ? "" : " excluded"}` },
+        h("div", { class: "head" }, checks[idx], h("b", {}, `#${i.num}`), h("span", { class: `badge risk ${i.risk}` }, i.risk.replace("_", " ")), h("span", { class: "muted" }, i.session_id), h("code", { class: "mono" }, i.command)),
+        h("div", { class: "small" }, i.has_rollback ? `↩ ${i.rollback}` : "No rollback recorded for this item.")))),
+    buttons: [{ label: "Close" }, { label: "Queue selected rollbacks", kind: "primary", onClick: async () => {
+      const nums = items.filter((_, idx) => checks[idx].checked).map((i) => i.num);
+      const r = await api("POST", "/api/rollback/queue", { nums });
+      toast(`Queued ${r.items.length} rollback item(s).`, "ok");
+    } }] });
+}
+
+async function baselineAction(act) {
+  hideMenus();
+  const sess = activeSession();
+  if (!sess) return toast("Open and select a session first.");
+  if (act === "queue") {
+    const fam = osFamily(sess);
+    await api("POST", `/api/recipes/baseline-${fam}/queue`, { session_id: sess.id });
+    return toast(`Baseline snapshot queued for ${sess.id}. Run the items, then use Save baseline.`, "ok", 8000);
+  }
+  if (act === "save") {
+    const r = await api("POST", "/api/baselines/save", { session_id: sess.id });
+    return toast(`Baseline saved for ${r.host}: ${r.sections.join(", ")}`, "ok", 8000);
+  }
+  if (act === "diff") {
+    const r = await api("POST", "/api/baselines/diff", { session_id: sess.id });
+    const ta = h("textarea", { class: "mono", rows: 18, spellcheck: "false", value: r.text });
+    const message = h("textarea", { rows: 2, placeholder: "Message for the AI (optional)", value: "Baseline diff for this host; changed sections are leads." });
+    modal({ title: `Baseline diff · ${r.host}`, wide: true,
+      body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+        h("div", { class: "muted small" }, `Against the snapshot taken ${r.taken}. Changed: ${r.changed.join(", ") || "nothing"}. Unchanged: ${r.same.join(", ") || "nothing"}.`),
+        ta, message),
+      buttons: [{ label: "Close" }, { label: "Send to AI", kind: "primary",
+        onClick: () => api("POST", "/api/send", { message: message.value.trim(), snippets: [{ session_id: sess.id, text: ta.value }] }) }] });
+  }
+}
+
+// ------------------------------------------------------------------ context view & timeline
+
+async function openContextView() {
+  hideMenus();
+  const ctx = await api("GET", "/api/context");
+  const checks = ctx.groups.map(() => h("input", { type: "checkbox" }));
+  modal({ title: "What the AI knows", wide: true,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, `About ${fmtTokens(ctx.total_tokens)} tokens will be sent on the next turn (estimate). Tick exchanges to remove them from the AI's context; the chat and audit log keep them.`),
+      h("details", {}, h("summary", {}, `System prompt · ~${fmtTokens(ctx.system_tokens)} tokens`), h("pre", { class: "prompt-text", style: "max-height:30vh;overflow:auto" }, ctx.system)),
+      ...ctx.groups.map((g, i) => h("label", { class: "result-block" }, h("div", { class: "head" }, checks[i], h("b", {}, `Exchange ${i + 1}`),
+        h("span", { class: "muted small" }, `~${fmtTokens(g.tokens)} tokens · ${g.messages} message(s)`)), h("div", { class: "small mono" }, g.summary)))),
+    buttons: [{ label: "Close" }, { label: "Remove ticked", kind: "danger", onClick: async () => {
+      const groups = ctx.groups.map((_, i) => i).filter((i) => checks[i].checked);
+      if (!groups.length) throw new Error("Nothing ticked.");
+      await api("POST", "/api/context/drop", { groups });
+      toast(`Removed ${groups.length} exchange(s) from the AI's context.`, "ok");
+    } }] });
+}
+
+async function openTimeline() {
+  hideMenus();
+  const tl = await api("GET", "/api/case/timeline");
+  if (!tl.events.length) return toast("No events yet.");
+  const t0 = tl.events[0].ts, t1 = Math.max(tl.events[tl.events.length - 1].ts, ...Object.values(tl.sessions).flat().map((x) => x[0]));
+  const slider = h("input", { type: "range", min: 0, max: 1000, value: 1000, style: "width:100%" });
+  const clock = h("span", { class: "mono" });
+  const evList = h("div", { class: "timeline" });
+  const sids = Object.keys(tl.sessions);
+  const sidSel = h("select", {}, sids.map((s) => h("option", { value: s }, s)));
+  const termPre = h("pre", { class: "prompt-text", style: "max-height:35vh;overflow:auto;flex:1" });
+  const transcripts = {};
+  let playing = null;
+  const at = () => t0 + (t1 - t0) * (Number(slider.value) / 1000);
+  const render = async () => {
+    const t = at();
+    clock.textContent = new Date(t * 1000).toLocaleTimeString();
+    evList.replaceChildren(...tl.events.filter((e) => e.ts <= t).slice(-60).map((e) =>
+      h("div", { class: `tl-ev ${e.kind}` }, h("span", { class: "muted mono small" }, new Date(e.ts * 1000).toLocaleTimeString()), " ", e.text)));
+    evList.scrollTop = evList.scrollHeight;
+    const sid = sidSel.value;
+    if (!sid) return;
+    if (!transcripts[sid]) transcripts[sid] = (await api("GET", `/api/case/transcript?sid=${encodeURIComponent(sid)}`)).text;
+    const times = tl.sessions[sid];
+    let off = 0;
+    for (const [ts, o] of times) { if (ts <= t) off = o; else break; }
+    const bytes = new TextEncoder().encode(transcripts[sid]).slice(0, off);
+    termPre.textContent = new TextDecoder().decode(bytes).slice(-6000);
+    termPre.scrollTop = termPre.scrollHeight;
+  };
+  slider.addEventListener("input", render);
+  sidSel.addEventListener("change", render);
+  const play = h("button", { type: "button", onclick: () => {
+    if (playing) { clearInterval(playing); playing = null; play.textContent = "▶ Play"; return; }
+    if (Number(slider.value) >= 1000) slider.value = 0;
+    play.textContent = "⏸ Pause";
+    playing = setInterval(() => { slider.value = Math.min(1000, Number(slider.value) + 4); render(); if (Number(slider.value) >= 1000) play.click(); }, 200);
+  } }, "▶ Play");
+  modal({ title: `Timeline · ${tl.case.name}`, wide: true, onClose: () => playing && clearInterval(playing),
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "row" }, play, clock, h("span", { class: "spacer" }), sids.length ? h("label", {}, "Terminal ", sidSel) : null),
+      slider,
+      h("div", { class: "row", style: "align-items:stretch;gap:10px" }, h("div", { style: "flex:1;min-width:0" }, evList), sids.length ? termPre : null)),
+    buttons: [{ label: "Close" }] });
+  render();
+}
+
+async function openSimilar() {
+  hideMenus();
+  const q = h("input", { type: "text", placeholder: "Symptoms, host type, error text…", value: S.state.case?.name || "" });
+  const list = h("div", { class: "case-list" });
+  const run = async () => {
+    list.replaceChildren(h("div", { class: "muted small" }, "Searching…"));
+    const cases = (await api("GET", `/api/search?q=${encodeURIComponent(q.value)}`)).cases;
+    list.replaceChildren(...(cases.length ? cases.map((c) => h("div", { class: "case-row", style: "flex-direction:column;align-items:stretch" },
+      h("div", { class: "row" }, h("b", {}, c.name), h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity), h("span", { class: "muted small" }, `${c.started.slice(0, 10)} · matched ${c.matched.join(", ")}`), h("span", { class: "spacer" }), c.has_runbook ? h("span", { class: "badge read_only" }, "runbook") : null),
+      c.runbook_preview ? h("pre", { class: "prompt-text small", style: "max-height:120px;overflow:auto" }, c.runbook_preview) : null))
+      : [h("div", { class: "muted small" }, "No similar cases.")]));
+  };
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); guarded(run); } });
+  modal({ title: "Similar past cases", wide: true,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" }, h("div", { class: "row" }, q, h("button", { type: "button", onclick: () => guarded(run) }, "Search")), list),
+    buttons: [{ label: "Close" }] });
+  if (q.value) guarded(run);
 }
 
 // Ctrl+Shift+Enter: run the first pending read-only item whose session is open.
@@ -729,7 +1044,7 @@ async function openSendResults() {
   const items = readyItems();
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
   const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" } : captureFor(i))));
-  const prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text) })).items;
+  const prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text), nums: items.map((i) => i.num) })).items;
   const blocks = items.map((item, idx) => {
     const include = h("input", { type: "checkbox", checked: true });
     const skipped = item.status === "skipped";
@@ -738,6 +1053,7 @@ async function openSendResults() {
     const info = [];
     if (prev[idx].redactions) info.push(`${prev[idx].redactions} redaction(s) applied`);
     if (prev[idx].truncated) info.push("truncated");
+    if (prev[idx].collapsed) info.push(`${prev[idx].collapsed} unchanged watch iteration(s) dropped`);
     const block = h("div", { class: "result-block" },
       h("label", { class: "head" }, include, h("b", {}, `#${item.num}`),
         h("span", { class: `status ${item.status}` }, item.status.toUpperCase()),
@@ -934,9 +1250,9 @@ function openSettings(tab = "providers") {
   const pane = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
   const show = (name) => {
     for (const b of tabs.children) b.classList.toggle("active", b.dataset.tab === name);
-    pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, general: generalPane })[name]());
+    pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, tools: toolsPane, general: generalPane })[name]());
   };
-  for (const [key, label] of [["providers", "AI providers"], ["hosts", "Hosts"], ["general", "General"]]) {
+  for (const [key, label] of [["providers", "AI providers"], ["hosts", "Hosts"], ["tools", "Tool cache"], ["general", "General"]]) {
     tabs.append(h("button", { type: "button", "data-tab": key, onclick: () => show(key) }, label));
   }
   const m = modal({ title: "Settings", wide: true, body: h("div", {}, pane), buttons: [{ label: "Close" }] });
@@ -959,7 +1275,9 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" },
         h("button", { class: "primary", onclick: () => pane.replaceChildren(providerForm({ name: "NanoGPT", base_url: "https://nano-gpt.com/api/v1", _new: true })) }, "Add NanoGPT"),
         h("button", { onclick: () => pane.replaceChildren(providerForm({ name: "Local", base_url: "http://localhost:11434/v1", _new: true })) }, "Add local (Ollama / LM Studio / vLLM)"),
-        h("button", { onclick: () => pane.replaceChildren(providerForm({ name: "", base_url: "", _new: true })) }, "Add other")));
+        h("button", { onclick: () => pane.replaceChildren(providerForm({ name: "", base_url: "", _new: true })) }, "Add other"),
+        h("button", { title: "A scripted fake model for practising the workflow. Nothing leaves this machine.",
+          onclick: () => pane.replaceChildren(providerForm({ name: "Training", base_url: "training://disk-full", _new: true })) }, "Add training provider")));
   }
 
   function providerForm(p) {
@@ -1088,9 +1406,42 @@ function openSettings(tab = "providers") {
         }) }, "Save")));
   }
 
+  function toolsPane() {
+    const box = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
+    const list = h("div", { class: "case-list" });
+    const sess = activeSession();
+    const load = async () => {
+      const tools = (await api("GET", "/api/tools")).tools;
+      list.replaceChildren(...(tools.length ? tools.map((t) => h("div", { class: "case-row" },
+        h("div", {}, h("b", {}, t.name), " ", h("span", { class: `badge ${t.status === "ok" ? "read_only" : "disruptive"}` }, t.status),
+          h("div", { class: "muted small" }, `${t.file} · ${t.os} · ${(t.size / 1048576).toFixed(1)} MB · sha256 ${t.sha256.slice(0, 12)}…`),
+          t.notes ? h("div", { class: "small" }, t.notes) : null, t.run ? h("div", { class: "small mono" }, `run: ${t.run}`) : null),
+        h("div", { class: "row" },
+          h("button", { class: "small primary", disabled: !sess || t.status !== "ok", title: sess ? `Queue a transfer to ${sess.id}` : "Select a session first",
+            onclick: () => guarded(async () => { const r = await api("POST", `/api/tools/${encodeURIComponent(t.name)}/transfer`, { session_id: sess.id }); toast(`Transfer queued as #${r.nums.join(", #")}. Expected sha256 ${r.expected_sha256.slice(0, 12)}…`, "ok", 8000); }) }, "Send to session"),
+          h("button", { class: "small ghost", onclick: () => guarded(async () => { if (await confirmModal("Remove tool", `Remove ${t.name} from the cache?`, "Remove", "danger")) { await api("DELETE", `/api/tools/${encodeURIComponent(t.name)}`); load(); } }) }, "Remove"))))
+        : [h("div", { class: "muted small" }, "No tools cached yet.")]));
+    };
+    const f = { path: h("input", { type: "text", placeholder: "/path/to/WizTree64.exe" }), name: h("input", { type: "text", placeholder: "WizTree" }),
+      os: h("select", {}, ["windows", "linux", "any"].map((o) => h("option", { value: o }, o))),
+      notes: h("input", { type: "text", placeholder: "Where it came from, licence, what it does" }),
+      run: h("input", { type: "text", placeholder: "How to run it once copied, e.g. & $env:TEMP\\WizTree64.exe /export=C:\\wiztree.csv /admin=1" }) };
+    box.append(h("div", { class: "muted small" }, "Vetted portable CLI tools, hashed and version-pinned. \"Send to session\" queues an scp (SSH hosts, from a local shell) or an inline PowerShell write (WinRM, under 4 MB); the hash is checked on arrival. Nothing runs without your click."),
+      list, h("h3", {}, "Add a tool"),
+      h("div", { class: "row" }, h("label", { class: "field" }, h("span", {}, "File on this machine"), f.path), h("label", { class: "field" }, h("span", {}, "Name"), f.name), h("label", { class: "field" }, h("span", {}, "OS"), f.os)),
+      h("label", { class: "field" }, h("span", {}, "Notes"), f.notes), h("label", { class: "field" }, h("span", {}, "Run command"), f.run),
+      h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
+        await api("POST", "/api/tools", { path: f.path.value.trim(), name: f.name.value.trim(), os: f.os.value, notes: f.notes.value, run: f.run.value });
+        toast("Tool added.", "ok"); f.path.value = f.name.value = ""; load();
+      }) }, "Add")));
+    load();
+    return box;
+  }
+
   function generalPane() {
     const s = S.state.config.settings;
     const num = (v) => h("input", { type: "number", value: v });
+    const review = h("input", { type: "text", value: s.review_model || "", placeholder: "provider|model  e.g. NanoGPT|private/glm-5-3" });
     const f = { capture_max_lines: num(s.capture_max_lines), capture_max_chars: num(s.capture_max_chars),
       scrollback: num(s.scrollback), font_size: num(s.font_size), context_warn_tokens: num(s.context_warn_tokens || 100000) };
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
@@ -1101,11 +1452,13 @@ function openSettings(tab = "providers") {
         h("label", { class: "field" }, h("span", {}, "Terminal scrollback (new sessions)"), f.scrollback),
         h("label", { class: "field" }, h("span", {}, "Terminal font size (new sessions)"), f.font_size)),
       h("div", { class: "row" },
-        h("label", { class: "field" }, h("span", {}, "Warn when prompt tokens exceed"), f.context_warn_tokens)),
+        h("label", { class: "field" }, h("span", {}, "Warn when prompt tokens exceed"), f.context_warn_tokens),
+        h("label", { class: "field" }, h("span", {}, "Second-opinion reviewer (provider|model)"), review)),
+      h("div", { class: "muted small" }, "The reviewer sees only the command and case notes, never the proposer's reasoning. It must be allowed by the case sensitivity. Leave empty to use the active model."),
       h("div", { class: "muted small" }, "Shortcuts: Alt+1…9 switch terminal tabs · Ctrl+Shift+Enter runs the next pending read-only command · Ctrl+Shift+K focuses the chat · Ctrl+Shift+C/V copy/paste in the terminal."),
       h("div", { class: "muted small" }, `Case logs are stored under ${S.state.case ? S.state.case.dir.replace(/\/[^/]+$/, "") : "~/.local/share/datoolkit/cases"}.`),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
-        await api("POST", "/api/settings", Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])));
+        await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])), review_model: review.value.trim() });
         toast("Settings saved.", "ok");
       }) }, "Save")));
   }
@@ -1120,10 +1473,17 @@ async function doExport(act) {
     if (r) toast(`Transcript saved: ${r.path}`, "ok", 10000);
   } else if (act === "folder") {
     await guarded(() => api("POST", "/api/open-folder"));
-  } else if (act === "summary") {
-    const m = modal({ title: "Ticket summary", wide: true, body: h("div", { class: "muted" }, h("span", { class: "spinner" }), " Asking the AI for a summary…"), buttons: [{ label: "Close" }] });
+  } else if (act === "timeline") {
+    await guarded(openTimeline);
+  } else if (act === "context") {
+    await guarded(openContextView);
+  } else if (act === "similar") {
+    await guarded(openSimilar);
+  } else if (act === "summary" || act === "client" || act === "runbook") {
+    const titles = { summary: "Ticket summary", client: "Client update", runbook: "Runbook" };
+    const m = modal({ title: titles[act], wide: true, body: h("div", { class: "muted" }, h("span", { class: "spinner" }), " Asking the AI…"), buttons: [{ label: "Close" }] });
     try {
-      const r = await api("POST", "/api/export/summary");
+      const r = await api("POST", `/api/export/${act}`);
       const ta = h("textarea", { rows: 18, value: r.text });
       m.box.querySelector(".content").replaceChildren(ta, h("div", { class: "muted small" }, `Saved to ${r.path}`),
         h("button", { class: "primary", style: "align-self:flex-start", onclick: () => { clipWrite(ta.value); toast("Copied.", "ok"); } }, "Copy"));
@@ -1197,6 +1557,17 @@ function init() {
   });
   document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) hideMenus(); });
   $("#send-results-btn").addEventListener("click", () => guarded(openSendResults));
+  $("#tools-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#tools-menu")); });
+  $("#tools-menu").addEventListener("click", (e) => {
+    const a = e.target.closest("button")?.dataset.act;
+    if (a === "recipes") guarded(openRecipes);
+    else if (a === "rollback") guarded(openRollbackLedger);
+    else if (a?.startsWith("baseline-")) guarded(() => baselineAction(a.slice(9)));
+  });
+  $("#attach-btn").addEventListener("click", () => $("#photo-input").click());
+  $("#photo-input").addEventListener("change", (e) => { for (const f of e.target.files) attachPhoto(f); e.target.value = ""; });
+  $("#chat-input").addEventListener("paste", (e) => { for (const it of e.clipboardData?.items || []) if (it.type.startsWith("image/")) attachPhoto(it.getAsFile()); });
+  $("#hyp-toggle").addEventListener("click", () => $("#hyp-list").classList.toggle("hidden"));
   $("#send-selection-btn").addEventListener("click", () => guarded(sendSelection));
   $("#show-done").addEventListener("change", renderQueue);
   connectEvents();
