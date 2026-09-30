@@ -10,6 +10,8 @@ from datoolkit.safety.truncate import head_tail
     "ip addr show", "Get-Service | Where-Object {$_.Status -eq 'Stopped'}", "show running-config",
     "cat /var/log/syslog 2>/dev/null | tail -50", "ls -la > /dev/null", "grep -r shutdown /var/log/syslog",
     "Get-WinEvent -LogName System -MaxEvents 50 | Format-List", "ping -c 4 8.8.8.8", "Import-Module ActiveDirectory",
+    "cat /etc/passwd", "getent passwd 1000 999",
+    "sudo ls -la /opt/seafile-mysql /opt/seafile-data/ssl 2>&1 | head -40; getent passwd 1000 999",
 ])
 def test_read_only(cmd):
     assert classify(cmd) == ("read_only", [])
@@ -19,6 +21,7 @@ def test_read_only(cmd):
     "sudo apt install htop", "sed -i 's/a/b/' /etc/x.conf", "echo hi > /etc/motd", "sudo systemctl start nginx",
     "Set-Service -Name Spooler -StartupType Manual", "configure terminal", "write memory", "clear counters",
     "mkdir /tmp/x", "docker restart web", "ipconfig /flushdns",
+    "sudo passwd root", "echo x | passwd --stdin bob", "/usr/bin/passwd -l bob",
 ])
 def test_modifying(cmd):
     assert classify(cmd)[0] == "modifying"

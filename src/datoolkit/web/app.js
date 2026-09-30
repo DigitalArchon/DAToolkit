@@ -2041,6 +2041,11 @@ function openSettings(tab = "providers") {
     for (const b of tabs.children) b.classList.toggle("active", b.dataset.tab === name);
     pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, model: modelPane, tools: toolsPane, general: generalPane })[name]());
   };
+  // The state event from a save can arrive after the HTTP reply, so fetch the config before redrawing a list.
+  const reshow = async (name) => {
+    S.state.config = (await api("GET", "/api/state")).config;
+    show(name);
+  };
   for (const [key, label] of [["providers", "AI providers"], ["model", "Model"], ["hosts", "Hosts"], ["tools", "Tool cache"], ["general", "General"]]) {
     tabs.append(h("button", { type: "button", "data-tab": key, onclick: () => show(key) }, label));
   }
@@ -2056,8 +2061,10 @@ function openSettings(tab = "providers") {
       h("button", { class: "small", onclick: () => pane.replaceChildren(providerForm(p)) }, "Edit"),
       h("button", { class: "small danger", onclick: async () => {
         if (await confirmModal("Delete provider", `Delete ${p.name} and its stored API key?`, "Delete", "danger")) {
-          await guarded(() => api("DELETE", `/api/providers/${encodeURIComponent(p.name)}`));
-          show("providers");
+          await guarded(async () => {
+            await api("DELETE", `/api/providers/${encodeURIComponent(p.name)}`);
+            await reshow("providers");
+          });
         }
       } }, "Delete"))) : h("div", { class: "muted" }, "No providers yet."));
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, list,
@@ -2113,7 +2120,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave, attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict) and each reply's signature checked, but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models, attested with Tinfoil's verifier); LOCAL = your own hardware (localhost/private IP URLs)."),
       status,
       h("div", { class: "row" },
-        h("button", { onclick: () => show("providers") }, "Back"),
+        h("button", { onclick: () => guarded(() => reshow("providers")) }, "Back"),
         h("span", { class: "spacer" }),
         h("button", { onclick: () => guarded(async () => {
           const n = await save();
@@ -2129,7 +2136,7 @@ function openSettings(tab = "providers") {
         h("button", { class: "primary", onclick: () => guarded(async () => {
           await save();
           toast("Provider saved.", "ok");
-          show("providers");
+          await reshow("providers");
         }) }, "Save")));
   }
 
@@ -2143,8 +2150,10 @@ function openSettings(tab = "providers") {
       h("button", { class: "small", onclick: () => pane.replaceChildren(hostForm(x)) }, "Edit"),
       h("button", { class: "small danger", onclick: async () => {
         if (await confirmModal("Delete host", `Delete ${x.name} and any stored password?`, "Delete", "danger")) {
-          await guarded(() => api("DELETE", `/api/hosts/${encodeURIComponent(x.name)}`));
-          show("hosts");
+          await guarded(async () => {
+            await api("DELETE", `/api/hosts/${encodeURIComponent(x.name)}`);
+            await reshow("hosts");
+          });
         }
       } }, "Delete"))) : h("div", { class: "muted" }, "No saved hosts yet."));
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, list,
@@ -2208,7 +2217,7 @@ function openSettings(tab = "providers") {
         toast("Password removed from keyring.", "ok");
       }) }, "Forget stored password") : null,
       h("div", { class: "row" },
-        h("button", { onclick: () => show("hosts") }, "Back"), h("span", { class: "spacer" }),
+        h("button", { onclick: () => guarded(() => reshow("hosts")) }, "Back"), h("span", { class: "spacer" }),
         h("button", { class: "primary", onclick: () => guarded(async () => {
           await api("POST", "/api/hosts", {
             host: {
@@ -2221,7 +2230,7 @@ function openSettings(tab = "providers") {
             password: f.password.value || null, original_name: x._new ? null : x.name,
           });
           toast("Host saved.", "ok");
-          show("hosts");
+          await reshow("hosts");
         }) }, "Save")));
   }
 

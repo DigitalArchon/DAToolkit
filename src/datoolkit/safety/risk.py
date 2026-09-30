@@ -82,7 +82,9 @@ MODIFYING: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\btee\b"), "file write"),
     (re.compile(r"(?<![0-9&>=-])>{1,2}(?!&)\s*(?!/dev/null\b)[^\s|&;]"), "output redirect to file"),
     (re.compile(CMD + r"(mv|cp|rm|rmdir|chmod|chown|chgrp|mkdir|touch|ln|install|truncate)\b"), "filesystem change"),
-    (re.compile(r"\b(useradd|usermod|groupadd|groupmod|passwd|chpasswd|visudo)\b"), "account change"),
+    (re.compile(r"\b(useradd|usermod|groupadd|groupmod|chpasswd|visudo)\b"), "account change"),
+    # passwd is also a file (/etc/passwd) and a getent database, so only as the command itself
+    (re.compile(CMD + r"(\S*/)?passwd\b(?![.-])", re.M), "account change"),
     (re.compile(r"\bgit\s+(commit|push|reset|checkout|merge|rebase|pull|clean)\b"), "repository change"),
     (re.compile(r"\bdocker\s+(rm|rmi|stop|restart|kill|run|start|pull|compose\s+(up|down|restart))\b"), "container change"),
     (re.compile(r"\bkubectl\s+(apply|create|scale|rollout|patch|edit|label|annotate|cordon|drain)\b"), "kubernetes change"),
