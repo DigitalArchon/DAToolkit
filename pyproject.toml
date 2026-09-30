@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datoolkit"
-version = "0.1.0"
+version = "0.1.0b1"
 description = "Gated AI diagnostic console: the AI proposes commands, the technician decides."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -15,7 +15,6 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "pywebview>=5",
-    "ptyprocess>=0.7",
     "pypsrp>=0.8",
     "keyring>=25",
     "tomli-w>=1.0",

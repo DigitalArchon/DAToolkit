@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from ptyprocess import PtyProcess
+from .ptyproc import PtyProcess
 
 BACKLOG_BYTES = 512 * 1024
 
@@ -224,6 +224,7 @@ class SessionManager:
             sess.exit_status = sess.proc.exitstatus
         except Exception:  # noqa: BLE001
             pass
+        sess.proc.close()
         self._publish(sess, f"\r\n\x1b[2m[session ended, exit status {sess.exit_status}]\x1b[0m\r\n".encode())
         sess.transcript.close()
         self._on_change()
@@ -263,7 +264,7 @@ class SessionManager:
                 asyncio.get_running_loop().remove_reader(sess.proc.fd)
             except RuntimeError:
                 pass
-            sess.proc.terminate(force=True)
+            sess.proc.terminate()
         sess.transcript.close()
         for q in list(sess.subscribers):
             q.put_nowait(None)
