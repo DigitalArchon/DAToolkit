@@ -362,3 +362,8 @@ def test_desktop_resizes_only_when_asked_and_can_be_maximized():
     assert re.search(r"\.rdp-view \{[^}]*overflow: auto", css)
     assert re.search(r"body\.rdp-max #chat-pane[^{]*\{ display: none", css.replace("\n", " "))
     assert re.search(r"\.rdp-status \{[^}]*width:", css)      # status text can't wrap the bar
+    # Guacamole's canvases sit at z-index -1: without its own stacking context the view's black
+    # background covers the 1:1 (untransformed) desktop
+    assert re.search(r"\.rdp-view \{[^}]*isolation: isolate", css)
+    # the remote pointer is the local pointer, not a drawn copy left behind at its last position
+    assert "display.showCursor(false)" in js and "mouse.setCursor(canvas, x, y)" in js

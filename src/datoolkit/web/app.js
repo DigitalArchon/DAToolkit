@@ -1155,6 +1155,10 @@ function rdpConnect(r) {
   };
   const mouse = new Guacamole.Mouse(display.getElement());
   mouse.onEach(["mousedown", "mousemove", "mouseup"], (e) => { if (r.state === 3) client.sendMouseState(e.state, true); });
+  // The remote pointer becomes this page's pointer over the desktop; drawn into the display it
+  // lags behind, and stays behind where the pointer last left the desktop like a second mouse.
+  display.showCursor(false);
+  display.oncursor = (canvas, x, y) => { if (!mouse.setCursor(canvas, x, y)) display.showCursor(true); };
   const [w, hh] = rdpViewSize(r);
   client.connect(`t=${encodeURIComponent(TOKEN)}&width=${w}&height=${hh}&dpi=96`);
 }
