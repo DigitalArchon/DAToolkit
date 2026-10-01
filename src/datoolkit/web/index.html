@@ -47,6 +47,7 @@
 
 <main id="workspace">
   <section id="chat-pane">
+    <button id="chat-strip" type="button" title="Show the chat (Ctrl+Shift+K)"><span>💬</span><span class="label">Chat</span><span class="unread hidden" title="New message from the AI"></span></button>
     <div id="hyp-board" class="hidden">
       <div class="hyp-head"><button id="hyp-toggle" class="ghost small" title="Show/hide">Hypotheses</button><span class="muted small">pin 📌 or rule out ✕ to steer the AI</span></div>
       <div id="hyp-list"></div>
@@ -69,6 +70,7 @@
   <div class="splitter vertical" id="split-v"></div>
   <section id="term-pane">
     <div id="tabs">
+      <button id="chat-toggle" class="ghost small" type="button" title="Hide the chat, to give the terminal more room">«</button>
       <div id="tab-list"></div>
       <div class="menu-wrap">
 <button id="tab-shot-btn" class="ghost" data-needs-vision title="Attach a screenshot of this terminal to your next chat message, e.g. when a login lands on a menu instead of a shell">Screenshot → chat</button>
@@ -86,6 +88,7 @@
 
 <section id="queue-pane">
   <div class="queue-head">
+    <button id="queue-toggle" class="ghost small" type="button" title="Hide the queue list, to give the terminal more room">▾</button>
     <span class="title">Command queue</span>
     <span id="queue-count" class="muted"></span>
     <label class="muted small" title="Also show items already sent to the AI and items the AI withdrew"><input type="checkbox" id="show-done"> show done</label>

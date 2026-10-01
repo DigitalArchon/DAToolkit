@@ -319,6 +319,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             await companion.start(companion_port())  # phones pair again on the new port
         return {"ok": True}
 
+    @app.post("/api/layout")
+    async def save_layout(body: dict, e: Engine = Depends(auth)):
+        e.save_layout(body)
+        return {"ok": True}
+
     @app.post("/api/case")
     async def new_case(body: dict, e: Engine = Depends(auth)):
         e.new_case(body.get("name", ""), body.get("sensitivity", "open"), body.get("notes", ""))

@@ -469,3 +469,33 @@ def test_replay_reports_rule_changes(tmp_path):
     assert r["risk_changes"][0]["now"] == "disruptive" and "pipe to shell" in r["risk_changes"][0]["reasons"]
     assert r["session_cuts"][0]["num"] == 2
     assert r["redaction_changes"][0]["new_redactions"] == 1 and r["injection_flags"]
+
+
+async def test_layout_is_saved_quietly_and_kept_in_range(env, tmp_path):  # noqa: F811
+    from datoolkit import config
+
+    engine, _, events = env
+    saved = []
+    engine._save_config = saved.append
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as gui:
+        assert (await gui.post("/api/layout", json={"chat_w": 500}, headers={"x-token": "bad"})).status_code == 403
+        before = len(events)
+        r = await gui.post("/api/layout", json={"chat_w": 520.6, "queue_h": 99999, "chat_collapsed": 1, "font_size": 99},
+                           headers={"x-token": "main"})
+        assert r.status_code == 200
+        assert len(events) == before                                  # nothing re-sent to the page
+        assert (await gui.post("/api/layout", json={"chat_w": "wide"}, headers={"x-token": "main"})).status_code == 400
+    assert engine.cfg.settings.layout == {"chat_w": 520, "queue_h": 3000, "chat_collapsed": True}
+    assert engine.cfg.settings.font_size != 99                         # only layout keys
+    assert len(saved) == 1
+    engine.save_layout({"chat_w": 520})                                # unchanged: not written again
+    assert len(saved) == 1
+    engine.save_layout({"queue_collapsed": False})
+    assert engine.cfg.settings.layout["queue_collapsed"] is False and len(saved) == 2
+    # it lives in config.toml, and reaches the page with the rest of the settings
+    path = tmp_path / "c.toml"
+    config.save(engine.cfg, path)
+    assert config.load(path).settings.layout == engine.cfg.settings.layout
+    assert engine.snapshot()["config"]["settings"]["layout"]["chat_w"] == 520

@@ -694,6 +694,26 @@ class Engine:
         if "auto_review" in data or "review_model" in data:
             self._auto_review(self.queue.items)      # catch up on what is already pending
 
+    LAYOUT_SIZES = {"chat_w": (200, 4000), "queue_h": (60, 3000)}
+    LAYOUT_FLAGS = ("chat_collapsed", "queue_collapsed")
+
+    def save_layout(self, data: dict) -> None:
+        """Pane sizes and collapsed panes, saved quietly: the page already shows them, so
+        nothing is sent back. Unknown keys are ignored and sizes are kept in range."""
+        layout = dict(self.cfg.settings.layout)
+        for key, (lo, hi) in self.LAYOUT_SIZES.items():
+            if key in data:
+                try:
+                    layout[key] = max(lo, min(hi, int(data[key])))
+                except (TypeError, ValueError):
+                    raise UserError(f"{key} must be a number of pixels.") from None
+        for key in self.LAYOUT_FLAGS:
+            if key in data:
+                layout[key] = bool(data[key])
+        if layout != self.cfg.settings.layout:
+            self.cfg.settings.layout = layout
+            self._save_config(self.cfg)
+
     # ---------------------------------------------------------------- cases
 
     def new_case(self, name: str, sensitivity: str, notes: str = "") -> None:

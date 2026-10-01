@@ -79,6 +79,10 @@ class Settings:
     companion_port: int = 48443
     # "window" (the app window, needs WebKitGTK) or "browser" (the default web browser); next launch
     ui_mode: str = "window"
+    # pane sizes in pixels and which panes are collapsed (see Engine.save_layout). Kept here, not
+    # in the page's storage: the app window's storage is private and the browser's origin (a
+    # random port) changes every launch
+    layout: dict = field(default_factory=dict)
 
 
 @dataclass

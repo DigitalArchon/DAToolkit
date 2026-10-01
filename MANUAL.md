@@ -43,6 +43,12 @@ the system's own; in the browser they're the browser's.
 
 ## Workflow
 
+- **Layout.** Drag the bars between the chat, the terminals and the queue to resize them.
+  On a small screen, **«** at the left of the terminal tabs hides the chat to a narrow strip
+  (click the strip, **»**, or Ctrl+Shift+K to bring it back; a dot on the strip means the AI
+  has written something since). **▾** on the queue header hides the queue list but keeps the
+  header, with its counts and **Send results**. Attaching a photo or screenshot shows the
+  chat again. Sizes and hidden panes are saved in the config and come back next launch.
 - The chat is a conversation: the AI says what it makes of each result, what it wants to check
   next and why, and asks you what no command can tell it (when it started, what changed).
   Its questions come with quick-reply buttons that fill your reply; press Enter to send.
@@ -316,7 +322,7 @@ the rules. From the AppImage, run `DAToolkit-<version>-x86_64.AppImage replay`.
 |---|---|
 | Alt+1 … Alt+9 | Switch terminal tab |
 | Ctrl+Shift+Enter | Run the next pending **read-only** command (never a modifying, disruptive or sensitive one, or one the reviewer said not to run) |
-| Ctrl+Shift+K | Focus the chat box |
+| Ctrl+Shift+K | Focus the chat box (showing the chat if it is hidden) |
 | ↑ / ↓ in the chat box | Recall earlier messages |
 | Enter / Shift+Enter | Send / newline |
 | Ctrl+Shift+C / V | Copy / paste in the terminal |

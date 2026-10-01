@@ -92,11 +92,6 @@ function md(text) {
   return DOMPurify.sanitize(marked.parse(text || "", { breaks: true }), MD_OPTS);
 }
 
-const store = {
-  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
-};
-
 async function clipWrite(text) {
   try {
     if (DESKTOP) return await api("POST", "/api/desktop/clipboard", { text });
@@ -173,6 +168,7 @@ function handleEvent(ev) {
   switch (ev.type) {
     case "state":
       S.state = ev.state;
+      loadLayout(S.state.config?.settings?.layout);
       if (S.state.busy && S.state.search_requests?.length && !S.streaming) {
         S.streaming = { text: "", reasoning: "", phase: "tool", tool: "web_search", startAt: Date.now(), lastAt: Date.now(),
           searches: S.state.search_requests };
@@ -195,6 +191,7 @@ function handleEvent(ev) {
       break;
     case "chat":
       S.state.chat.push(ev.entry);
+      if (ev.entry.kind === "assistant") chatActivity();
       renderChat(true);
       break;
     case "turn_start":
@@ -227,6 +224,7 @@ function handleEvent(ev) {
       S.state.last_error = ev.error || null;
       if (ev.usage) S.state.last_usage = ev.usage;
       if (document.hidden) document.title = ev.error ? "✕ DAToolkit" : "✓ DAToolkit: your turn";
+      chatActivity();
       renderBusy();
       renderChat(true);
       renderUsage();
@@ -705,6 +703,7 @@ function renderAttachments() {
   strip.replaceChildren(...pendingImages.map((d, i) => h("div", { class: "att" }, h("img", { src: d, class: "thumb" }),
     h("button", { class: "small ghost", title: "Remove", onclick: () => { pendingImages.splice(i, 1); renderAttachments(); } }, "×"))));
   strip.classList.toggle("hidden", !pendingImages.length);
+  if (pendingImages.length) setChatCollapsed(false);   // an attachment waits in the chat box: show it
 }
 async function attachPhoto(file) {
   if (!file || !file.type.startsWith("image/")) return;
@@ -1808,7 +1807,7 @@ function globalKeys(e) {
     const idx = Number(e.code.slice(5)) - 1;
     if (sessions[idx]) activateTab(sessions[idx].id);
   } else if (e.key === "Enter") runNextReadOnly();
-  else if (e.code === "KeyK") $("#chat-input").focus();
+  else if (e.code === "KeyK") { setChatCollapsed(false); $("#chat-input").focus(); }
 }
 
 function skipItem(item) {
@@ -2679,26 +2678,77 @@ function toggleMenu(menu) {
   if (wasHidden) menu.classList.remove("hidden");
 }
 
+// ---- layout: pane sizes and collapsed panes, kept in the config (Engine.save_layout) so they
+// survive a restart; the page's own storage doesn't (private in the app window, a new origin
+// per launch in the browser). Applied once from the first state, then owned by the page.
+const layout = { chat_w: null, queue_h: null, chat_collapsed: false, queue_collapsed: false, loaded: false };
+const clampChatW = (px) => Math.max(280, Math.min(px, window.innerWidth - 320));
+const clampQueueH = (px) => Math.max(90, Math.min(px, window.innerHeight - 250));
+
+function saveLayout(changes) {
+  Object.assign(layout, changes);
+  api("POST", "/api/layout", changes).catch(() => { /* a size that isn't saved is no reason to interrupt */ });
+}
+
+function applyLayout() {
+  const root = document.documentElement;
+  if (layout.chat_w) root.style.setProperty("--chat-w", `${clampChatW(layout.chat_w)}px`);
+  if (layout.queue_h) root.style.setProperty("--queue-h", `${clampQueueH(layout.queue_h)}px`);
+  document.body.classList.toggle("chat-collapsed", layout.chat_collapsed);
+  document.body.classList.toggle("queue-collapsed", layout.queue_collapsed);
+  const ct = $("#chat-toggle"), qt = $("#queue-toggle");
+  ct.textContent = layout.chat_collapsed ? "»" : "«";
+  ct.title = layout.chat_collapsed ? "Show the chat (Ctrl+Shift+K)" : "Hide the chat, to give the terminal more room";
+  qt.textContent = layout.queue_collapsed ? "▸" : "▾";
+  qt.title = layout.queue_collapsed ? "Show the queue list" : "Hide the queue list, to give the terminal more room";
+  if (!layout.chat_collapsed) $("#chat-strip .unread").classList.add("hidden");
+}
+
+function loadLayout(saved) {
+  if (layout.loaded) return;
+  Object.assign(layout, saved || {}, { loaded: true });
+  applyLayout();
+}
+
+function setChatCollapsed(collapsed) {
+  if (layout.chat_collapsed === collapsed) return;
+  saveLayout({ chat_collapsed: collapsed });
+  applyLayout();
+  if (!collapsed) { const log = $("#chat-log"); log.scrollTop = log.scrollHeight; }   // hidden, it lost its place
+}
+
+function setQueueCollapsed(collapsed) {
+  saveLayout({ queue_collapsed: collapsed });
+  applyLayout();
+}
+
+// a new AI message while the chat is hidden: a dot on the strip
+function chatActivity() {
+  if (layout.chat_collapsed) $("#chat-strip .unread").classList.remove("hidden");
+}
+
 function setupSplitters() {
   const root = document.documentElement;
-  const chatW = store.get("dat-chat-w", null);
-  const queueH = store.get("dat-queue-h", null);
-  if (chatW) root.style.setProperty("--chat-w", chatW);
-  if (queueH) root.style.setProperty("--queue-h", queueH);
   const drag = (el, onMove, key, prop) => el.addEventListener("mousedown", (e) => {
     e.preventDefault();
-    const move = (ev) => { root.style.setProperty(prop, onMove(ev)); fitTerm(S.terms[S.activeSid]); };
+    let px = null;
+    const move = (ev) => { px = Math.round(onMove(ev)); root.style.setProperty(prop, `${px}px`); fitTerm(S.terms[S.activeSid]); };
     const up = () => {
       document.removeEventListener("mousemove", move);
       document.removeEventListener("mouseup", up);
-      store.set(key, root.style.getPropertyValue(prop));
+      if (px !== null) saveLayout({ [key]: px });
       fitTerm(S.terms[S.activeSid], true);
     };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
   });
-  drag($("#split-v"), (ev) => `${Math.min(Math.max(ev.clientX, 280), window.innerWidth - 320)}px`, "dat-chat-w", "--chat-w");
-  drag($("#split-h"), (ev) => `${Math.min(Math.max(window.innerHeight - ev.clientY, 90), window.innerHeight - 250)}px`, "dat-queue-h", "--queue-h");
+  drag($("#split-v"), (ev) => clampChatW(ev.clientX), "chat_w", "--chat-w");
+  drag($("#split-h"), (ev) => clampQueueH(window.innerHeight - ev.clientY), "queue_h", "--queue-h");
+  $("#chat-toggle").addEventListener("click", () => setChatCollapsed(!layout.chat_collapsed));
+  $("#chat-strip").addEventListener("click", () => setChatCollapsed(false));
+  $("#queue-toggle").addEventListener("click", () => setQueueCollapsed(!layout.queue_collapsed));
+  let resized = null;
+  window.addEventListener("resize", () => { clearTimeout(resized); resized = setTimeout(applyLayout, 100); });  // keep saved sizes in range
   let pending = null;
   new ResizeObserver(() => {
     clearTimeout(pending);
