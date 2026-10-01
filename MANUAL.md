@@ -18,6 +18,15 @@ This is the full reference. For what DAToolkit is and how to install it, see the
 
 ## First run
 
+DAToolkit opens in its own window, which uses your system's WebKitGTK (see the
+[README](README.md#install) for the package). If that isn't installed, or there's no graphical
+display, it opens in your default web browser instead, with a banner saying why and what to
+install. To always use the browser, set **Settings → General → Open DAToolkit in** (it applies
+from the next start); from a terminal, `datoolkit --browser` or `--window` overrides that for one
+run, and `--no-open` just prints the local URL. In the browser, use **Quit** in the top bar to end
+DAToolkit: closing the tab leaves it running. The app window's clipboard and Save dialog are
+the system's own; in the browser they're the browser's.
+
 1. **Start a case.** Give it a name or ticket number and pick a sensitivity:
 
    | Sensitivity    | Allowed model tiers        | Use for                              |
@@ -291,7 +300,7 @@ Local-tier model. Scenarios are TOML files under `src/datoolkit/training/scenari
 
 `datoolkit-replay` runs today's risk, blast-radius, sensitive-data, redaction and injection rules over past
 cases' event logs and prints what would now be classified differently. Use it after editing
-the rules.
+the rules. From the AppImage, run `DAToolkit-<version>-x86_64.AppImage replay`.
 
 ### Keyboard shortcuts
 

@@ -46,7 +46,7 @@ datoolkit-replay = "datoolkit.replay:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-datoolkit = ["web/*.html", "web/*.js", "web/*.css", "web/vendor/*", "training/scenarios/*.toml"]
+datoolkit = ["web/*.html", "web/*.js", "web/*.css", "web/*.svg", "web/vendor/*", "training/scenarios/*.toml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

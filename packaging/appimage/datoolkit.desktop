@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=DAToolkit
+GenericName=AI diagnostic console
+Comment=The AI proposes commands; you decide what runs
+Exec=datoolkit
+Icon=datoolkit
+StartupWMClass=datoolkit
+Terminal=false
+Categories=System;
+Keywords=terminal;ssh;rdp;winrm;diagnostics;ai;
+X-AppImage-Name=DAToolkit

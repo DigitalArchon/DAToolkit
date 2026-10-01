@@ -42,17 +42,34 @@ or to maintain a port.
 
 ## Install
 
+Releases come as a single **AppImage** for x86-64 Linux: download it, make it executable
+(`chmod +x DAToolkit-*.AppImage`) and run it. It needs Ubuntu 24.04 / Mint 22, Debian 13, or a
+current Fedora, Arch or CachyOS (X11 or Wayland). The app window uses the system's WebKitGTK,
+so that it gets your distribution's security updates:
+
+| Distribution | For the app window | For RDP sessions (optional) |
+|---|---|---|
+| Ubuntu, Mint, Debian | `sudo apt install gir1.2-webkit2-4.1` | `sudo apt install guacd` |
+| Fedora | `sudo dnf install webkit2gtk4.1` | `sudo dnf install guacd` |
+| Arch, CachyOS | `sudo pacman -S webkit2gtk-4.1` | `guacamole-server` (AUR) |
+
+Without WebKitGTK, DAToolkit opens in your default web browser instead and says what to install.
+You can also choose the browser yourself (Settings → General, or `--browser`); the browser
+version has a **Quit** button, because closing the tab doesn't end the app. Every release can
+be rebuilt from its commit to the same bytes: see [packaging/README.md](packaging/README.md).
+
+To run from source instead (Python 3.11 or newer):
+
 ```bash
 sudo apt install python3-venv python3-gi gir1.2-webkit2-4.1   # Debian/Ubuntu/Mint
-sudo apt install guacd                                         # optional: RDP sessions
 git clone https://github.com/DigitalArchon/DAToolkit.git && cd DAToolkit
 python3 -m venv --system-site-packages .venv   # system-site-packages gives access to GTK/WebKit
 .venv/bin/pip install -e .
 .venv/bin/datoolkit
 ```
 
-Needs Python 3.11 or newer. `datoolkit --browser` skips the window and prints a local URL to
-open in a browser instead. Treat that URL like a password: it grants terminal access.
+`--no-open` only prints the local URL, for opening it yourself. Treat that URL like a password:
+it grants terminal access.
 
 ## Quick start
 

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>au.com.digitalarchon.datoolkit</id>
+  <name>DAToolkit</name>
+  <summary>Gated AI diagnostic console: the AI proposes commands, you decide what runs</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <developer id="au.com.digitalarchon"><name>Digital Archon</name></developer>
+  <description>
+    <p>Describe a problem; the AI proposes commands; you decide what runs in real terminals
+    (local, SSH, WinRM, RDP) and what output the AI gets to see.</p>
+  </description>
+  <launchable type="desktop-id">datoolkit.desktop</launchable>
+  <url type="homepage">https://github.com/DigitalArchon/DAToolkit</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>
