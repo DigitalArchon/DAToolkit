@@ -60,3 +60,12 @@ def test_ssh_argv():
     assert argv.count("-o") == 4
     k = ssh_argv(Host("s", "ssh", "srv", auth="key", key_file="~/.ssh/id"))
     assert "-i" in k and "IdentitiesOnly=yes" in k
+
+
+def test_old_guacd_address_keys_are_ignored():
+    from datoolkit.sessions import guac
+
+    cfg = config.from_dict({"settings": {"guacd_host": "10.0.0.5", "guacd_port": 9999, "font_size": 14}})
+    assert cfg.settings.font_size == 14
+    assert "guacd_host" not in cfg.to_dict()["settings"]           # dropped on the next save
+    assert guac.GUACD == ("127.0.0.1", 4822)                       # always this machine

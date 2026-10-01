@@ -304,8 +304,9 @@ def test_rdp_session_cut_rules():
 
 # ---------------------------------------------------------------- the relay
 
-def test_ws_relay_handshakes_pings_and_forwards(tmp_path):
+def test_ws_relay_handshakes_pings_and_forwards(tmp_path, monkeypatch):
     g = FakeGuacd()
+    monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", g.port))
     token = "tok"
     holder = {}
 
@@ -313,7 +314,6 @@ def test_ws_relay_handshakes_pings_and_forwards(tmp_path):
         from datoolkit.config import Config
         from datoolkit.engine import Engine
         e = Engine(Config(), emit, tmp_path / "rt", save_config=lambda c: None)
-        e.cfg.settings.guacd_port = g.port
         holder["e"] = e
         return e
 

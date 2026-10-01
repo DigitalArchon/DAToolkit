@@ -592,11 +592,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         clamp = lambda v, lo, hi, d: max(lo, min(hi, int(v))) if str(v).isdigit() else d  # noqa: E731
         width, height = clamp(q.get("width"), 200, 8192, 1280), clamp(q.get("height"), 200, 8192, 800)
         dpi = clamp(q.get("dpi"), 48, 480, 96)
-        s = engine.cfg.settings
         writer = None
         try:
             try:
-                reader, writer = await asyncio.wait_for(asyncio.open_connection(s.guacd_host, s.guacd_port), 5)
+                reader, writer = await guac.connect(5)
                 _, _, leftover, decoder = await guac.handshake(reader, writer, "rdp", params, width, height, dpi,
                                                                _local_timezone())
             except (OSError, asyncio.TimeoutError, guac.GuacError) as e:

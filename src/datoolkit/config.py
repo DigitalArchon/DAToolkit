@@ -71,9 +71,6 @@ class Settings:
     search_provider: str = "kagi"
     # name of the NanoGPT provider whose key pays for searches; empty = the first NanoGPT one
     search_via: str = ""
-    # guacd (apt install guacd) proxies RDP sessions
-    guacd_host: str = "127.0.0.1"
-    guacd_port: int = 4822
     # generation parameters sent with every request; a missing key means "the model's default"
     generation: dict = field(default_factory=lambda: {"temperature": 0.3, "reasoning_effort": "low"})
     # "provider|model" that describes images for a chat model without vision; empty = none

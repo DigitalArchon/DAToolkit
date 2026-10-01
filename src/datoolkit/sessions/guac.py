@@ -18,10 +18,17 @@ import uuid as uuid_mod
 
 INTERNAL = ""          # opcode of tunnel-internal instructions (uuid, ping)
 HANDSHAKE_TIMEOUT = 20
+# Always this machine, on guacd's default port. The link to guacd is plain, unauthenticated
+# TCP carrying the password and the whole session, so it is never made over a network.
+GUACD = ("127.0.0.1", 4822)
 
 
 class GuacError(Exception):
     pass
+
+
+async def connect(timeout: float) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    return await asyncio.wait_for(asyncio.open_connection(*GUACD), timeout)
 
 
 def encode(*elements) -> str:

@@ -42,7 +42,7 @@ from .safety.dryrun import dry_run
 from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
-from .sessions import rdpcert
+from .sessions import guac, rdpcert
 from .sessions.askpass import AskpassBridge
 from .sessions.manager import RdpSession, SessionManager
 from .sessions.ssh import ssh_argv, target_label
@@ -818,9 +818,8 @@ class Engine:
     # ---------------------------------------------------------------- RDP
 
     async def _guacd_reachable(self) -> bool:
-        s = self.cfg.settings
         try:
-            _, w = await asyncio.wait_for(asyncio.open_connection(s.guacd_host, s.guacd_port), 3)
+            _, w = await guac.connect(3)
             w.close()
             return True
         except (OSError, asyncio.TimeoutError):
@@ -834,10 +833,10 @@ class Engine:
         host = self.cfg.host(host_name)
         if not host or host.kind != "rdp":
             raise UserError(f"Unknown RDP host {host_name}")
-        s = self.cfg.settings
         if not await self._guacd_reachable():
-            raise UserError(f"guacd is not running on {s.guacd_host}:{s.guacd_port}. Install it with "
-                            "'sudo apt install guacd' (it starts as a service), or set its address in Settings.")
+            host, port = guac.GUACD
+            raise UserError(f"guacd is not running on {host}:{port}. Install it with "
+                            "'sudo apt install guacd' (it starts as a service).")
         sid = self.sessions.unique_id(host.name)
         port = host.port or 3389
         try:
