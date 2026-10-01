@@ -80,6 +80,8 @@ class Settings:
     vision_model: str = ""
     # the phone companion's HTTPS port, fixed so a firewall can open just this one
     companion_port: int = 48443
+    # "window" (the app window, needs WebKitGTK) or "browser" (the default web browser); next launch
+    ui_mode: str = "window"
 
 
 @dataclass

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from ..hostenv import host_env
 from .ptyproc import PtyProcess
 
 BACKLOG_BYTES = 512 * 1024
@@ -150,7 +151,7 @@ class SessionManager:
         return f"{base}-{n}"
 
     def spawn(self, sid: str, argv: list[str], env: dict[str, str], **meta) -> Session:
-        full_env = {**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor", **env}
+        full_env = host_env(TERM="xterm-256color", COLORTERM="truecolor", **env)
         proc = PtyProcess.spawn(argv, env=full_env, cwd=os.path.expanduser("~"), dimensions=(30, 100))
         sess = Session(id=sid, proc=proc, **meta)
         sess.transcript.open(self._transcript_dir(sid))

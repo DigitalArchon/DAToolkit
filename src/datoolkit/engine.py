@@ -132,6 +132,7 @@ class Engine:
         self.cfg = cfg
         self._emit = emit
         self._save_config = save_config
+        self.ui_notice = ""  # shown as a banner, e.g. why the app opened in the browser
         self.case: Case | None = None
         self.queue = Queue()
         self.conv: list[dict] = []   # OpenAI-format messages (no system prompt)
@@ -202,6 +203,7 @@ class Engine:
     def snapshot(self) -> dict:
         return {
             "keyring_error": creds.backend_error(),
+            "ui_notice": self.ui_notice,
             "config": self._config_view(),
             "active_tier": self.active_tier(),
             "attestation": self.attestation,
@@ -656,6 +658,10 @@ class Engine:
             if not 1024 <= port <= 65535:
                 raise UserError("The companion port must be between 1024 and 65535.")
             s.companion_port = port
+        if "ui_mode" in data:
+            if data["ui_mode"] not in ("window", "browser"):
+                raise UserError("Open in must be window or browser.")
+            s.ui_mode = data["ui_mode"]
         if "review_model" in data:
             s.review_model = str(data["review_model"] or "").strip()
         if "auto_review" in data:

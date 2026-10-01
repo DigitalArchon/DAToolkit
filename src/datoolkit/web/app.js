@@ -287,6 +287,8 @@ function renderTop() {
   const banner = $("#keyring-banner");
   banner.textContent = st.keyring_error ? `⚠ ${st.keyring_error} API keys and passwords cannot be stored.` : "";
   banner.classList.toggle("hidden", !st.keyring_error);
+  $("#notice-banner").textContent = st.ui_notice ? `ⓘ ${st.ui_notice}` : "";
+  $("#notice-banner").classList.toggle("hidden", !st.ui_notice);
 }
 
 // Attestation state of a model, as short text and a CSS class (chat model and vision helper).
@@ -2467,6 +2469,7 @@ function openSettings(tab = "providers") {
       search_provider: sel(s.search_provider || "kagi", ["kagi", "perplexity", "linkup", "tavily", "exa", "brave", "valyu"].map((x) => [x, x])),
       search_via: sel(s.search_via || "", [["", nanos.length ? `First NanoGPT provider (${nanos[0].name})` : "No NanoGPT provider configured"], ...nanos.map((p) => [p.name, p.name])]),
     };
+    const uiMode = sel(s.ui_mode || "window", [["window", "The app window (needs WebKitGTK)"], ["browser", "My default web browser"]]);
     const testQ = h("input", { type: "text", placeholder: "Test query, e.g. OPNsense 25.1 release notes" });
     const testOut = h("div", { class: "muted small" });
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
@@ -2480,6 +2483,9 @@ function openSettings(tab = "providers") {
         h("label", { class: "field" }, h("span", {}, "Warn when prompt tokens exceed"), f.context_warn_tokens),
         h("label", { class: "field" }, h("span", {}, "Phone companion port (HTTPS)"), f.companion_port)),
       h("div", { class: "muted small" }, "The phone companion always uses this port, so a firewall only needs this one open (e.g. sudo ufw allow <port>/tcp). Changing it while the companion runs restarts it, and phones pair again."),
+      h("div", { class: "row" },
+        h("label", { class: "field" }, h("span", {}, "Open DAToolkit in"), uiMode), h("span", { class: "field" })),
+      h("div", { class: "muted small" }, "Takes effect the next time DAToolkit starts. Without WebKitGTK it uses the browser anyway and says what to install. From a terminal, --browser or --window overrides this for one run."),
       h("h3", {}, "Web search"),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "AI web searches"), search.search_mode),
@@ -2500,7 +2506,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, `Case logs are stored under ${S.state.case ? S.state.case.dir.replace(/\/[^/]+$/, "") : "~/.local/share/datoolkit/cases"}.`),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
         await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])),
-          ...Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])) });
+          ...Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])), ui_mode: uiMode.value });
         toast("Settings saved.", "ok");
       }) }, "Save")));
   }
@@ -2721,6 +2727,13 @@ function init() {
   }));
   $("#settings-btn").addEventListener("click", () => openSettings());
   $("#phone-btn").addEventListener("click", () => guarded(openPhone));
+  // the app window quits when it is closed; a browser tab doesn't, so the browser gets a Quit button
+  $("#quit-btn").classList.toggle("hidden", DESKTOP);
+  $("#quit-btn").addEventListener("click", () => guarded(async () => {
+    if (!(await confirmModal("Quit DAToolkit", "Quit DAToolkit? Open sessions are closed and the phone companion stops.", "Quit", "danger"))) return;
+    await api("POST", "/api/quit");
+    document.body.replaceChildren(h("div", { class: "quit-note" }, h("h2", {}, "DAToolkit has quit."), h("p", {}, "You can close this tab.")));
+  }));
   api("GET", "/api/phone").then((i) => { S.phoneRunning = i.running; S.phones = i.phones; renderPhoneBtn(); }).catch(() => {});
   $("#vision-btn").addEventListener("click", () => openSettings("model"));
   $("#export-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#export-menu")); });

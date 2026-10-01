@@ -7,6 +7,7 @@
      must not be able to make the AI's markdown fetch a URL that carries data out. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'">
 <title>DAToolkit</title>
+<link rel="icon" href="/static/icon.svg">
 <link rel="stylesheet" href="/static/vendor/xterm.css">
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -38,9 +39,11 @@
     </div>
   </div>
   <button id="settings-btn" class="ghost">Settings</button>
+  <button id="quit-btn" class="ghost hidden" title="Quit DAToolkit: in the browser, closing the tab leaves it running">Quit</button>
 </header>
 
 <div id="keyring-banner" class="banner hidden"></div>
+<div id="notice-banner" class="banner hidden"></div>
 
 <main id="workspace">
   <section id="chat-pane">

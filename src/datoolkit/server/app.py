@@ -18,22 +18,25 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import config
 from ..companion import CompanionServer
+from ..hostenv import host_env
 from ..engine import Engine, UserError
 from ..sessions import guac
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
-COMPANION_FILES = {"style.css", "companion.js"}
+COMPANION_FILES = {"style.css", "companion.js", "icon.svg"}
 
 
 def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
-               desktop=None, companion_dir: Path | None = None) -> FastAPI:
+               desktop=None, companion_dir: Path | None = None,
+               on_quit: Callable[[], None] | None = None) -> FastAPI:
     """The GUI's app, for 127.0.0.1 only. It also builds the phone companion's app, which
     app.state.companion (companion.CompanionServer) serves on its own port over TLS when the
     technician starts it: that one can see chat, queue and hypotheses, mark items
     done/skipped and send a photo with a description, and nothing else. It never reaches a
     terminal.
     `desktop` (app.Desktop, only in the app window) serves the clipboard and the Save dialog.
-    `companion_dir` holds the companion's certificate (default: the config directory)."""
+    `companion_dir` holds the companion's certificate (default: the config directory).
+    `on_quit` ends the process (POST /api/quit): in the browser, closing the tab doesn't."""
     listeners: set[asyncio.Queue] = set()
 
     def emit(event: dict) -> None:
@@ -215,6 +218,13 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         @app.post("/api/desktop/save")
         async def desktop_save(name: str, request: Request, e: Engine = Depends(auth)):
             return {"path": await asyncio.to_thread(desktop.save_file, name, await request.body())}
+
+    if on_quit is not None:
+        @app.post("/api/quit")
+        async def quit_app(e: Engine = Depends(auth)):
+            e.log("quit")
+            asyncio.get_running_loop().call_later(0.3, on_quit)  # let this reply reach the page first
+            return {"ok": True}
 
     @app.get("/api/state")
     async def state(e: Engine = Depends(auth)):
@@ -490,7 +500,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.post("/api/open-folder")
     async def open_folder(e: Engine = Depends(auth)):
         if e.case:
-            await asyncio.create_subprocess_exec("xdg-open", str(e.case.dir))
+            await asyncio.create_subprocess_exec("xdg-open", str(e.case.dir), env=host_env())
         return {"ok": True}
 
     # ------------------------------------------------------------ WebSockets
