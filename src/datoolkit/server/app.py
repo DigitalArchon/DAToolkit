@@ -29,8 +29,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                desktop=None, companion_dir: Path | None = None) -> FastAPI:
     """The GUI's app, for 127.0.0.1 only. It also builds the phone companion's app, which
     app.state.companion (companion.CompanionServer) serves on its own port over TLS when the
-    technician starts it: that one can see chat, queue and hypotheses and mark items
-    done/skipped, and nothing else. It never reaches a terminal.
+    technician starts it: that one can see chat, queue and hypotheses, mark items
+    done/skipped and send a photo with a description, and nothing else. It never reaches a
+    terminal.
     `desktop` (app.Desktop, only in the app window) serves the clipboard and the Save dialog.
     `companion_dir` holds the companion's certificate (default: the config directory)."""
     listeners: set[asyncio.Queue] = set()
@@ -69,7 +70,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     def companion_view(e: Engine) -> dict:
         snap = e.snapshot()
+        vision = e.vision_status()
         return {"case": snap["case"], "chat": snap["chat"][-30:], "queue": snap["queue"], "busy": snap["busy"],
+                "photos": {"ok": vision["mode"] != "none", "why": vision.get("why", "")},
                 "hypotheses": snap["hypotheses"], "sessions": [{k: s[k] for k in ("id", "kind", "target", "exited")}
                                                                for s in snap["sessions"]]}
 
@@ -118,6 +121,17 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         if status not in ("ran", "skipped", "pending"):
             raise HTTPException(400, "companion can only mark items ran, skipped or pending")
         e.update_item(num, status=status, note=str(body.get("note", ""))[:200])
+        return {"ok": True}
+
+    @comp.post("/api/companion/photo")
+    async def companion_photo(body: dict, e: Engine = Depends(auth_companion)):
+        """A photo with the technician's description, sent to the AI like one attached on the
+        desktop (same case gates, cleaned by the server). Only a photo: the phone sends no
+        results, snippets or bare text."""
+        image = body.get("image")
+        if not isinstance(image, str) or not image:
+            raise HTTPException(400, "a photo is required")
+        e.send(str(body.get("message", ""))[:4000], images=[image], via="phone")
         return {"ok": True}
 
     @comp.post("/api/companion/hypotheses/{hid}")

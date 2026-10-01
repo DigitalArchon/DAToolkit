@@ -408,7 +408,7 @@ function renderEntry(e, live = false) {
     return h("div", { class: "msg note" }, e.text, e.retry && last && S.state.can_retry && !S.state.busy ? h("span", {}, " ", retryButton()) : null);
   }
   if (e.kind === "user") {
-    const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You"));
+    const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You", e.via === "phone" ? " · 📱 from your phone" : ""));
     if (e.text) box.append(h("div", { class: "body", html: md(e.text) }));
     for (const r of e.results || []) {
       const label = `#${r.num} ${r.status.toUpperCase()} · ${r.session_id} · ${r.command}`;
@@ -2541,7 +2541,7 @@ async function openPhone() {
     S.phoneRunning = info.running; S.phones = info.phones; renderPhoneBtn();
     if (!info.running) {
       body.replaceChildren(h("div", { class: "phone" },
-        h("p", {}, "Follow the case on your phone: the AI's last message, the hypotheses and the queue, with \"I ran it\" and \"Skip\" for commands you type at a console away from this machine. The phone can't reach a terminal, change settings or send anything to the AI."),
+        h("p", {}, "Follow the case on your phone: the AI's last message, the hypotheses and the queue, with \"I ran it\" and \"Skip\" for commands you type at a console away from this machine. It can also send the AI a photo (of a screen, say) with your description. The phone can't reach a terminal, run anything or change settings."),
         h("p", {}, `It is served over HTTPS on port ${info.port} of this machine (change it in Settings → General). With a firewall on, open that port once, e.g. `, h("code", {}, `sudo ufw allow ${info.port}/tcp`), "."),
         info.fingerprint ? h("div", {}, h("div", { class: "small muted" }, `This install's certificate (SHA-256, expires ${info.expires}):`), fp()) : null,
         h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => act("start") }, "Start"))));

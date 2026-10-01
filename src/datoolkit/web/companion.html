@@ -18,12 +18,37 @@
   .comp .bar > div { height: 100%; background: var(--accent); }
   .comp .ai { white-space: pre-wrap; }
   .comp .row { display: flex; align-items: center; gap: 8px; }
+  .comp .speak { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 15px; }
+  .comp .speak input { width: 20px; height: 20px; }
+  #photo-edit { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  #photo-canvas { width: 100%; height: auto; touch-action: none; border-radius: 6px; background: #000; }
+  #photo-text { width: 100%; font-size: 16px; box-sizing: border-box; }
 </style>
 </head>
 <body class="comp">
-<h1>DAToolkit <span id="case" class="muted small"></span> <span class="spacer"></span>
-  <label class="small muted"><input type="checkbox" id="speak"> read aloud</label></h1>
-<div id="ai" class="card"><div class="muted small">Last AI message</div><div class="ai" id="ai-text">—</div></div>
+<h1>DAToolkit <span id="case" class="muted small"></span></h1>
+<div id="ai" class="card">
+  <div class="row"><span class="muted small">Last AI message</span><span class="spacer"></span>
+    <button id="read-now" class="small" type="button" title="Read this message aloud">▶ Read</button></div>
+  <div class="ai" id="ai-text">—</div>
+  <label class="speak"><input type="checkbox" id="speak"> 🔊 Read new AI messages aloud as they arrive</label>
+  <div class="muted small">Starts with the next message; ▶ Read reads the one above.</div>
+</div>
+<div id="photo" class="card">
+  <div class="big"><button id="photo-take" class="primary" type="button">📷 Photo to AI</button>
+    <button id="photo-pick" type="button">Choose a photo</button></div>
+  <div id="photo-why" class="muted small hidden"></div>
+  <input type="file" id="photo-cam" accept="image/*" capture="environment" class="hidden">
+  <input type="file" id="photo-file" accept="image/*" class="hidden">
+  <div id="photo-edit" class="hidden">
+    <div class="muted small">Drag over anything that shouldn't reach the AI (names, addresses, keys) to black it out.</div>
+    <canvas id="photo-canvas"></canvas>
+    <div class="row"><span id="photo-count" class="muted small"></span><span class="spacer"></span>
+      <button id="photo-undo" class="small" type="button">Undo</button><button id="photo-clear" class="small" type="button">Clear</button></div>
+    <textarea id="photo-text" rows="3" placeholder="What is this? e.g. output of 'show interfaces' on the core switch console"></textarea>
+    <div class="big"><button id="photo-cancel" type="button">Cancel</button><button id="photo-send" class="primary" type="button">Send to AI</button></div>
+  </div>
+</div>
 <div id="hyps" class="card hidden"><div class="muted small">Hypotheses</div><div id="hyp-list"></div></div>
 <div id="queue"></div>
 <div id="toasts"></div>

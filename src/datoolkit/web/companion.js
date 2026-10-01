@@ -1,5 +1,6 @@
 "use strict";
-/* Phone companion: read the chat and queue, mark items done or skipped. No terminal access. */
+/* Phone companion: read the chat and queue, mark items done or skipped, send a photo with a
+   description to the AI. No terminal access. */
 // The pairing code puts the token in the fragment (never sent in a request line); keep it for
 // reloads in this tab only, and take it out of the address bar and history.
 const TOKEN = (() => {
@@ -11,7 +12,7 @@ const TOKEN = (() => {
   } catch { return fromHash; }
 })();
 const $ = (s) => document.querySelector(s);
-let lastSpoken = "";
+let lastSpoken = "", lastText = "", photosAllowed = false;
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -28,18 +29,46 @@ async function api(method, path, body) {
   if (!r.ok) throw new Error(d.error || d.detail || r.statusText);
   return d;
 }
-function toast(t) { const el = h("div", { class: "toast error" }, t); $("#toasts").append(el); setTimeout(() => el.remove(), 5000); }
+function toast(t, kind = "error") { const el = h("div", { class: `toast ${kind}` }, t); $("#toasts").append(el); setTimeout(() => el.remove(), 5000); }
+
+// ---- read aloud: only messages that arrive after it is switched on, plus ▶ Read on demand
+const canSpeak = "speechSynthesis" in window;
+function speak(text) {
+  if (!canSpeak || !text) return;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(new SpeechSynthesisUtterance(text.replace(/[`*#_]/g, "").slice(0, 1200)));
+}
+if (!canSpeak) {
+  $("#read-now").classList.add("hidden");
+  $("#speak").disabled = true;
+  $(".speak").after(h("div", { class: "muted small" }, "This browser can't read aloud."));
+}
+$("#speak").addEventListener("change", (e) => {
+  if (e.target.checked) {
+    lastSpoken = lastText;  // what's already on screen isn't read; ▶ Read does that
+    // spoken from the tap itself: iOS only lets a page speak after a user gesture has
+    speak("Read aloud is on. New messages from the AI will be read out.");
+  } else if (canSpeak) speechSynthesis.cancel();
+});
+$("#read-now").addEventListener("click", () => { lastSpoken = lastText; speak(lastText); });
 
 function render(st) {
   $("#case").textContent = st.case ? `${st.case.name} · ${st.case.sensitivity}` : "no case";
   const last = [...st.chat].reverse().find((e) => e.kind === "assistant");
   const text = last ? last.text : (st.busy ? "Thinking…" : "—");
   $("#ai-text").textContent = text;
-  if ($("#speak").checked && last && last.text && last.text !== lastSpoken && "speechSynthesis" in window) {
-    lastSpoken = last.text;
-    speechSynthesis.cancel();
-    speechSynthesis.speak(new SpeechSynthesisUtterance(last.text.replace(/[`*#_]/g, "").slice(0, 1200)));
+  lastText = last?.text || "";
+  $("#read-now").disabled = !lastText;
+  if ($("#speak").checked && lastText && lastText !== lastSpoken) {
+    lastSpoken = lastText;
+    speak(lastText);
   }
+  const why = !st.case ? "Start a case on the computer first." : !st.photos?.ok ? st.photos?.why || "The chat model can't use images."
+    : st.busy ? "The AI is responding: send when it has finished." : "";
+  photosAllowed = !why;
+  for (const id of ["#photo-take", "#photo-pick", "#photo-send"]) $(id).disabled = !photosAllowed;
+  $("#photo-why").textContent = why;
+  $("#photo-why").classList.toggle("hidden", !why);
   const hyps = st.hypotheses || [];
   $("#hyps").classList.toggle("hidden", !hyps.length);
   $("#hyp-list").replaceChildren(...hyps.map((x) => h("div", { class: "hyp" },
@@ -79,3 +108,100 @@ async function reconnect() {
 }
 if (!TOKEN) toast("No pairing token. Scan the connect code on the DAToolkit screen.");
 else { api("GET", "/api/companion/state").then(render).catch((e) => toast(e.message)); connect(); }
+
+// ---- photo to AI: take or choose, black out, describe, send
+const PHOTO_MAX = 2048;
+const photo = { img: null, rects: [], drag: null };
+const canvas = $("#photo-canvas"), ctx = canvas.getContext("2d");
+$("#photo-take").addEventListener("click", () => $("#photo-cam").click());
+$("#photo-pick").addEventListener("click", () => $("#photo-file").click());
+for (const id of ["#photo-cam", "#photo-file"]) $(id).addEventListener("change", (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) loadPhoto(f); });
+
+function loadPhoto(file) {
+  const fr = new FileReader();
+  fr.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      // fit within PHOTO_MAX on the long side, drawn once into the canvas that is edited and sent
+      const scale = Math.min(1, PHOTO_MAX / Math.max(img.naturalWidth, img.naturalHeight));
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      const base = document.createElement("canvas");
+      base.width = canvas.width; base.height = canvas.height;
+      const bx = base.getContext("2d"); bx.imageSmoothingQuality = "high";
+      bx.drawImage(img, 0, 0, base.width, base.height);
+      Object.assign(photo, { img: base, rects: [], drag: null });
+      draw();
+      $("#photo-edit").classList.remove("hidden");
+      $("#photo-edit").scrollIntoView({ behavior: "smooth" });
+    };
+    img.onerror = () => toast("That file couldn't be read as an image.");
+    img.src = fr.result;
+  };
+  fr.readAsDataURL(file);
+}
+function draw() {
+  if (!photo.img) return;
+  ctx.drawImage(photo.img, 0, 0);
+  ctx.fillStyle = "#000";  // opaque black painted into the one bitmap that is sent: no layers
+  for (const b of photo.rects) ctx.fillRect(b.x, b.y, b.w, b.h);
+  const d = photo.drag;
+  if (d) {
+    ctx.fillRect(d.x, d.y, d.w, d.h);
+    ctx.strokeStyle = "#e5534b"; ctx.lineWidth = Math.max(3, canvas.width / 300);
+    ctx.strokeRect(d.x, d.y, d.w, d.h);
+  }
+  $("#photo-count").textContent = photo.rects.length ? `${photo.rects.length} area(s) blacked out` : "Nothing blacked out";
+}
+function pt(e) {
+  const b = canvas.getBoundingClientRect();
+  return { x: Math.max(0, Math.min(canvas.width, (e.clientX - b.left) * canvas.width / b.width)),
+    y: Math.max(0, Math.min(canvas.height, (e.clientY - b.top) * canvas.height / b.height)) };
+}
+canvas.addEventListener("pointerdown", (e) => {
+  if (!photo.img) return;
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  const p = pt(e);
+  photo.drag = { x0: p.x, y0: p.y, x: p.x, y: p.y, w: 0, h: 0 };
+});
+canvas.addEventListener("pointermove", (e) => {
+  const d = photo.drag;
+  if (!d) return;
+  const p = pt(e);
+  Object.assign(d, { x: Math.min(d.x0, p.x), y: Math.min(d.y0, p.y), w: Math.abs(p.x - d.x0), h: Math.abs(p.y - d.y0) });
+  draw();
+});
+function endDrag() {
+  const d = photo.drag;
+  // whole pixels, rounded outwards: a fractional edge would be blended and keep a trace
+  if (d && d.w > 4 && d.h > 4) {
+    const x = Math.floor(d.x), y = Math.floor(d.y);
+    photo.rects.push({ x, y, w: Math.min(canvas.width, Math.ceil(d.x + d.w)) - x, h: Math.min(canvas.height, Math.ceil(d.y + d.h)) - y });
+  }
+  photo.drag = null;
+  draw();
+}
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+$("#photo-undo").addEventListener("click", () => { photo.rects.pop(); draw(); });
+$("#photo-clear").addEventListener("click", () => { photo.rects = []; draw(); });
+function closePhoto() {
+  Object.assign(photo, { img: null, rects: [], drag: null });
+  $("#photo-text").value = "";
+  $("#photo-edit").classList.add("hidden");
+}
+$("#photo-cancel").addEventListener("click", closePhoto);
+$("#photo-send").addEventListener("click", async () => {
+  if (!photo.img || !photosAllowed) return;
+  const btn = $("#photo-send");
+  btn.disabled = true; btn.textContent = "Sending…";
+  try {
+    photo.drag = null; draw();
+    // (the server also re-encodes it from its pixels, dropping any metadata)
+    await api("POST", "/api/companion/photo", { message: $("#photo-text").value.trim(), image: canvas.toDataURL("image/jpeg", 0.9) });
+    closePhoto();
+    toast("Sent to the AI.", "ok");
+  } catch (e) { toast(e.message); }
+  finally { btn.textContent = "Send to AI"; btn.disabled = !photosAllowed; }
+});

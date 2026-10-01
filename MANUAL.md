@@ -214,10 +214,20 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
 
 ### Companion view
 
-**📱** in the top bar serves a phone-sized, read-mostly page on the LAN: the AI's last message
-(optionally read aloud), the hypothesis board and the queue, with "I ran it" and "Skip". Use it
-when you are typing commands at a console away from the laptop (a server room, a switch's
-serial port) and want the next step in your hand.
+**📱** in the top bar serves a phone-sized, read-mostly page on the LAN: the AI's last message,
+the hypothesis board and the queue, with "I ran it" and "Skip", and a camera button to send
+the AI a photo. Use it when you are typing commands at a console away from the laptop (a
+server room, a switch's serial port) and want the next step in your hand.
+
+- **Read aloud.** "Read new AI messages aloud as they arrive" starts with the *next*
+  message; what's already on screen isn't read. **▶ Read** reads the current message on demand.
+  Switching it on says a short confirmation, which is also what lets an iPhone speak later.
+- **Photo to AI.** Take a photo (or choose one), usually of the screen you are working at,
+  drag over anything sensitive to black it out, type what it is, and **Send to AI**. It goes
+  into the case like a photo attached on the computer: the same case-sensitivity and vision
+  rules, cleaned of all metadata by the server, shown in the chat as "from your phone". The
+  AI is told it came from your phone. It's disabled, with the reason, while there is no case,
+  while the model can't use images, and while the AI is responding.
 
 **Port and firewall.** The companion always listens on the same port, 48443 unless you change
 it in **Settings → General**, so with a firewall on you only open that one
@@ -254,9 +264,10 @@ phone checks again); a new one is also made when it expires, after about two yea
   request, and the page removes it from the address bar and history.
 - The companion's port serves only the phone's page and its API: the case name, the last 30
   chat messages, the queue, the hypothesis board and the list of open sessions. It can mark
-  queue items ran, skipped or pending (with a note) and mark hypotheses. It cannot reach a
-  terminal, open or close sessions, see settings, prompts or credential dialogs, or send
-  anything to the AI.
+  queue items ran, skipped or pending (with a note), mark hypotheses, and send a photo with a
+  description to the AI. It cannot reach a terminal or run anything, open or close sessions,
+  see settings, prompts or credential dialogs, or send results or plain messages. Whatever
+  the AI proposes in reply still needs your click on the computer.
 - The chat does go to the phone, so think twice before pairing on a Confidential case.
 
 ### Tool cache

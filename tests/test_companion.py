@@ -1,7 +1,10 @@
 """The phone companion's TLS listener, certificate and pairing (companion.py)."""
 
+import base64
+import json
 import os
 import socket
+from io import BytesIO
 
 import httpx
 import pytest
@@ -11,7 +14,7 @@ from datoolkit import companion
 from datoolkit.engine import UserError
 from datoolkit.server.app import create_app
 
-from test_engine import env  # noqa: F401
+from test_engine import env, sse, wait_turn  # noqa: F401
 
 
 def _free_port() -> int:
@@ -100,3 +103,37 @@ async def test_port_setting_is_validated(env):  # noqa: F811
             engine.save_settings({"companion_port": bad})
     engine.save_settings({"companion_port": 50443})
     assert engine.cfg.settings.companion_port == 50443
+
+
+async def test_phone_sends_a_photo_with_its_description(env, tmp_path):  # noqa: F811
+    from PIL import Image
+
+    engine, fake, _ = env
+    engine.new_case("photo", "open")
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    app.state.companion.token = "phone"
+    buf = BytesIO()
+    Image.new("RGB", (40, 30), "white").save(buf, "JPEG")
+    photo = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    ph = {"x-token": "phone"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:
+        view = (await c.get("/api/companion/state", headers=ph)).json()
+        assert view["photos"] == {"ok": False, "why": "Choose a model first."}
+        r = await c.post("/api/companion/photo", json={"message": "x", "image": photo}, headers=ph)
+        assert r.status_code == 400                                    # the same gates as the desktop
+        engine.select_model("Fake", "anthropic/claude-opus-5.5")
+        assert (await c.get("/api/companion/state", headers=ph)).json()["photos"]["ok"]
+        assert (await c.post("/api/companion/photo", json={"image": photo}, headers={"x-token": "main"})).status_code == 403
+        assert (await c.post("/api/companion/photo", json={"message": "just text"}, headers=ph)).status_code == 400
+        fake.responses.append(sse(({"role": "assistant", "content": "That port is err-disabled."}, "stop")))
+        r = await c.post("/api/companion/photo", json={"message": "show interfaces on the core switch", "image": photo}, headers=ph)
+        assert r.status_code == 200
+        await wait_turn(engine)
+    sent = fake.requests[0]["messages"][-1]["content"]
+    assert "from the technician's phone" in sent[0]["text"] and "show interfaces on the core switch" in sent[0]["text"]
+    assert sent[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    entry = engine.chat[0]
+    assert entry["via"] == "phone" and entry["text"] == "show interfaces on the core switch" and entry["images"] == ["img-1.jpg"]
+    logged = [json.loads(x) for x in (engine.case.dir / "events.jsonl").read_text().splitlines()]
+    assert any(e.get("event") == "sent_to_ai" and e.get("via") == "phone" for e in logged)

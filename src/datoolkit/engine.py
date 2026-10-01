@@ -1578,7 +1578,8 @@ class Engine:
     # ---------------------------------------------------------------- chat
 
     def send(self, message: str = "", results: list[dict] | None = None,
-             snippets: list[dict] | None = None, images: list[str] | None = None) -> None:
+             snippets: list[dict] | None = None, images: list[str] | None = None, via: str = "") -> None:
+        """`via` is "phone" for a photo sent from the companion: the AI is told, and the chat shows it."""
         results, snippets, images = results or [], snippets or [], images or []
         if self.busy:
             raise UserError("The AI is still responding.")
@@ -1594,6 +1595,9 @@ class Engine:
             self._find_similar(message)
 
         parts, shown = [], []
+        if via == "phone":
+            parts.append("[Sent from the technician's phone: a photo they took, usually of a screen they are "
+                         "working at, with their description]")
         if message.strip():
             parts.append(message.strip())
         if results:
@@ -1640,10 +1644,10 @@ class Engine:
         self.chat.append({"kind": "user", "text": message.strip(), "results": shown,
                           "snippets": [{"session_id": s.get("session_id", ""), "text": s.get("text", "")}
                                        for s in snippets],
-                          "images": [name for name, _ in saved_images]})
+                          "images": [name for name, _ in saved_images], **({"via": via} if via else {})})
         for r in shown:
             self.queue.update(r["num"], status="sent")
-        self.log("sent_to_ai", provider=prov.name, model=model, tier=tier, content=content)
+        self.log("sent_to_ai", provider=prov.name, model=model, tier=tier, content=content, **({"via": via} if via else {}))
         self.emit("chat", entry=self.chat[-1])
         self._queue_changed()
         self._persist()
