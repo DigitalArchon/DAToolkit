@@ -191,11 +191,11 @@ def test_prompt_takes_a_partial_reply_without_asking_again():
     assert "Do not repeat a question word for word" in prompts.SYSTEM_PROMPT
 
 
-def test_send_routes_through_results_review_with_the_draft():
+def test_results_review_carries_the_draft_and_open_questions():
     js = (WEB / "app.js").read_text()
     send_chat = js.split("async function sendChat")[1].split("\n}\n")[0]
-    assert "readyItems().length" in send_chat and "openSendResults()" in send_chat
+    assert "openSendResults" not in send_chat          # Send just sends; Results (n) adds the results
     dialog = js.split("async function openSendResults")[1].split("\nasync function ")[0]
     assert 'value: $("#chat-input").value' in dialog and "pendingImages.slice()" in dialog
-    assert "openQuestions()" in dialog and "Send message only" in dialog
+    assert "openQuestions()" in dialog
     assert "composerSent(" in dialog and "if (sent) return;" in dialog

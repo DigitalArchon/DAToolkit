@@ -732,13 +732,11 @@ async function attachPhoto(file) {
   }
 }
 
-// With results ready, Send goes through the results review, carrying the message, so answers
-// and results reach the AI in one turn ("Send message only" there skips the results).
+// Send sends just the message; Results (n) beside it sends the message with the results.
 async function sendChat(ev) {
   ev?.preventDefault();
   const message = $("#chat-input").value.trim();
   if (!message && !pendingImages.length) return;
-  if (readyItems().length && !S.state.busy) return guarded(() => openSendResults());
   await guarded(async () => {
     await api("POST", "/api/send", { message, images: pendingImages.slice() });
     composerSent(message);
@@ -1965,11 +1963,6 @@ async function openSendResults() {
   const questions = openQuestions();
   setTimeout(renderVision, 0);
   let sent = false;
-  const send = async (results) => {
-    await api("POST", "/api/send", { message: message.value.trim(), results, images });
-    sent = true;
-    composerSent(message.value.trim());
-  };
   modal({
     title: "Review results before sending", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
@@ -1978,16 +1971,13 @@ async function openSendResults() {
       questions.length ? h("div", { class: "field" }, h("span", {}, "The AI asked"), questionBlock(questions, true, () => message)) : null,
       h("div", { class: "field" }, h("span", {}, questions.length ? "Message (your answers go here)" : "Message"), message)),
     buttons: [{ label: "Cancel" }, {
-      label: "Send message only", onClick: async () => {
-        if (!message.value.trim() && !images.length) throw new Error("The message is empty.");
-        await send([]);
-      },
-    }, {
       label: "Send to AI", kind: "primary", onClick: async () => {
         const results = blocks.filter((b) => b.include.checked)
           .map((b) => ({ num: b.item.num, text: b.ta ? b.ta.value : "", note: b.note.value.trim() }));
         if (!results.length && !message.value.trim()) throw new Error("Nothing selected.");
-        await send(results);
+        await api("POST", "/api/send", { message: message.value.trim(), results, images });
+        sent = true;
+        composerSent(message.value.trim());
       },
     }],
     onClose: () => {

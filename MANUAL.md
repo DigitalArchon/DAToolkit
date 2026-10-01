@@ -52,8 +52,8 @@ the system's own; in the browser they're the browser's.
 - The chat is a conversation: the AI says what it makes of each result, what it wants to check
   next and why, and asks you what no command can tell it (when it started, what changed).
   Its questions come with quick-reply buttons that fill your reply; press Enter to send.
-  If results are ready too, Enter opens the results review with your reply as its message,
-  so answers and results go in one turn (**Send message only** there sends just the reply).
+  If results are ready too, **Results (n)** beside Send opens the results review with your
+  reply as its message, so answers and results go in one turn.
   Each proposal also appears as a card in the AI's message, with Run / Skip… / Force skip,
   and hypothesis moves (▲ ▼ ✓ ✕) are shown inline.
 - The AI can change its mind: it withdraws pending commands it no longer wants (wrong syntax
