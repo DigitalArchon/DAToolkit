@@ -42,6 +42,11 @@ KEY_FILE = "companion-key.pem"
 # Apple's limit for server certificates; a new one is made when it runs out (the fingerprint changes)
 CERT_DAYS = 825
 RENEW_BEFORE = dt.timedelta(days=7)
+# a few phones use a handful of connections each; more is a flood, answered with 503 so it
+# can't grow without bound on the event loop the GUI shares
+MAX_CONNECTIONS = 64
+# the phone sends nothing over its WebSocket (it only listens)
+WS_MAX_SIZE = 64 * 1024
 
 
 def lan_ip() -> str:
@@ -148,7 +153,8 @@ class CompanionServer:
         sock.setblocking(False)
         self.token, self.port = secrets.token_urlsafe(24), port
         config = uvicorn.Config(self.app, log_level="warning", lifespan="off", ssl_certfile=str(cert),
-                                ssl_keyfile=str(key), timeout_graceful_shutdown=2)
+                                ssl_keyfile=str(key), timeout_graceful_shutdown=2,
+                                limit_concurrency=MAX_CONNECTIONS, ws_max_size=WS_MAX_SIZE)
         self._server = uvicorn.Server(config)
         self._task = asyncio.create_task(self._server.serve(sockets=[sock]))
         for _ in range(100):

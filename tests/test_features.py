@@ -400,11 +400,11 @@ async def test_companion_token_is_read_mostly(env, tmp_path):  # noqa: F811
         ph = {"x-token": "phone"}
         r = await c.get("/api/companion/state", headers=ph)
         assert r.status_code == 200 and r.json()["queue"][0]["command"] == "uptime" and "config" not in r.json()
-        # the phone's app has no GUI routes at all, whatever the token
-        for tok in ("phone", "main"):
-            assert (await c.get("/api/state", headers={"x-token": tok})).status_code == 404
-            assert (await c.post("/api/send", json={"message": "hi"}, headers={"x-token": tok})).status_code == 404
-            assert (await c.post("/api/sessions", json={"kind": "local"}, headers={"x-token": tok})).status_code == 404
+        # the phone's app has no GUI routes at all, whatever the token (the main one is refused before routing)
+        for tok, status in (("phone", 404), ("main", 403)):
+            assert (await c.get("/api/state", headers={"x-token": tok})).status_code == status
+            assert (await c.post("/api/send", json={"message": "hi"}, headers={"x-token": tok})).status_code == status
+            assert (await c.post("/api/sessions", json={"kind": "local"}, headers={"x-token": tok})).status_code == status
         assert (await c.get("/static/app.js")).status_code == 404       # only its own page's files
         assert (await c.get("/static/companion.js")).status_code == 200
         r = await c.post("/api/companion/queue/1", json={"status": "ran"}, headers=ph)

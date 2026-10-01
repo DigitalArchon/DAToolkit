@@ -15,6 +15,7 @@ from typing import Callable
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
 
 from .. import config
 from ..companion import CompanionServer
@@ -24,6 +25,43 @@ from ..sessions import guac
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 COMPANION_FILES = {"style.css", "companion.js", "icon.svg"}
+# a photo is at most 6 MB (8 MB as base64, see Engine._save_images) plus its description
+MAX_COMPANION_BODY = 10 * 1024 * 1024
+
+
+class CompanionGate:
+    """ASGI middleware in front of the companion's app. FastAPI reads and parses a JSON body
+    before it runs dependencies (where the token is checked), and nothing else limits its
+    size, so without this anyone on the LAN could make the app buffer and parse any amount
+    without the token, stalling the event loop the GUI and terminals share. An /api/ request
+    is refused here on its headers alone: no valid token, no stated length, or a body over
+    MAX_COMPANION_BODY. The connection is closed rather than read to the end."""
+
+    def __init__(self, app, companion: CompanionServer):
+        self.app = app
+        self.companion = companion
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/api/"):
+            refusal = self._refusal(Headers(scope=scope))
+            if refusal:
+                status, why = refusal
+                await JSONResponse({"detail": why}, status, headers={"connection": "close"})(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+    def _refusal(self, headers: Headers) -> tuple[int, str] | None:
+        if not self.companion.check(headers.get("x-token")):
+            return 403, "bad token"
+        if "transfer-encoding" in headers:   # chunked: no length to check before reading
+            return 411, "a Content-Length is required"
+        try:
+            length = int(headers.get("content-length") or 0)
+        except ValueError:
+            return 400, "bad Content-Length"
+        if length > MAX_COMPANION_BODY:
+            return 413, "request too large"
+        return None
 
 
 def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
@@ -56,6 +94,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     comp = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     companion = CompanionServer(comp, companion_dir or config.config_dir())
+    comp.add_middleware(CompanionGate, companion=companion)
     app.state.companion = companion
 
     def check(t: str | None) -> bool:

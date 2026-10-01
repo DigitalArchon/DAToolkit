@@ -69,7 +69,9 @@ async def test_pairing_over_tls(env, tmp_path, monkeypatch):  # noqa: F811
                 assert (await phone.get("/pair")).status_code == 200
                 r = await phone.get("/api/companion/state", headers={"x-token": token})
                 assert r.status_code == 200 and r.json()["case"]["name"] == "phone"
-                assert (await phone.get("/api/state", headers={"x-token": "main"})).status_code == 404
+                # the GUI's API isn't there, even with the phone's token; the main token means nothing
+                assert (await phone.get("/api/state", headers={"x-token": token})).status_code == 404
+                assert (await phone.get("/api/state", headers={"x-token": "main"})).status_code == 403
                 # a new code cuts off the old one
                 await gui.post("/api/phone/token", headers=main)
                 assert (await phone.get("/api/companion/state", headers={"x-token": token})).status_code == 403
@@ -137,3 +139,75 @@ async def test_phone_sends_a_photo_with_its_description(env, tmp_path):  # noqa:
     assert entry["via"] == "phone" and entry["text"] == "show interfaces on the core switch" and entry["images"] == ["img-1.jpg"]
     logged = [json.loads(x) for x in (engine.case.dir / "events.jsonl").read_text().splitlines()]
     assert any(e.get("event") == "sent_to_ai" and e.get("via") == "phone" for e in logged)
+
+
+async def _gate_call(token, headers):
+    """Run CompanionGate on one POST; returns (status, response headers, app reached, body read)."""
+    from datoolkit.server.app import CompanionGate
+
+    seen = {"app": False, "read": False, "start": None}
+
+    async def inner(scope, receive, send):
+        seen["app"] = True
+
+    async def receive():
+        seen["read"] = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            seen["start"] = msg
+
+    srv = companion.CompanionServer(FastAPI(), None)
+    srv.token = token
+    scope = {"type": "http", "method": "POST", "path": "/api/companion/photo", "query_string": b"",
+             "headers": [(k.encode(), v.encode()) for k, v in headers.items()]}
+    await CompanionGate(inner, srv)(scope, receive, send)
+    start = seen["start"]
+    return (start["status"] if start else None, dict(start["headers"]) if start else {}, seen["app"], seen["read"])
+
+
+async def test_gate_refuses_on_headers_before_any_body_is_read():
+    from datoolkit.server.app import MAX_COMPANION_BODY
+
+    big = str(MAX_COMPANION_BODY + 1)
+    for headers, status in (({"content-length": big}, 403),                                  # no token
+                            ({"x-token": "wrong", "content-length": "10"}, 403),
+                            ({"x-token": "phone", "content-length": big}, 413),
+                            ({"x-token": "phone", "transfer-encoding": "chunked"}, 411),
+                            ({"x-token": "phone", "content-length": "lots"}, 400)):
+        got, resp_headers, reached, read = await _gate_call("phone", headers)
+        assert (got, reached, read) == (status, False, False), headers
+        assert resp_headers[b"connection"] == b"close"                 # not kept open for the rest
+    assert MAX_COMPANION_BODY > 8 * 1024 * 1024 + 4000                 # a 6 MB photo as base64 still fits
+    assert (await _gate_call("phone", {"x-token": "phone", "content-length": "100"}))[2]
+    assert (await _gate_call(None, {"x-token": "", "content-length": "1"}))[0] == 403    # stopped: no token at all
+
+
+async def test_unauthenticated_upload_is_cut_off_over_tls(env, tmp_path, monkeypatch):  # noqa: F811
+    """Someone on the LAN without the token announcing a huge body gets 403 at once and the
+    connection closes; the server never buffers it."""
+    import asyncio
+
+    engine, _, _ = env
+    monkeypatch.setattr(companion, "lan_ip", lambda: "127.0.0.1")
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    engine.cfg.settings.companion_port = port = _free_port()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as gui:
+        await gui.post("/api/phone/start", headers={"x-token": "main"})
+    try:
+        ctx = companion.client_context(tmp_path / companion.CERT_FILE)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=ctx)
+        writer.write(b"POST /api/companion/photo HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: 2000000000\r\n\r\n" + b"[" * 65536)
+        await writer.drain()
+        reply = await asyncio.wait_for(reader.read(), 5)               # read() to EOF: the server hangs up
+        assert reply.startswith(b"HTTP/1.1 403")
+        writer.close()
+        # and the real phone path still works
+        async with httpx.AsyncClient(verify=ctx, base_url=f"https://127.0.0.1:{port}") as phone:
+            r = await phone.get("/api/companion/state", headers={"x-token": app.state.companion.token})
+            assert r.status_code == 200
+    finally:
+        await app.state.companion.stop()
