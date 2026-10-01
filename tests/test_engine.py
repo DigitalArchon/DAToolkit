@@ -236,3 +236,21 @@ async def test_missing_session_id_defaults_to_only_open_session(env):
     await wait_turn(engine)
     assert engine.queue.items[-1].session_id == "nope"
     assert "do not exist" in engine.conv[-1]["content"]
+
+
+async def test_ai_is_told_when_hidden_characters_were_taken_out(env):
+    engine, fake, _ = env
+    engine.new_case("smuggle", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    engine.open_session("local")
+    sid = engine.sessions.roster()[0]["id"]
+    fake.responses.append(tool_call_stream({"items": [
+        {"session_id": sid, "command": "df -h", "purpose": "disk", "risk": "read_only"},
+        {"session_id": sid, "command": "uptime​\x1b[201~", "purpose": "load", "risk": "read_only"},
+    ]}))
+    engine.send("slow server")
+    await wait_turn(engine)
+    reply = next(m["content"] for m in reversed(engine.conv) if m["role"] == "tool")
+    assert "Invisible or control characters were taken out of #2 " in reply and "#1" not in reply.split("taken out of")[1]
+    assert engine.queue.get(2).command == "uptime[201~" and engine.queue.get(2).hidden
+    assert engine.snapshot()["queue"][1]["hidden"]                  # the page shows the warning

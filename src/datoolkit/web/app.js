@@ -569,6 +569,7 @@ function fillProposalCard(el) {
     h("div", { class: "pcmd" }, item.command),
     item.purpose ? h("div", { class: "muted small" }, item.purpose) : null,
     item.cuts_session ? h("div", { class: "cuts small" }, `⚠ Cuts this session: ${item.cuts_session}`) : null,
+    item.hidden?.length ? h("div", { class: "invis small" }, invisText(item)) : null,
     item.sensitive?.length ? h("div", { class: "sens small" }, `🔍 May expose sensitive data: ${item.sensitive.join("; ")}`) : null,
     reviewLine(item),
     item.note ? h("div", { class: "small warn" }, `Note: ${item.note}`) : null,
@@ -1374,6 +1375,12 @@ function showReview(item) {
     h("div", { class: "pre" }, r.text)), buttons: [{ label: "Close" }] });
 }
 
+// The server took characters out of the command that the queue can't show faithfully (control
+// codes, bidi overrides, zero-width or tag characters): what is shown is what will be typed.
+function invisText(item) {
+  return `⚠ Hidden characters were taken out of this command, so what you see is what runs (${item.hidden.join("; ")}). From the AI, that is a sign of prompt injection: check it.`;
+}
+
 function sensitiveTitle(item) {
   return `May expose sensitive data:\n${item.sensitive.map((x) => `• ${x}`).join("\n")}\n\nNot run by Ctrl+Shift+Enter. Output is redacted before sending, but only on a best-effort basis: check it.`;
 }
@@ -1387,7 +1394,7 @@ function buildRow(item) {
     h("div", { class: "num" }, `#${item.num}`),
     sel,
     h("div", {}, cmd, h("div", { class: "purpose" }), h("div", { class: "rollback" }), h("div", { class: "cuts" }),
-      h("div", { class: "sens" }), h("div", { class: "qreview-slot" }), h("div", { class: "note" })),
+      h("div", { class: "invis" }), h("div", { class: "sens" }), h("div", { class: "qreview-slot" }), h("div", { class: "note" })),
     h("div", { class: "meta" }, h("span", { class: "badge risk" }), h("span", { class: "badge sensitive" }), h("span", { class: "group" }), h("span", { class: "status" })),
     h("div", { class: "actions" }));
   return row;
@@ -1428,6 +1435,7 @@ function updateRow(row, item) {
   $(".rollback", row).textContent = item.rollback ? `Rollback: ${item.rollback}` : (item.risk !== "read_only" && !item.dry_run_of ? "No rollback given" : "");
   $(".rollback", row).classList.toggle("missing", !item.rollback && item.risk !== "read_only" && !item.dry_run_of);
   $(".cuts", row).textContent = item.cuts_session ? `⚠ Cuts this session: ${item.cuts_session}` : "";
+  $(".invis", row).textContent = item.hidden?.length ? invisText(item) : "";
   const sensList = item.sensitive || [];
   $(".sens", row).textContent = sensList.length ? `🔍 May expose sensitive data: ${sensList.join("; ")}` : "";
   const sb = $(".badge.sensitive", row);

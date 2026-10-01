@@ -276,6 +276,7 @@ details.resume summary { cursor: pointer; color: var(--muted); font-size: 13px; 
 .qitem .rollback { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .qitem .rollback.missing { color: var(--warn); }
 .qitem .cuts { font-size: 12px; color: var(--danger); font-weight: 600; margin-top: 2px; }
+.qitem .invis { font-size: 12px; color: var(--danger); margin-top: 2px; }
 .qitem .sens, .pcard .sens { font-size: 12px; color: var(--sens); margin-top: 2px; }
 .qitem .sens:empty { display: none; }
 .badge.sensitive { color: var(--sens); border-color: var(--sens); }
@@ -324,6 +325,7 @@ p.small.warn { color: var(--warn); }
 .pcard .phead { display: flex; gap: 6px; align-items: center; }
 .pcard .pcmd { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow: auto; }
 .pcard .cuts { color: var(--danger); font-weight: 600; }
+.pcard .invis { color: var(--danger); }
 .pcard .warn { color: var(--warn); }
 .pcard .status { font-size: 11.5px; color: var(--muted); }
 .pcard .status.ran, .pcard .status.inserted { color: var(--ok); }

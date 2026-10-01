@@ -1956,6 +1956,11 @@ class Engine:
                         reply += (" Flagged as possibly exposing sensitive data: " + "; ".join(f"#{p.num} {', '.join(p.sensitive)}" for p in sens)
                                   + ". Where you can, prefer commands that show only what the diagnosis needs (names, "
                                   "presence or permissions rather than values), and never put a password in a command.")
+                    hid = [p for p in added if p.hidden]
+                    if hid:
+                        reply += (" Invisible or control characters were taken out of "
+                                  + ", ".join(f"#{p.num}" for p in hid) + " (the technician sees what was removed). "
+                                  "Write commands in plain text only.")
                     self._auto_review(added)
                     self._queue_changed()
             self.conv.append({"role": "tool", "tool_call_id": call.id, "content": reply})

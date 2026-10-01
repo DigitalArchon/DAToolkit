@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass, field, fields
 
-from .safety import risk
+from .safety import hidden, risk
 from .safety.sensitive import sensitive
 
 # pending -> ran | inserted | skipped -> sent; pending -> withdrawn (the AI took it back)
@@ -36,6 +36,7 @@ class Proposal:
     dry_run_of: int | None = None        # this item rehearses another item
     sensitive: list[str] = field(default_factory=list)  # local rules: may expose secrets or private data
     review: dict = field(default_factory=dict)          # second opinion on this exact command (see Engine)
+    hidden: list[str] = field(default_factory=list)     # invisible characters taken out of the command
 
     @property
     def edited(self) -> bool:
@@ -60,7 +61,8 @@ class Queue:
         the blast-radius rule see which session a command would cut."""
         added = []
         for raw in raw_items:
-            command = str(raw.get("command", "")).strip()
+            command, removed = hidden.clean(str(raw.get("command", "")))
+            command = command.strip()
             if not command:
                 continue
             model_risk = str(raw.get("risk", "modifying"))
@@ -81,6 +83,7 @@ class Queue:
                 recipe=str(raw.get("recipe", "") or ""),
                 recipe_key=str(raw.get("recipe_key", "") or ""),
                 dry_run_of=raw.get("dry_run_of"),
+                hidden=removed,
             )
             self._classify(p, session_kinds)
             self._next += 1
@@ -117,8 +120,11 @@ class Queue:
                status: str | None = None, note: str | None = None,
                session_kinds: dict[str, str] | None = None, watch: bool | None = None) -> Proposal:
         p = self.get(num)
+        command, removed = hidden.clean(command) if command is not None else (None, [])
         if command is not None and command.strip() and p.status == "pending":
             p.command = command.strip()
+            if removed:              # otherwise keep the note about what the AI's text carried
+                p.hidden = removed
             if watch is not None:
                 p.watch = watch
             self._classify(p, session_kinds)
@@ -170,6 +176,11 @@ class Queue:
             p = Proposal(**{k: v for k, v in d.items() if k in known})
             if p.review.get("status") == "checking":
                 p.review = {}            # the app closed while it was being reviewed
+            if p.status == "pending":    # saved before commands were cleaned on the way in
+                command, removed = hidden.clean(p.command)
+                if removed:
+                    p.command, p.original_command, p.hidden = command.strip(), command.strip(), removed
+                    cls._classify(p, None)
             q.items.append(p)
         q._next = max((p.num for p in q.items), default=0) + 1
         return q
