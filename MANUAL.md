@@ -52,6 +52,8 @@ the system's own; in the browser they're the browser's.
 - The chat is a conversation: the AI says what it makes of each result, what it wants to check
   next and why, and asks you what no command can tell it (when it started, what changed).
   Its questions come with quick-reply buttons that fill your reply; press Enter to send.
+  If results are ready too, Enter opens the results review with your reply as its message,
+  so answers and results go in one turn (**Send message only** there sends just the reply).
   Each proposal also appears as a card in the AI's message, with Run / Skip… / Force skip,
   and hypothesis moves (▲ ▼ ✓ ✕) are shown inline.
 - The AI can change its mind: it withdraws pending commands it no longer wants (wrong syntax
@@ -98,7 +100,9 @@ the system's own; in the browser they're the browser's.
   **Force skip** skips in one click; the AI is told you chose not to run it, with no reason.
 - **Send results** collects each command's output from the terminal (from where you ran it
   to where the next one starts), redacts and truncates it, and shows it for review. The AI
-  receives only what you send.
+  receives only what you send. Whatever you've typed in the chat box (and any attached
+  photo) is sent with it, and the AI's open questions are shown with their quick replies,
+  so you can answer them there. Cancel puts your message back in the chat box.
 - **Send terminal selection** sends any highlighted terminal text.
 - If the terminal buffer no longer has a command's output (page reloaded, session closed,
   case resumed), the output is taken from the session's transcript file instead. The

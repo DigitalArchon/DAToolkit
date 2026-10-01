@@ -460,28 +460,39 @@ function renderEntry(e, live = false) {
   return box;
 }
 
-// Questions from ask_technician. Quick replies on the latest AI message fill the draft; the
-// technician still presses Enter, so they can add context or answer several at once.
-function questionBlock(questions, live) {
+// Questions from ask_technician. Quick replies on the latest AI message fill the draft (the chat
+// box, or the results dialog's message); the technician still sends it, so they can add context
+// or answer several at once.
+function questionBlock(questions, live, input = () => $("#chat-input")) {
   return h("div", { class: "questions" }, questions.map((q) => h("div", { class: "question" },
     h("div", { class: "q" }, q.question),
     live && q.options?.length ? h("div", { class: "qopts" }, q.options.map((o) =>
       h("button", { type: "button", class: "small", title: "Add this answer to your reply",
         onclick: (ev) => {
           for (const b of ev.target.parentElement.children) b.classList.toggle("on", b === ev.target);
-          answerQuestion(q.question, o);
+          answerQuestion(q.question, o, input());
         } }, o))) : null)));
 }
 
-function answerQuestion(question, answer) {
-  const input = $("#chat-input");
+function answerQuestion(question, answer, input) {
   const prefix = `Q: ${question} — `;
   const lines = input.value ? input.value.split("\n") : [];
   const i = lines.findIndex((l) => l.startsWith(prefix));
   if (i >= 0) lines[i] = prefix + answer; else lines.push(prefix + answer);
   input.value = lines.join("\n");
+  if (input.style.height) autosize(input);       // only boxes that grow with their text (the dialog's)
   input.focus();
   input.selectionStart = input.selectionEnd = input.value.length;
+}
+
+// Questions in the newest AI message, if the technician hasn't replied since.
+function openQuestions() {
+  const chat = S.state.chat || [];
+  for (let i = chat.length - 1; i >= 0; i--) {
+    if (chat[i].kind === "user") return [];
+    if (chat[i].kind === "assistant") return chat[i].questions || [];
+  }
+  return [];
 }
 
 function hypChanges(list) {
@@ -721,19 +732,26 @@ async function attachPhoto(file) {
   }
 }
 
+// With results ready, Send goes through the results review, carrying the message, so answers
+// and results reach the AI in one turn ("Send message only" there skips the results).
 async function sendChat(ev) {
   ev?.preventDefault();
-  const input = $("#chat-input");
-  const message = input.value.trim();
+  const message = $("#chat-input").value.trim();
   if (!message && !pendingImages.length) return;
+  if (readyItems().length && !S.state.busy) return guarded(() => openSendResults());
   await guarded(async () => {
     await api("POST", "/api/send", { message, images: pendingImages.slice() });
-    pendingImages.length = 0;
-    renderAttachments();
-    if (message && S.chatHistory[S.chatHistory.length - 1] !== message) S.chatHistory.push(message);
-    S.histIdx = -1;
-    input.value = "";
+    composerSent(message);
   });
+}
+
+// The chat box's message and photos were sent: clear them and remember the message for ↑.
+function composerSent(message) {
+  pendingImages.length = 0;
+  renderAttachments();
+  if (message && S.chatHistory[S.chatHistory.length - 1] !== message) S.chatHistory.push(message);
+  S.histIdx = -1;
+  $("#chat-input").value = "";
 }
 
 // Up/Down at the edge of the chat box recalls earlier messages, like a shell.
@@ -1898,13 +1916,15 @@ async function previewCapture(item) {
   });
 }
 
-async function openSendResults(draft = "") {
+// Whatever is in the chat box (message and photos) goes into this dialog and is sent with the
+// results; Cancel puts it back, with any edits, so answers are never lost or sent half.
+async function openSendResults() {
   const items = readyItems();
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
   const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" } : captureFor(i))));
   const prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text), nums: items.map((i) => i.num) })).items;
-  const images = [];
-  const thumbs = h("div", { class: "thumbs" });
+  const images = pendingImages.slice();
+  const thumbs = h("div", { class: "thumbs" }, images.map((d) => h("img", { src: d, class: "thumb" })));
   const addShot = (sid) => guarded(async () => {
     needVision();
     const r = S.rdps[sid];
@@ -1940,22 +1960,42 @@ async function openSendResults(draft = "") {
     if (ta) setTimeout(() => autosize(ta), 30);
     return { item, include, ta, note };
   });
-  const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)", value: draft });
+  const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)", value: $("#chat-input").value });
+  setTimeout(() => autosize(message), 30);
+  const questions = openQuestions();
   setTimeout(renderVision, 0);
+  let sent = false;
+  const send = async (results) => {
+    await api("POST", "/api/send", { message: message.value.trim(), results, images });
+    sent = true;
+    composerSent(message.value.trim());
+  };
   modal({
     title: "Review results before sending", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "muted small" }, "This exact text is what the AI receives. Edit or untick anything that shouldn't be shared."),
-      ...blocks.map((b) => b.include.closest(".result-block")), thumbs, h("div", { class: "field" }, h("span", {}, "Message"), message)),
+      ...blocks.map((b) => b.include.closest(".result-block")), thumbs,
+      questions.length ? h("div", { class: "field" }, h("span", {}, "The AI asked"), questionBlock(questions, true, () => message)) : null,
+      h("div", { class: "field" }, h("span", {}, questions.length ? "Message (your answers go here)" : "Message"), message)),
     buttons: [{ label: "Cancel" }, {
+      label: "Send message only", onClick: async () => {
+        if (!message.value.trim() && !images.length) throw new Error("The message is empty.");
+        await send([]);
+      },
+    }, {
       label: "Send to AI", kind: "primary", onClick: async () => {
         const results = blocks.filter((b) => b.include.checked)
           .map((b) => ({ num: b.item.num, text: b.ta ? b.ta.value : "", note: b.note.value.trim() }));
         if (!results.length && !message.value.trim()) throw new Error("Nothing selected.");
-        await api("POST", "/api/send", { message: message.value.trim(), results, images });
-        if (draft && $("#chat-input").value === draft) $("#chat-input").value = "";
+        await send(results);
       },
     }],
+    onClose: () => {
+      if (sent) return;
+      $("#chat-input").value = message.value;
+      pendingImages.splice(0, pendingImages.length, ...images);
+      renderAttachments();
+    },
   });
 }
 
@@ -2854,9 +2894,9 @@ function init() {
     toggleMenu($("#session-menu"));
   });
   document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) hideMenus(); });
+  // both carry whatever is typed in the chat box as the message sent with the results
   $("#send-results-btn").addEventListener("click", () => guarded(() => openSendResults()));
-  // from the composer: whatever is typed becomes the message sent with the results
-  $("#chat-results-btn").addEventListener("click", () => guarded(() => openSendResults($("#chat-input").value.trim() ? $("#chat-input").value : "")));
+  $("#chat-results-btn").addEventListener("click", () => guarded(() => openSendResults()));
   $("#tools-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#tools-menu")); });
   $("#tools-menu").addEventListener("click", (e) => {
     const a = e.target.closest("button")?.dataset.act;

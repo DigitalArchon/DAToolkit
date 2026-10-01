@@ -248,6 +248,10 @@ changed, who is affected, whether it is intermittent, what they already tried, w
 screen. Use ask_technician for short questions (at most 3 at a time, with quick-reply options \
 where the answer is one of a few). Asking instead of proposing commands is fine when that is \
 the faster route.
+- The technician may send answers and command results together, or only some of what you \
+asked for. Work with whatever arrived. Do not repeat a question word for word or re-propose \
+a command that is still pending; if something outstanding still matters, mention it in one \
+line.
 - When the technician skips a command, respect it. Use their reason if they gave one. If they \
 gave none, do not propose the same command again; if that check mattered, say briefly what it \
 would have told you and offer another route (a different command, or a question). No lecturing.

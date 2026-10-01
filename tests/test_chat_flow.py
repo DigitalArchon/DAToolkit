@@ -167,3 +167,35 @@ async def test_roster_never_reads_like_a_prompt_and_says_what_was_seen(env):  # 
     await wait_turn(engine)
     assert "Output from it has been sent to you 1 time(s)" in engine._system_prompt()
     engine.sessions.close_all()
+
+
+async def test_answers_and_results_reach_the_ai_in_one_turn(env):  # noqa: F811
+    """The AI asked questions and proposed commands; the reply carries both, so it need not
+    ask again for whichever half was missing."""
+    engine, fake, _ = env
+    engine.new_case("both", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    engine.queue.add("c", [{"session_id": "s1", "command": "uptime", "risk": "read_only"}])
+    engine.update_item(1, status="ran")
+    fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
+    engine.send("Q: When did it start? — This morning", results=[{"num": 1, "text": "up 3 days"}])
+    await wait_turn(engine)
+    content = fake.requests[0]["messages"][-1]["content"]
+    assert content.index("This morning") < content.index("[Results returned by the technician]")
+    assert "up 3 days" in content
+    assert engine.chat[-2]["text"].startswith("Q: When did it start?") and engine.chat[-2]["results"][0]["num"] == 1
+
+
+def test_prompt_takes_a_partial_reply_without_asking_again():
+    assert "answers and command results together" in prompts.SYSTEM_PROMPT
+    assert "Do not repeat a question word for word" in prompts.SYSTEM_PROMPT
+
+
+def test_send_routes_through_results_review_with_the_draft():
+    js = (WEB / "app.js").read_text()
+    send_chat = js.split("async function sendChat")[1].split("\n}\n")[0]
+    assert "readyItems().length" in send_chat and "openSendResults()" in send_chat
+    dialog = js.split("async function openSendResults")[1].split("\nasync function ")[0]
+    assert 'value: $("#chat-input").value' in dialog and "pendingImages.slice()" in dialog
+    assert "openQuestions()" in dialog and "Send message only" in dialog
+    assert "composerSent(" in dialog and "if (sent) return;" in dialog
