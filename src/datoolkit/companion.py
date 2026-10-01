@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import errno
 import hashlib
 import hmac
 import ipaddress
@@ -137,6 +138,10 @@ class CompanionServer:
             sock.bind(("0.0.0.0", port))
         except OSError as e:
             sock.close()
+            if e.errno == errno.EADDRINUSE:
+                raise UserError(f"Port {port} is already in use, by another program or another DAToolkit "
+                                "with its phone companion running. Close that, or choose another port in "
+                                "Settings → General.") from e
             raise UserError(f"Can't listen on port {port}: {e.strerror}. Choose another port in "
                             "Settings → General.") from e
         sock.listen(16)

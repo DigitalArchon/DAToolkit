@@ -88,7 +88,7 @@ async def test_busy_port_is_a_clear_error(env, tmp_path):  # noqa: F811
     with socket.socket() as taken:
         taken.bind(("0.0.0.0", 0))
         taken.listen(1)
-        with pytest.raises(UserError, match="Can't listen on port"):
+        with pytest.raises(UserError, match="already in use"):
             await server.start(taken.getsockname()[1])
     assert not server.running and server.token is None
 
