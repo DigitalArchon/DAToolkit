@@ -235,11 +235,17 @@ checked who the phone is talking to:
    **It doesn't match: stop**: someone may be intercepting traffic on that network.
 2. **Connect.** Press **Fingerprint matches** and scan the second code in the same browser.
    It carries the token. The browser has already accepted this exact certificate, so it must
-   not warn again; if it does, a different certificate is being offered: stop and pair again.
+   not warn again. If it does, don't continue: go back to step 1 and check the certificate.
+
+**A phone that is already paired** can skip straight to step 2 (**Already paired: skip**).
+Its browser accepted this certificate before, so it connects without a warning. If it warns
+anyway, treat it like any other warning and go back to step 1: browsers forget accepted
+certificates after a while, and a new phone or someone in the middle produces the same
+warning. The browser shows that warning before it sends the request, so refusing it keeps the
+token on this machine.
 
 The certificate is kept (`~/.config/datoolkit/companion-cert.pem`, key readable only by you),
-so its fingerprint stays the same and you check it once per phone; after that, go straight to
-step 2 until the browser forgets its exception. **New certificate** makes a new one (every
+so its fingerprint stays the same and each phone checks it once (until its browser forgets). **New certificate** makes a new one (every
 phone checks again); a new one is also made when it expires, after about two years.
 
 - The token changes every time the companion starts. **New code** disconnects phones paired

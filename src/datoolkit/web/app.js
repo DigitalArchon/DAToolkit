@@ -2516,6 +2516,9 @@ function renderPhoneBtn() {
 
 // Pairing takes two scans (see companion.py): the first opens a page with no secret so the
 // certificate's fingerprint can be checked on the phone; only then is the code with the token shown.
+// A phone already paired can skip to the connect step: one that hasn't accepted this certificate
+// (new, or its browser forgot) gets the browser's warning there, before the token is sent, and is
+// sent back to step 1.
 async function openPhone() {
   let info = await api("GET", "/api/phone");
   let step = 1;
@@ -2557,17 +2560,19 @@ async function openPhone() {
           h("p", {}, "Scan this with the phone. The browser warns that the connection isn't private: accept it, then open the certificate details (the page on the phone says where) and compare its SHA-256 fingerprint with this one:"),
           fp(),
           h("p", { class: "small" }, "Check every pair, not just the first and last few: someone in the middle can make a certificate whose ends match."),
-          h("p", { class: "small muted" }, "Checked this certificate on this phone before? The browser remembers it for a while: go straight to step 2."),
+          h("p", { class: "small muted" }, "Phone already paired? Its browser has accepted this certificate, so skip to step 2. If it warns there after all, come back here."),
           h("div", { class: "row" }, h("button", { class: "danger", onclick: () => act("stop") }, "It doesn't match: stop"),
-            h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => { step = 2; render(); } }, "Fingerprint matches")))));
+            h("span", { class: "spacer" }), h("button", { onclick: () => { step = 2; render(); } }, "Already paired: skip"),
+            h("button", { class: "primary", onclick: () => { step = 2; render(); } }, "Fingerprint matches")))));
     } else {
       body.replaceChildren(head,
         h("h3", {}, "Step 2 of 2: connect"),
         h("div", { class: "phone-step" }, qr(info.connect_qr, "Contains this session's token: don't share or photograph it", false), h("div", {},
-          h("p", {}, "Scan this with the same phone and open it in the same browser."),
-          h("div", { class: "warnbox" }, "The browser must NOT warn about the certificate at this step. If it does, don't continue: close the page, press Stop, and pair again from step 1."),
+          h("p", {}, "Scan this with the phone and open it in the browser you checked the certificate in."),
+          h("div", { class: "warnbox" }, h("b", {}, "If the browser warns that the connection isn't private, don't continue. "),
+            "Close that page and check the certificate (step 1) first. The browser warns when this phone has never accepted this certificate, when it has forgotten it (browsers do after a while), and when someone is in the middle: it's the same warning, so treat it the same way. Without a warning, the token only reaches this machine."),
           h("p", { class: "small muted" }, "The code changes every time the companion starts. New code disconnects phones paired with the old one."),
-          h("div", { class: "row" }, h("button", { onclick: () => { step = 1; render(); } }, "Back to step 1")))));
+          h("div", { class: "row" }, h("button", { onclick: () => { step = 1; render(); } }, "Check the certificate (step 1)")))));
     }
   }
   render();
