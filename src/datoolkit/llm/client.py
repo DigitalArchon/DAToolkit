@@ -29,6 +29,10 @@ def is_private_mode(model_id: str) -> bool:
 
 
 def is_local_url(base_url: str) -> bool:
+    """Whether a base URL counts as the Local tier (allowed for Confidential and Sovereign).
+    UNDER REVIEW: this trusts the LAN. Plain http to a private IP, or a `.local`/`.lan` name
+    that DNS could point anywhere, qualifies, so client data and the key may cross the network
+    unencrypted. Accepted for now (an Ollama server on a trusted LAN); see MANUAL.md, Model tiers."""
     if base_url.startswith("training://"):
         return True  # scripted training provider: nothing leaves the machine
     host = (urlparse(base_url).hostname or "").lower()

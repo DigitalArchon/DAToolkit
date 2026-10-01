@@ -82,6 +82,12 @@ the system's own; in the browser they're the browser's.
   told which of its commands were flagged.
 - **Run** types the command and presses Enter. **Insert** types it without Enter, so you can
   finish editing it in the shell. You can edit the command text in the queue before either.
+- **What you see is what runs.** Characters the queue can't show faithfully are taken out of
+  every command before it is queued: control characters (an escape sequence can end the
+  shell's bracketed paste), bidi overrides that reorder text, zero-width and Unicode tag
+  characters, and look-alike spaces (made plain spaces). Line breaks and tabs stay. The item
+  then says what was removed, and the AI is told. From the AI, that is a sign of prompt
+  injection.
 - **Skip…** takes an optional note that is passed to the AI (e.g. "not allowed on prod").
   **Force skip** skips in one click; the AI is told you chose not to run it, with no reason.
 - **Send results** collects each command's output from the terminal (from where you ran it
@@ -243,6 +249,8 @@ server room, a switch's serial port) and want the next step in your hand.
 **Port and firewall.** The companion always listens on the same port, 48443 unless you change
 it in **Settings → General**, so with a firewall on you only open that one
 (`sudo ufw allow 48443/tcp`). The main window stays on 127.0.0.1 and is never on the LAN.
+A request without the phone's token is refused on its headers, before any of its body is read,
+so nobody on the network can tie the app up by sending it data.
 
 **Pairing takes two scans**, so that nothing secret crosses the network before you have
 checked who the phone is talking to:
@@ -329,6 +337,12 @@ max). The same settings apply through NanoGPT Private Mode.
 | **TEE** | ids starting `TEE/` or `phala/` | The model runs in an attested enclave, but prompts pass NanoGPT's gateway **in the clear** |
 | **E2EE** | NanoGPT `private/…` ids | Ciphertext only, plus your account, the model, timing, sizes and usage |
 | **Local** | localhost / private-IP base URL | Nothing leaves your network |
+
+**Local trusts your network.** A base URL counts as Local when its host is `localhost`, a
+private or link-local IP, or a name ending `.local` or `.lan`, so Confidential and Sovereign
+cases may use it. With `http://`, prompts (client data included) and the API key cross the
+LAN unencrypted, and a `.lan` name is only as trustworthy as your DNS. Use Local over the
+network only on a LAN you trust, or put the model server behind HTTPS.
 
 Override any model's tier under **Settings → AI providers → Tier overrides**.
 
