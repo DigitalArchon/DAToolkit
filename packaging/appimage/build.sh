@@ -129,8 +129,14 @@ install -m 644 "$P/datoolkit.desktop" "$P/datoolkit.png" "$W/AppDir/"
 ln -s datoolkit.png "$W/AppDir/.DirIcon"
 install -D -m 644 "$P/au.com.digitalarchon.datoolkit.appdata.xml" \
     "$W/AppDir/usr/share/metainfo/au.com.digitalarchon.datoolkit.appdata.xml"
+# the version where AppImage managers look: the desktop entry (X-AppImage-Version) and AppStream
 sed -i "s/@VERSION@/$VERSION/; s/@DATE@/$(date -u -d "@$SOURCE_DATE_EPOCH" +%F)/" \
-    "$W/AppDir/usr/share/metainfo/au.com.digitalarchon.datoolkit.appdata.xml"
+    "$W/AppDir/datoolkit.desktop" "$W/AppDir/usr/share/metainfo/au.com.digitalarchon.datoolkit.appdata.xml"
+grep -qx "X-AppImage-Version=$VERSION" "$W/AppDir/datoolkit.desktop"
+grep -q "<release version=\"$VERSION\"" "$W/AppDir/usr/share/metainfo/au.com.digitalarchon.datoolkit.appdata.xml"
+# also where the AppStream launchable (desktop-id datoolkit.desktop) is looked up
+install -d "$W/AppDir/usr/share/applications"
+ln -s ../../../datoolkit.desktop "$W/AppDir/usr/share/applications/datoolkit.desktop"
 desktop-file-validate "$W/AppDir/datoolkit.desktop"
 
 chmod -R u+rwX,go+rX,go-w "$W/AppDir"

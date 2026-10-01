@@ -10,3 +10,4 @@ Terminal=false
 Categories=System;
 Keywords=terminal;ssh;rdp;winrm;diagnostics;ai;
 X-AppImage-Name=DAToolkit
+X-AppImage-Version=@VERSION@
