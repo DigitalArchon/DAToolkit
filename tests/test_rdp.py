@@ -2,6 +2,7 @@
 device linking, session-cut rules, and the browser <-> guacd relay."""
 
 import asyncio
+import re
 import datetime
 import socket
 import ssl
@@ -208,6 +209,7 @@ async def test_tofu_pins_then_trusts_then_blocks_a_change(rdp_env):
         params = engine.rdp_params(roster["id"])
         assert params["username"] == "bob" and params["domain"] == "CORP" and params["password"] == "s3cret"
         assert params["ignore-cert"] == "true"
+        assert params["resize-method"] == "display-update"     # Fit to window resizes live where the server can
         assert engine.pins.get("127.0.0.1", port)["sha256"] == fp1
         assert engine.snapshot()["config"]["hosts"][-1]["pinned"] == fp1
         # second time: pinned, and the password comes from the keyring when saved
@@ -333,11 +335,30 @@ def test_ws_relay_handshakes_pings_and_forwards(tmp_path, monkeypatch):
             ws.send_text(ping)
             assert ws.receive_text() == ping                     # answered here, not sent to guacd
             ws.send_text(guac.encode("key", "65", "1"))
+            ws.send_text(guac.encode("size", "1200", "640"))     # Fit to window: passed on for display-update
             for _ in range(100):
-                if "key" in g.received:
+                if "size" in g.received:
                     break
                 threading.Event().wait(0.02)
         assert g.handshake[-1] == ["connect", "VERSION_1_3_0", "dc01", "pw", "true"]
         assert g.handshake[1] == ["size", "1000", "700", "96"]
-        assert g.received == guac.encode("key", "65", "1")
+        assert g.received == guac.encode("key", "65", "1") + guac.encode("size", "1200", "640")
         assert "rdp_connected" in (e.case.dir / "events.jsonl").read_text()
+
+
+def test_desktop_resizes_only_when_asked_and_can_be_maximized():
+    """Resizing panes or the window must not resize the remote (a size change every drag is
+    disruptive); the desktop is drawn 1:1 and scrolls, Fit to window resizes it in one click
+    (reconnecting when the server ignores display-update), and Maximize hides the other panes."""
+    from pathlib import Path
+    web = Path(__file__).resolve().parents[1] / "src" / "datoolkit" / "web"
+    js, css = (web / "app.js").read_text(), (web / "style.css").read_text()
+    assert js.count(".sendSize(") == 1
+    fit = js[js.index("function rdpFitToWindow"):]
+    fit = fit[:fit.index("\n}\n")]
+    assert ".sendSize(" in fit and "rdpConnect(r)" in fit and "fitByReconnect" in fit
+    assert "d.scale(1)" in js and 'btn("Fit to window"' in js
+    assert "function rdpMaximize" in js and '"rdp-max"' in js
+    assert re.search(r"\.rdp-view \{[^}]*overflow: auto", css)
+    assert re.search(r"body\.rdp-max #chat-pane[^{]*\{ display: none", css.replace("\n", " "))
+    assert re.search(r"\.rdp-status \{[^}]*width:", css)      # status text can't wrap the bar

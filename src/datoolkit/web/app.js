@@ -809,7 +809,8 @@ function activateTab(sid, focus = true) {
   const t = S.terms[sid];
   if (t) { fitTerm(t, true); if (focus) t.term.focus(); }
   const r = S.rdps[sid];
-  if (r) { rdpResize(r); if (focus) r.view.focus(); }
+  if (!r) rdpMaximize(null, false);
+  if (r) { rdpFit(r); if (focus) r.view.focus(); }
 }
 
 // Sessions on the same device get the same colour; the 🔗 button links or unlinks.
@@ -839,6 +840,7 @@ function renderSessions() {
   for (const [id, r] of Object.entries(S.rdps)) {
     if (!ids.has(id)) { try { r.client.disconnect(); } catch { /* gone */ } r.host.remove(); delete S.rdps[id]; }
   }
+  if (!S.rdps[S.activeSid]) rdpMaximize(null, false);
   const counts = {};
   for (const s of sessions) if (!s.exited) counts[s.device] = (counts[s.device] || 0) + 1;
   const colour = {};
@@ -1026,26 +1028,61 @@ function terminalScreenshot(sid) {
 // Guacamole protocol; guacamole-common-js draws the desktop and sends mouse and keyboard.
 const RDP_STATES = ["idle", "connecting…", "waiting…", "connected", "disconnecting…", "disconnected"];
 
+// The desktop is drawn 1:1 and scrolls when it is larger than the tab. Its size changes only
+// when asked (Fit to window), so resizing panes or the window never disturbs the remote.
 function rdpViewSize(r) {
-  const w = r.view.clientWidth || $("#terms").clientWidth || 1280;
-  const hh = r.view.clientHeight || ($("#terms").clientHeight - 34) || 800;
+  const w = r.view.offsetWidth || $("#terms").clientWidth || 1280;              // scroll bars included
+  const hh = r.view.offsetHeight || ($("#terms").clientHeight - 34) || 800;
   return [Math.max(200, Math.floor(w)), Math.max(200, Math.floor(hh))];
 }
 
-function rdpFit(r) {
-  const d = r.client?.getDisplay();
-  if (!d || !d.getWidth() || !r.view.clientWidth) return;
-  const scale = Math.min(r.view.clientWidth / d.getWidth(), r.view.clientHeight / d.getHeight());
-  d.scale(isFinite(scale) && scale > 0 ? scale : 1);
+function rdpFits(r) {
+  const d = r.client.getDisplay(), [w, hh] = rdpViewSize(r);
+  return Math.abs(d.getWidth() - w) <= 2 && Math.abs(d.getHeight() - hh) <= 2;    // guacd evens the width
 }
 
-let rdpResizeTimer = null;
-function rdpResize(r) {
-  rdpFit(r);
-  clearTimeout(rdpResizeTimer);
-  rdpResizeTimer = setTimeout(() => {
-    if (r.state === 3) r.client.sendSize(...rdpViewSize(r));   // remote follows (display-update)
-  }, 400);
+// Highlight Fit to window while the remote size differs from the tab; scroll only when it doesn't fit.
+function rdpFit(r) {
+  const d = r.client?.getDisplay();
+  if (!d) return;
+  if (d.getScale() !== 1) d.scale(1);
+  const fits = !!d.getWidth() && !!r.view.offsetWidth && rdpFits(r);
+  r.view.style.overflow = fits ? "hidden" : "";    // fitted to the outer size: scroll bars would only keep themselves
+  r.fitBtn.classList.toggle("due", r.state === 3 && !!d.getWidth() && !!r.view.offsetWidth && !fits);
+}
+
+// Ask the remote to take the tab's size (RDP display-update). Servers that don't follow it are
+// reconnected at the new size instead, which Windows treats as resuming the same session.
+const RDP_FIT_WAIT = 4000;
+function rdpFitToWindow(r) {
+  if (r.state !== 3) throw new Error("The remote desktop is not connected.");
+  if (rdpFits(r)) return;
+  if (r.fitByReconnect) return rdpConnect(r);
+  const client = r.client;
+  clearTimeout(r.fitTimer);
+  r.status.textContent = "resizing…";
+  client.sendSize(...rdpViewSize(r));
+  r.fitTimer = setTimeout(() => {
+    r.fitTimer = null;
+    if (client !== r.client || r.state !== 3) return;
+    r.fitByReconnect = true;
+    toast("This server didn't resize live, so the desktop reconnects at the new size (and will from now on).", "info", 6000);
+    rdpConnect(r);
+  }, RDP_FIT_WAIT);
+}
+
+// Maximize: the remote desktop takes the whole window (chat, queue, tabs and top bar hidden)
+// until Restore. Saved pane sizes are untouched. A desktop that fitted before is fitted again.
+function rdpMaximize(r, on) {
+  if (document.body.classList.contains("rdp-max") === on) return;
+  const refit = r && r.state === 3 && rdpFits(r);
+  document.body.classList.toggle("rdp-max", on);
+  for (const x of Object.values(S.rdps)) {
+    x.maxBtn.textContent = on ? "Restore" : "Maximize";
+    x.maxBtn.title = on ? "Bring back the chat, the queue and the tabs" : "Give the remote desktop the whole window";
+  }
+  if (refit) guarded(() => rdpFitToWindow(r));
+  if (r) r.view.focus();
 }
 
 function needsVision(el) { el.setAttribute("data-needs-vision", ""); return el; }
@@ -1065,6 +1102,9 @@ function ensureRdp(sess) {
     needsVision(btn("Screenshot → chat", "Attach a screenshot of the remote desktop to your next message", attachScreenshot)),
     r.clipBtn,
     btn("Paste text…", "Put text on the remote clipboard, or type it into the focused window", () => rdpPasteText(r)),
+    r.maxBtn = btn(document.body.classList.contains("rdp-max") ? "Restore" : "Maximize", "Give the remote desktop the whole window",
+      () => rdpMaximize(r, !document.body.classList.contains("rdp-max"))),
+    r.fitBtn = btn("Fit to window", "Resize the remote desktop to fill this tab", () => rdpFitToWindow(r)),
     btn("Reconnect", "Reconnect the remote desktop", () => rdpConnect(r)),
     h("span", { class: "spacer" }), r.status);
   r.host = h("div", { class: "term-host rdp-host" }, r.bar, r.view);
@@ -1075,6 +1115,7 @@ function ensureRdp(sess) {
   r.keyboard.onkeyup = (keysym) => { if (r.state === 3) r.client.sendKeyEvent(0, keysym); };
   r.view.addEventListener("blur", () => r.keyboard.reset());
   r.view.addEventListener("mousedown", () => r.view.focus());
+  new ResizeObserver(() => rdpFit(r)).observe(r.view);
   S.rdps[sess.id] = r;
   rdpConnect(r);
   return r;
@@ -1082,6 +1123,8 @@ function ensureRdp(sess) {
 
 function rdpConnect(r) {
   try { r.client?.disconnect(); } catch { /* already gone */ }
+  clearTimeout(r.fitTimer);
+  r.fitTimer = null;
   const client = new Guacamole.Client(new Guacamole.WebSocketTunnel(`ws://${location.host}/ws/rdp/${encodeURIComponent(r.id)}`));
   r.client = client;
   const display = client.getDisplay();
@@ -1091,10 +1134,11 @@ function rdpConnect(r) {
     r.state = st;
     r.status.textContent = RDP_STATES[st] || "";
     r.host.classList.toggle("rdp-off", st === 5);
-    if (st === 3) rdpResize(r);
+    rdpFit(r);
   };
   client.onerror = (status) => {
     r.status.textContent = `error: ${status.message || status.code}`;
+    r.status.title = r.status.textContent;
     toast(`RDP ${r.id}: ${status.message || `error ${status.code}`}`, "error", 12000);
   };
   client.onclipboard = (stream, mimetype) => {
@@ -1104,7 +1148,11 @@ function rdpConnect(r) {
     reader.ontext = (t) => { data += t; };
     reader.onend = () => { r.clipboard = data; r.clipBtn.disabled = !data.trim(); };
   };
-  display.onresize = () => rdpFit(r);
+  display.onresize = () => {
+    if (client !== r.client) return;
+    if (r.fitTimer) { clearTimeout(r.fitTimer); r.fitTimer = null; r.status.textContent = RDP_STATES[r.state] || ""; }
+    rdpFit(r);
+  };
   const mouse = new Guacamole.Mouse(display.getElement());
   mouse.onEach(["mousedown", "mousemove", "mouseup"], (e) => { if (r.state === 3) client.sendMouseState(e.state, true); });
   const [w, hh] = rdpViewSize(r);
@@ -1807,7 +1855,7 @@ function globalKeys(e) {
     const idx = Number(e.code.slice(5)) - 1;
     if (sessions[idx]) activateTab(sessions[idx].id);
   } else if (e.key === "Enter") runNextReadOnly();
-  else if (e.code === "KeyK") { setChatCollapsed(false); $("#chat-input").focus(); }
+  else if (e.code === "KeyK") { rdpMaximize(null, false); setChatCollapsed(false); $("#chat-input").focus(); }
 }
 
 function skipItem(item) {
@@ -2754,7 +2802,6 @@ function setupSplitters() {
     clearTimeout(pending);
     pending = setTimeout(() => {
       fitTerm(S.terms[S.activeSid], true);
-      if (S.rdps[S.activeSid]) rdpResize(S.rdps[S.activeSid]);
     }, 60);
   }).observe($("#terms"));
 }

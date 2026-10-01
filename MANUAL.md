@@ -442,6 +442,14 @@ collateral and NVIDIA's keys are cached for an hour.
   - The toolbar sends Ctrl+Alt+Del, Win and Win+R (keys the app window can't capture), takes
     a screenshot to the chat, sends text you copied on the remote desktop to the AI, and puts
     text on the remote clipboard or types it.
+  - **Size.** The desktop is drawn at its real size and scrolls when the tab is smaller, so
+    resizing the window or the panes never disturbs the remote. When the size no longer
+    matches, **Fit to window** lights up: one click resizes the remote to the tab. Servers
+    that can't resize live (no display-update, e.g. before Windows 8.1 / Server 2012 R2) are
+    reconnected at the new size instead, which resumes the same Windows session.
+    **Maximize** hides the chat, the queue and the tabs so the desktop gets the whole window,
+    and **Restore** brings them back (so does Ctrl+Shift+K). A desktop that fitted its tab is
+    fitted again each way.
   - **Run/Insert types a queued command into whichever window has focus** on the remote
     desktop (confirmed once per session). Output isn't captured; in the Send results dialog,
     paste it, use "Copied text", or attach a screenshot.
