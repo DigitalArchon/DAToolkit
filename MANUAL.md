@@ -221,7 +221,9 @@ server room, a switch's serial port) and want the next step in your hand.
 
 - **Read aloud.** "Read new AI messages aloud as they arrive" starts with the *next*
   message; what's already on screen isn't read. **▶ Read** reads the current message on demand.
-  Switching it on says a short confirmation, which is also what lets an iPhone speak later.
+  While it reads, the button is **⏸ Pause** (then **▶ Resume**, which picks up from the start
+  of the sentence it stopped in) and **⏹ Stop** ends it. Switching it on says a short
+  confirmation, which is also what lets an iPhone speak later.
 - **Photo to AI.** Take a photo (or choose one), usually of the screen you are working at,
   drag over anything sensitive to black it out, type what it is, and **Send to AI**. It goes
   into the case like a photo attached on the computer: the same case-sensitivity and vision

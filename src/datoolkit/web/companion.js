@@ -31,12 +31,68 @@ async function api(method, path, body) {
 }
 function toast(t, kind = "error") { const el = h("div", { class: `toast ${kind}` }, t); $("#toasts").append(el); setTimeout(() => el.remove(), 5000); }
 
-// ---- read aloud: only messages that arrive after it is switched on, plus ▶ Read on demand
+// ---- read aloud: only messages that arrive after it is switched on, plus ▶ Read on demand.
+// Spoken a sentence at a time: the browsers' own pause()/resume() are unreliable (Android Chrome
+// stops and can't resume), and Chrome cuts long utterances off. Pause cancels and remembers the
+// sentence; resume starts that sentence again.
 const canSpeak = "speechSynthesis" in window;
+const speech = { text: "", parts: [], i: 0, state: "idle", current: null };  // idle | playing | paused
+
+function sentences(text) {
+  // a line break ends a sentence (lists, headings) unless the line already did
+  const clean = text.replace(/[`*#_]/g, "").replace(/([.!?;:])?\s*\n+\s*/g, (_, stop) => `${stop || "."} `)
+    .replace(/\s+/g, " ").trim();
+  const out = [];
+  for (const s of clean.match(/.+?(?:[.!?;:](?=\s|$)|$)/g) || []) {  // a stop followed by a space: not 10.1.0.10
+    let rest = s.trim();
+    while (rest.length > 220) {  // very long runs: break at a comma or space
+      const cut = Math.max(rest.lastIndexOf(", ", 220), rest.lastIndexOf(" ", 220));
+      out.push(rest.slice(0, cut > 40 ? cut + 1 : 220).trim());
+      rest = rest.slice(cut > 40 ? cut + 1 : 220);
+    }
+    if (out.length && out[out.length - 1].length + rest.length < 80) out[out.length - 1] += " " + rest;
+    else if (rest.trim()) out.push(rest.trim());
+  }
+  return out;
+}
+function speakNext() {
+  if (speech.state !== "playing") return;
+  if (speech.i >= speech.parts.length) { speech.state = "idle"; speech.current = null; speechButtons(); return; }
+  const u = new SpeechSynthesisUtterance(speech.parts[speech.i]);
+  const done = () => { if (speech.current === u && speech.state === "playing") { speech.i++; speakNext(); } };
+  u.onend = done;
+  u.onerror = done;  // a cancel (pause/stop) fires this too; `current` no longer matches then
+  speech.current = u;
+  speechSynthesis.speak(u);
+}
 function speak(text) {
   if (!canSpeak || !text) return;
   speechSynthesis.cancel();
-  speechSynthesis.speak(new SpeechSynthesisUtterance(text.replace(/[`*#_]/g, "").slice(0, 1200)));
+  Object.assign(speech, { text, parts: sentences(text), i: 0, state: "playing", current: null });
+  speakNext();
+  speechButtons();
+}
+function pauseSpeech() {
+  speech.state = "paused"; speech.current = null;
+  speechSynthesis.cancel();
+  speechButtons();
+}
+function resumeSpeech() {
+  speech.state = "playing";
+  speakNext();
+  speechButtons();
+}
+function stopSpeech() {
+  Object.assign(speech, { state: "idle", current: null, i: 0 });
+  if (canSpeak) speechSynthesis.cancel();
+  speechButtons();
+}
+function speechButtons() {
+  const b = $("#read-now");
+  const sameMessage = speech.text === lastText;
+  b.textContent = speech.state === "playing" ? "⏸ Pause" : speech.state === "paused" && sameMessage ? "▶ Resume" : "▶ Read";
+  b.disabled = speech.state === "idle" && !lastText;
+  $("#read-stop").classList.toggle("hidden", speech.state === "idle");
 }
 if (!canSpeak) {
   $("#read-now").classList.add("hidden");
@@ -48,9 +104,14 @@ $("#speak").addEventListener("change", (e) => {
     lastSpoken = lastText;  // what's already on screen isn't read; ▶ Read does that
     // spoken from the tap itself: iOS only lets a page speak after a user gesture has
     speak("Read aloud is on. New messages from the AI will be read out.");
-  } else if (canSpeak) speechSynthesis.cancel();
+  } else stopSpeech();
 });
-$("#read-now").addEventListener("click", () => { lastSpoken = lastText; speak(lastText); });
+$("#read-now").addEventListener("click", () => {
+  if (speech.state === "playing") pauseSpeech();
+  else if (speech.state === "paused" && speech.text === lastText) resumeSpeech();
+  else { lastSpoken = lastText; speak(lastText); }
+});
+$("#read-stop").addEventListener("click", stopSpeech);
 
 function render(st) {
   $("#case").textContent = st.case ? `${st.case.name} · ${st.case.sensitivity}` : "no case";
@@ -58,11 +119,11 @@ function render(st) {
   const text = last ? last.text : (st.busy ? "Thinking…" : "—");
   $("#ai-text").textContent = text;
   lastText = last?.text || "";
-  $("#read-now").disabled = !lastText;
   if ($("#speak").checked && lastText && lastText !== lastSpoken) {
     lastSpoken = lastText;
     speak(lastText);
   }
+  speechButtons();
   const why = !st.case ? "Start a case on the computer first." : !st.photos?.ok ? st.photos?.why || "The chat model can't use images."
     : st.busy ? "The AI is responding: send when it has finished." : "";
   photosAllowed = !why;

@@ -29,10 +29,11 @@
 <h1>DAToolkit <span id="case" class="muted small"></span></h1>
 <div id="ai" class="card">
   <div class="row"><span class="muted small">Last AI message</span><span class="spacer"></span>
-    <button id="read-now" class="small" type="button" title="Read this message aloud">▶ Read</button></div>
+    <button id="read-now" class="small" type="button">▶ Read</button>
+    <button id="read-stop" class="small hidden" type="button" title="Stop reading">⏹ Stop</button></div>
   <div class="ai" id="ai-text">—</div>
   <label class="speak"><input type="checkbox" id="speak"> 🔊 Read new AI messages aloud as they arrive</label>
-  <div class="muted small">Starts with the next message; ▶ Read reads the one above.</div>
+  <div class="muted small">Starts with the next message; ▶ Read reads the one above. Pause resumes from the start of the sentence.</div>
 </div>
 <div id="photo" class="card">
   <div class="big"><button id="photo-take" class="primary" type="button">📷 Photo to AI</button>
