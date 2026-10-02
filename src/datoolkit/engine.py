@@ -1547,7 +1547,7 @@ class Engine:
             except websearch.SearchError as e2:
                 raise UserError(f"{e}; {e2}") from e2
             out["note"] = (f"{want} is not allowed while Zero Data Retention is on for this NanoGPT account; used {other}"
-                           if zdr else f"{want} failed ({str(e).split('(', 1)[-1].rstrip(')')[:120]}); used {other}")
+                           if zdr else f"{want} failed on NanoGPT's side (HTTP {e.status}); used {other}")
         return out
 
     async def test_search(self, query: str) -> dict:

@@ -279,7 +279,7 @@ async def test_a_provider_failing_on_nanogpts_side_falls_back_to_valyu(search):
     engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     r = await engine.test_search("q")
     assert fs.calls == ["perplexity", "valyu"] and r["provider"] == "valyu" and r["count"] == 1
-    assert r["note"].startswith("perplexity failed (504") and r["note"].endswith("used valyu")
+    assert r["note"] == "perplexity failed on NanoGPT's side (HTTP 504); used valyu" and r["note"] and r["note"].endswith("used valyu")
     # a request error (4xx other than Zero Data Retention) is not retried elsewhere
     fs.calls.clear()
     engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(
