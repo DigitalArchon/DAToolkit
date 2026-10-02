@@ -115,13 +115,19 @@ class LLMClient:
         return resp.choices[0].message.content or ""
 
 
+# provider extensions sent in the request body, whatever the SDK version knows about:
+# reasoning_effort, and NanoGPT's prompt_caching (Claude cache boundary and lifetime)
+_EXTRA_BODY = ("reasoning_effort", "prompt_caching")
+
+
 def _split_params(params: dict | None) -> dict:
-    """Standard sampling fields as SDK arguments; reasoning_effort in the extra body, so it
-    reaches the provider whatever the SDK version knows about."""
+    """Standard sampling fields as SDK arguments; provider extensions in the extra body."""
     params = dict(params or {})
-    effort = params.pop("reasoning_effort", None)
-    if effort:
-        params["extra_body"] = {"reasoning_effort": effort}
+    extra = {k: params.pop(k) for k in _EXTRA_BODY if params.get(k)}
+    for k in _EXTRA_BODY:
+        params.pop(k, None)
+    if extra:
+        params["extra_body"] = extra
     return params
 
 

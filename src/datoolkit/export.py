@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .case import fence
+from .llm.prompts import STATE_HEADER
 
 README = """\
 DAToolkit full export of case "{name}" ({id}), made {when}.
@@ -69,6 +70,9 @@ def _tool_calls_md(calls: list[dict]) -> list[str]:
 
 def _message_md(m: dict) -> list[str]:
     role = m.get("role")
+    if role == "user" and str(m.get("content", "")).startswith(STATE_HEADER):
+        return ["**Current state (sent by DAToolkit after the conversation, so the prompt cache keeps the rest)**", "",
+                fence(str(m["content"])[len(STATE_HEADER):].strip()), ""]
     if role == "user":
         return ["**Technician → AI**", ""] + [x for c in _content_md(m.get("content")) for x in (c, "")]
     if role == "assistant":

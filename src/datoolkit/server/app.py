@@ -392,6 +392,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.answer_search(sid, bool(body.get("approve")), body.get("query"))
         return {"ok": True}
 
+    @app.post("/api/research/{rid}")
+    async def answer_research(rid: str, body: dict, e: Engine = Depends(auth)):
+        e.answer_research(rid, bool(body.get("approve")), body.get("text"))
+        return {"ok": True}
+
     @app.post("/api/web-search-test")
     async def test_search(body: dict, e: Engine = Depends(auth)):
         return await e.test_search(str(body.get("query", "")))

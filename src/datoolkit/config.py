@@ -71,6 +71,12 @@ class Settings:
     search_provider: str = "kagi"
     # name of the NanoGPT provider whose key pays for searches; empty = the first NanoGPT one
     search_via: str = ""
+    # "provider|model" of the research agent (research tool); empty = Claude Sonnet 5.5 on the
+    # search provider. It sees only the AI's brief, and is gated like web search
+    research_model: str = ""
+    # Claude prompt caching through NanoGPT for the chat model: "off", "5m" or "1h" (cache
+    # lifetime; 1h outlasts the minutes a technician spends running commands between turns)
+    prompt_cache: str = "1h"
     # generation parameters sent with every request; a missing key means "the model's default"
     generation: dict = field(default_factory=lambda: {"temperature": 0.3, "reasoning_effort": "low"})
     # "provider|model" that describes images for a chat model without vision; empty = none

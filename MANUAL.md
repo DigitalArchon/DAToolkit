@@ -71,6 +71,34 @@ the system's own; in the browser they're the browser's.
   Perplexity $0.005, Linkup $0.006 per search; each search card shows its cost). If the
   account has Zero Data Retention required, NanoGPT only allows Linkup, so DAToolkit falls
   back to it and says so on the card.
+- **Research agent.** A search returns only snippets; when the AI needs the documentation
+  actually read, it hands a brief (product, exact version, what it needs, what you see) to a
+  research agent, a second model (Claude Sonnet 5.5 by default, Settings → Model). The agent
+  searches, reads the pages it finds through NanoGPT's scraper (vendor docs, release notes,
+  knowledge-base articles, GitHub files), and reports back with the steps quoted and the
+  sources numbered. The AI is told to call it whenever it isn't sure of the exact steps:
+  products it knows less well, a version that may differ from what it knows, when you say the
+  screen looks different from what it described, or when commands come back invalid. The
+  research card in the AI's message shows each search and page as it happens, then the report.
+  - It is gated like web search: by default you approve (and can edit) the brief first; in
+    "search without asking" mode on an Open case it runs straight away; Confidential cases
+    always ask; Sovereign cases never research. The agent sees only the brief, never the case,
+    so edit out anything that identifies the client.
+  - It can only fetch URLs that appeared in its search results or as links on pages it read,
+    so a hostile page can't send it to a URL of its own making (a URL can carry data out).
+    Budget per task: 6 searches, 12 pages, 10 minutes; at most 2 tasks per AI turn.
+  - Pages that come back blocked (an anti-bot or challenge page, or a failed fetch) are
+    fetched again in stealth mode automatically. Costs at the time of writing: $0.001 per page,
+    $0.005 in stealth mode, plus the searches and the research model's tokens; the card shows
+    the search and page costs.
+  - The AI never fetches a page itself. When it needs one whole page (a long config reference,
+    a source file), it asks the agent for that URL: the agent checks the page for text aimed
+    at an AI, those passages are cut out (the AI is told how many), and the rest is returned
+    in full (up to 40,000 characters). A URL that didn't come from a search result, a report or
+    your own message is always asked about, even in "without asking" mode.
+  - Reports are kept on this machine for 30 days. The same question about the same product
+    version in a later case reuses the report (the card says "reused") instead of researching
+    again; the AI can ask for a fresh one if it doesn't answer the question.
 - **Retry.** When a request fails or you stop it, the status line (and the error note in the
   chat) offers **Retry with ‹model›**: the last message is sent again, once, with whichever
   model is selected now. So when a model is overloaded, pick another and retry; nothing needs
@@ -339,6 +367,17 @@ Blank means the model's own default. Reasoning effort is sent only to reasoning 
 moved to the nearest level each model accepts (Kimi and GLM take low / high / max; Opus low to
 max). The same settings apply through NanoGPT Private Mode.
 
+**Prompt caching** (Settings → Model, default on for 1 hour): Claude models through NanoGPT
+(Open cases) reuse the conversation each request already sent, so later requests in a case
+pay a tenth of the input price for everything before the newest message, and answer sooner.
+Writing the cache costs extra (2× the input price for the 1-hour cache, 1.25× for 5 minutes);
+1 hour outlasts the minutes spent running commands between replies, where a 5-minute cache
+would expire. For the cache to hold, the changing part of the prompt (sessions, queue,
+hypotheses) is sent after the conversation instead of in the system prompt; the full export
+shows it as "Current state". The context figure above the chat shows how much of the last
+request came from the cache. Other models cache automatically where their provider does; the
+research agent and write-ups don't cache.
+
 ## Model tiers and end-to-end encryption
 
 | Tier | Detected from | What the provider can see |
@@ -355,6 +394,12 @@ LAN unencrypted, and a `.lan` name is only as trustworthy as your DNS. Use Local
 network only on a LAN you trust, or put the model server behind HTTPS.
 
 Override any model's tier under **Settings → AI providers → Tier overrides**.
+
+**Web search and the research agent are gated by approval, not by tier.** Search queries reach
+the search provider in the clear whatever the chat model's tier. The research model works
+from the brief alone (never the case), the same kind of text as a search query, so it may be a
+Standard-tier model in a Confidential case: there, every brief waits for your approval and
+edit. Sovereign cases do neither.
 
 **How E2EE works** (`src/datoolkit/llm/private_mode.py`, following SealedLore's implementation):
 
@@ -472,6 +517,7 @@ collateral and NVIDIA's keys are cached for an hour.
 | Companion certificate and key | `~/.config/datoolkit/companion-cert.pem`, `companion-key.pem` (0600) |
 | Secrets | OS keyring, service `datoolkit` |
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |
+| Research reports (reused for 30 days) | `~/.local/share/datoolkit/research/` |
 
 Inside a case directory: `case.json` (name, sensitivity, notes), `events.jsonl` (audit log),
 `state.json` (conversation, chat and queue, rewritten on every change so the case can be
@@ -486,6 +532,9 @@ meant to steer the model. Three layers deal with that:
 
 - the system prompt tells the model to treat output as data;
 - the review dialog flags text that looks like an injection before you send it;
+- web search results, research reports and fetched pages reach the model marked as untrusted,
+  with the same check; the research agent works from the brief alone and fetches only URLs
+  it was shown, and a page returned whole has first been checked by the agent;
 - the model's reply is rendered with no remote resources at all (no images, media or
   embeds, and a Content-Security-Policy that only allows this origin), so a steered model
   cannot leak data by making the page fetch a URL. Links open in your browser.

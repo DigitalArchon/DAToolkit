@@ -383,6 +383,15 @@ p.small.warn { color: var(--warn); }
 .sresults { margin: 4px 0; padding-left: 20px; font-size: 12.5px; }
 .sresults a { color: var(--accent); }
 .surl { overflow-wrap: anywhere; }
+.rcard { border-left-color: var(--accent); }
+.rcard textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; }
+.rsteps { margin: 2px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+.rsteps li { overflow-wrap: anywhere; }
+.rsteps a { color: var(--accent); }
+.rsteps .r-failed { color: var(--danger); }
+.rreport { font-size: 13px; max-height: 420px; overflow: auto; padding: 4px 6px; }
+.rreport h1, .rreport h2, .rreport h3 { font-size: 13.5px; margin: 8px 0 2px; }
+.rreport p { margin: 2px 0 6px; }
 
 /* remote desktop tabs (guacd) */
 .rdp-host { display: flex; flex-direction: column; }

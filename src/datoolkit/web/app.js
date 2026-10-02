@@ -169,9 +169,9 @@ function handleEvent(ev) {
     case "state":
       S.state = ev.state;
       loadLayout(S.state.config?.settings?.layout);
-      if (S.state.busy && S.state.search_requests?.length && !S.streaming) {
-        S.streaming = { text: "", reasoning: "", phase: "tool", tool: "web_search", startAt: Date.now(), lastAt: Date.now(),
-          searches: S.state.search_requests };
+      if (S.state.busy && (S.state.search_requests?.length || S.state.research_requests?.length) && !S.streaming) {
+        S.streaming = { text: "", reasoning: "", phase: "tool", tool: S.state.research_requests?.length ? "research" : "web_search",
+          startAt: Date.now(), lastAt: Date.now(), searches: S.state.search_requests || [], research: S.state.research_requests || [] };
       }
       renderAll();
       break;
@@ -236,6 +236,17 @@ function handleEvent(ev) {
       {
         const i = S.streaming.searches.findIndex((r) => r.id === ev.search.id);
         if (i >= 0) S.streaming.searches[i] = ev.search; else S.streaming.searches.push(ev.search);
+      }
+      S.streaming.lastAt = Date.now();
+      scheduleStreamRender();
+      renderStatus();
+      break;
+    case "research":
+      if (!S.streaming) break;
+      S.streaming.research = S.streaming.research || [];
+      {
+        const i = S.streaming.research.findIndex((r) => r.id === ev.research.id);
+        if (i >= 0) S.streaming.research[i] = ev.research; else S.streaming.research.push(ev.research);
       }
       S.streaming.lastAt = Date.now();
       scheduleStreamRender();
@@ -361,7 +372,11 @@ function renderUsage() {
   const p = u.prompt_tokens;
   el.textContent = `ctx ${fmtTokens(p)}`;
   el.className = `muted small usage${p >= warn * 1.5 ? " bad" : p >= warn ? " warn" : ""}`;
+  const cached = u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+  const written = u.cache_creation_input_tokens || 0;
+  if (cached) el.textContent += ` · ${Math.round(100 * cached / p)}% cached`;
   el.title = `Last request: ${p.toLocaleString()} prompt tokens, ${(u.completion_tokens || 0).toLocaleString()} completion tokens.`
+    + (cached || written ? `\nPrompt cache: ${cached.toLocaleString()} read, ${written.toLocaleString()} written.` : "")
     + (p >= warn ? `\nThe conversation is getting long (warning threshold ${warn.toLocaleString()} in Settings → General). Consider a new case or a ticket summary.` : "");
 }
 
@@ -449,6 +464,7 @@ function renderEntry(e, live = false) {
   }
   box.append(h("div", { class: "body", html: md(e.text) }));
   if (e.searches?.length) box.append(h("div", { class: "scards" }, e.searches.map((r) => searchCard(r))));
+  if (e.research?.length) box.append(h("div", { class: "scards" }, e.research.map((r) => researchCard(r))));
   if (e.withdrawn?.length || e.reordered?.length) {
     box.append(h("div", { class: "revisions small" },
       ...(e.withdrawn || []).map((w) => h("div", {}, h("span", { class: "chip", onclick: () => flashQueueItem(w.num) }, `#${w.num}`), " withdrawn", w.reason ? `: ${w.reason}` : "")),
@@ -532,6 +548,53 @@ function searchCard(rec) {
       h("li", {}, r.url ? h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.title || r.url) : (r.title || "(untitled)"),
         r.date ? h("span", { class: "muted small" }, ` · ${r.date}`) : null,
         r.url ? h("div", { class: "muted small surl" }, r.url) : null)))));
+  }
+  return el;
+}
+
+// A research task the AI asked for: the agent searches and reads pages, then reports. While it
+// awaits approval the brief (or the page's URL) is editable; it runs only when the technician
+// clicks Research / Fetch, unless the mode is auto on an Open case and, for a page, the URL came
+// from search results, a report or the technician.
+const RESEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval", running: "researching…",
+  declined: "skipped by you", cancelled: "cancelled", cached: "reused a report from an earlier case" };
+
+function researchCard(rec) {
+  const page = rec.task === "page";
+  const cost = rec.cost ? ` · $${rec.cost.toFixed(3)}` : "";
+  const state = rec.status === "done" ? (page ? `page fetched${cost}` : `${rec.searches} search${rec.searches === 1 ? "" : "es"}, ${rec.pages} page${rec.pages === 1 ? "" : "s"}${cost}`)
+      + (rec.edited ? " · edited by you" : "")
+    : rec.status === "failed" || rec.status === "unavailable" ? `not done: ${rec.error}` : RESEARCH_STATE[rec.status] || rec.status;
+  const el = h("div", { class: `scard rcard s-${rec.status}` },
+    h("div", { class: "phead" }, h("span", {}, page ? "📄 Read a page" : "🔬 Research"), h("span", { class: "muted small" }, rec.model || ""),
+      h("span", { class: "spacer" }), h("span", { class: "small sstate" }, state)));
+  if (rec.status === "awaiting") {
+    const input = page ? h("input", { type: "text", value: rec.url, spellcheck: "false" })
+      : h("textarea", { rows: 4, spellcheck: "false" }, rec.brief);
+    const answer = (approve) => guarded(async () => { await api("POST", `/api/research/${rec.id}`, { approve, text: input.value }); });
+    el.append(input, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
+      h("div", { class: "muted small" }, page
+        ? (rec.unknown_url ? "This URL didn't come from a search result, a report or you, so it is always asked about: a URL can carry data out. " : "")
+          + "The page is fetched through NanoGPT's scraper, then the research model checks it for text aimed at an AI before the chat model gets it whole."
+        : "The research model reads this brief, never the case; its searches and page fetches go through NanoGPT in the clear. Edit out anything that identifies the client."),
+      h("div", { class: "pactions" }, h("button", { type: "button", class: "small primary", onclick: () => answer(true) }, page ? "Fetch" : "Research"),
+        h("button", { type: "button", class: "small", onclick: () => answer(false) }, "Skip")));
+  } else {
+    el.append(h("div", { class: "pcmd" }, page ? rec.url : rec.brief), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null);
+  }
+  if (rec.steps?.length) {
+    el.append(h("ol", { class: "rsteps small" }, rec.steps.map((st) => h("li", { class: `r-${st.status}` },
+      st.kind === "search" ? `🔎 ${st.query}${st.status === "done" ? ` → ${st.count} result${st.count === 1 ? "" : "s"}` : st.status === "failed" ? ` ✕ ${st.error}` : " …"}`
+      : st.kind === "check" ? (st.status !== "done" ? "🛡 Checking the page for text aimed at an AI …"
+        : st.unreadable ? "🛡 Page check: no readable verdict" : st.flagged ? `🛡 Page check: ${st.flagged} passage(s) flagged, ${st.removed} removed` : "🛡 Page check: clean")
+      : st.status === "done" ? h("span", {}, "📄 ", ...st.pages.map((pg, i) => h("span", {}, i ? ", " : "",
+          h("a", { href: pg.url, target: "_blank", rel: "noopener noreferrer", class: "surl" }, pg.url),
+          pg.ok ? (pg.stealth ? " (stealth)" : "") : ` ✕ ${pg.error}`)))
+      : st.status === "failed" ? `📄 ${st.urls.join(", ")} ✕ ${st.error}` : `📄 ${st.urls.join(", ")} …`))));
+  }
+  if (rec.report) {
+    el.append(h("details", {}, h("summary", {}, rec.status === "cached" ? `Report (from ${new Date(rec.cached_at * 1000).toLocaleDateString()})` : "Report"),
+      h("div", { class: "rreport body", html: md(rec.report) })));
   }
   return el;
 }
@@ -636,7 +699,7 @@ function scheduleStreamRender() {
 // reply is complete it says so and lists what is waiting for the technician.
 const TOOL_PHASE = { propose_commands: "Preparing commands", update_hypotheses: "Updating hypotheses",
   ask_technician: "Writing questions", run_recipe: "Queuing a recipe", revise_queue: "Revising the queue",
-  web_search: "Searching the web", describe_image: "Vision helper is reading the image (this adds a step)" };
+  web_search: "Searching the web", research: "Research agent is reading the documentation", describe_image: "Vision helper is reading the image (this adds a step)" };
 
 function clock(secs) { return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; }
 
@@ -649,6 +712,16 @@ function renderStatus() {
     if ((st.searches || []).some((r) => r.status === "awaiting")) {
       bar.className = "waiting";
       text.textContent = `Waiting for you: approve or skip the web search in the AI's message  ·  ${clock(total)}`;
+      return;
+    }
+    if ((st.research || []).some((r) => r.status === "awaiting")) {
+      bar.className = "waiting";
+      text.textContent = `Waiting for you: approve or skip the research in the AI's message  ·  ${clock(total)}`;
+      return;
+    }
+    if ((st.research || []).some((r) => r.status === "running")) {
+      bar.className = "busy";
+      text.textContent = `AI is responding: ${TOOL_PHASE.research}…  ·  ${clock(total)}`;
       return;
     }
     let msg = { waiting: "Waiting for the model", reasoning: "Thinking", writing: "Writing",
@@ -2508,6 +2581,10 @@ function openSettings(tab = "providers") {
       note: "The vision helper describes each image for a chat model that can't read images. Only models that read images are listed.",
       onSaved: () => setTimeout(() => show("model"), 300) });
     const v = visionState();
+    const promptCache = h("select", {
+      onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { prompt_cache: e.target.value }); toast("Saved.", "ok", 2000); }) },
+      [["1h", "On, kept for 1 hour"], ["5m", "On, kept for 5 minutes"], ["off", "Off"]]
+        .map(([val, l]) => h("option", { value: val, selected: val === (S.state.config.settings.prompt_cache || "1h") }, l)));
     const autoReview = h("select", { disabled: !S.state.config.settings.review_model,
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { auto_review: e.target.value }); toast("Saved.", "ok", 2000); }) },
       [["off", "Off"], ["disruptive", "Disruptive commands"], ["flagged", "Everything flagged (modifying, disruptive or sensitive)"]]
@@ -2526,12 +2603,19 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" }, field("Frequency penalty", f.frequency_penalty), field("Presence penalty", f.presence_penalty), field("Seed", f.seed)),
       h("div", { class: "row" }, h("span", { class: "spacer" }),
         h("button", { type: "button", onclick: () => { for (const [k, el] of Object.entries(f)) el.value = { temperature: 0.3, reasoning_effort: "low" }[k] ?? ""; } }, "Reset to defaults")),
+      field("Prompt caching", promptCache, "For Claude models through NanoGPT (Open cases): each request reuses the conversation the previous one sent, at a tenth of the input price. Writing the cache costs extra (1.25× for 5 minutes, 2× for 1 hour), so 1 hour suits the minutes spent running commands between replies. Other models cache automatically where their provider does."),
       h("h3", {}, "Images"),
       h("div", { class: `vision-now ${v.mode}` }, v.mode === "native" ? `The current model (${v.model}) reads images directly.`
         : v.mode === "helper" ? `The current model (${v.model}) can't read images; ${v.helper} describes them for it.`
         : `Image features are off: ${v.why}`),
       helperAttestation(),
       field("Vision helper", helper, "Used only when the chat model can't read images: it describes each image once (text exactly, then the rest), and the chat model gets the description. That adds a request per image, so replies with images take longer. It must be allowed by the case's sensitivity. With no helper, image features are disabled for text-only models."),
+      h("h3", {}, "Research agent"),
+      field("Research model", modelSetting({ key: "research_model", value: S.state.config.settings.research_model || "",
+        noneLabel: "Automatic (Claude Sonnet 5.5 on the search provider)", pickTitle: "Choose the research model",
+        note: "The research agent searches the web and reads pages for the chat model, then reports with quotes and sources. It needs tool calling and a long context; a fast model suits it.",
+        onSaved: () => setTimeout(() => show("model"), 300) }),
+        "It reads only the AI's brief, never the case, and is gated like web search (Settings → General): Sovereign cases never research and Confidential cases always ask. Its searches and page fetches are paid with the search provider's NanoGPT key; pages that block the normal fetch are retried in stealth mode (5× the price)."),
       h("h3", {}, "Second opinion"),
       field("Reviewer model", modelSetting({ key: "review_model", value: S.state.config.settings.review_model || "",
         noneLabel: "Clear (use the chat model)", pickTitle: "Choose the second-opinion reviewer",
@@ -2577,10 +2661,10 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, "Takes effect the next time DAToolkit starts. Without WebKitGTK it uses the browser anyway and says what to install. From a terminal, --browser or --window overrides this for one run."),
       h("h3", {}, "Web search"),
       h("div", { class: "row" },
-        h("label", { class: "field" }, h("span", {}, "AI web searches"), search.search_mode),
+        h("label", { class: "field" }, h("span", {}, "AI web searches and research"), search.search_mode),
         h("label", { class: "field" }, h("span", {}, "Search provider"), search.search_provider),
         h("label", { class: "field" }, h("span", {}, "Paid with the key of"), search.search_via)),
-      h("div", { class: "muted small" }, "Searches go through NanoGPT to the provider in the clear, whatever the chat model's tier, and are billed to that NanoGPT key. Sovereign cases never search; Confidential cases always ask. Each query is redacted first and you can edit it before it runs."),
+      h("div", { class: "muted small" }, "Searches go through NanoGPT to the provider in the clear, whatever the chat model's tier, and are billed to that NanoGPT key. Sovereign cases never search; Confidential cases always ask. Each query is redacted first and you can edit it before it runs. The same setting gates the research agent (its brief, searches and page fetches); see Settings → Model."),
       h("div", { class: "row" }, testQ, h("button", { type: "button", onclick: () => guarded(async () => {
         testOut.textContent = "Searching…";
         await api("POST", "/api/settings", Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])));
