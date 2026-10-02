@@ -1524,8 +1524,9 @@ class Engine:
 
     async def _run_search(self, query: str) -> dict:
         """{"results", "provider", "cost", "note"}. When the chosen provider fails on NanoGPT's
-        side (a 5xx: Perplexity returned 504 for every query in October 2026) or is refused under
-        Zero Data Retention, which only Linkup is allowed under, search again with Linkup and say so."""
+        side (a 5xx: Perplexity returned 504 for every query on 2026-10-02), search again with
+        Valyu; when it is refused under Zero Data Retention, which only Linkup is allowed under,
+        with Linkup. The card says which ran."""
         prov = self._search_provider()
         if not prov:
             raise UserError("Web search needs a NanoGPT provider.")
@@ -1538,14 +1539,15 @@ class Engine:
             out["note"] = ""
         except websearch.SearchError as e:
             zdr = e.code == "zero_data_retention"
-            if want == websearch.FALLBACK or not (zdr or e.status >= 500):
+            other = websearch.ZDR_FALLBACK if zdr else websearch.FALLBACK
+            if want == other or not (zdr or e.status >= 500):
                 raise UserError(str(e)) from e
             try:
-                out = await websearch.web_search(prov.base_url, key, query, websearch.FALLBACK, http=self._search_http)
+                out = await websearch.web_search(prov.base_url, key, query, other, http=self._search_http)
             except websearch.SearchError as e2:
                 raise UserError(f"{e}; {e2}") from e2
-            out["note"] = (f"{want} is not allowed while Zero Data Retention is on for this NanoGPT account; used linkup"
-                           if zdr else f"{want} failed ({str(e).split('(', 1)[-1].rstrip(')')[:120]}); used linkup")
+            out["note"] = (f"{want} is not allowed while Zero Data Retention is on for this NanoGPT account; used {other}"
+                           if zdr else f"{want} failed ({str(e).split('(', 1)[-1].rstrip(')')[:120]}); used {other}")
         return out
 
     async def test_search(self, query: str) -> dict:

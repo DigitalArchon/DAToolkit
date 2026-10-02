@@ -2645,10 +2645,11 @@ function openSettings(tab = "providers") {
     const nanos = S.state.config.providers.filter((p) => /(^|\.)nano-gpt\.com$/.test((() => { try { return new URL(p.base_url).hostname; } catch { return ""; } })()));
     const search = {
       search_mode: sel(s.search_mode || "ask", [["ask", "Ask me before each search"], ["auto", "Search without asking (Open cases only)"], ["off", "Off"]]),
-      search_provider: sel(s.search_provider || "linkup", [["linkup", "linkup: long snippets, $0.006 (recommended)"],
-        ["sofya", "sofya: page extracts, $0.005"], ["firecrawl", "firecrawl: whole pages, $0.0105"], ["tavily", "tavily: $0.01"],
-        ["valyu", "valyu: $0.015"], ["brave", "brave: short snippets, $0.005"], ["kagi", "kagi: short snippets, $0.025"],
-        ["exa", "exa: titles only, $0.005"], ["perplexity", "perplexity: was failing on NanoGPT (Oct 2026)"]]),
+      search_provider: sel(s.search_provider || "perplexity", [["perplexity", "perplexity: best sources, $0.005 (recommended)"],
+        ["valyu", "valyu: clean prose, $0.015 (the fallback)"], ["tavily", "tavily: thin snippets, $0.01"],
+        ["kagi", "kagi: good links, little text, $0.025"], ["linkup", "linkup: long text, may drift language, $0.006"],
+        ["brave", "brave: short snippets, $0.005"], ["sofya", "sofya: page extracts, $0.005"],
+        ["firecrawl", "firecrawl: whole pages, $0.0105"], ["exa", "exa: titles only, $0.005"]]),
       search_via: sel(s.search_via || "", [["", nanos.length ? `First NanoGPT provider (${nanos[0].name})` : "No NanoGPT provider configured"], ...nanos.map((p) => [p.name, p.name])]),
     };
     const uiMode = sel(s.ui_mode || "window", [["window", "The app window (needs WebKitGTK)"], ["browser", "My default web browser"]]);

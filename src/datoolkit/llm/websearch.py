@@ -12,12 +12,15 @@ from urllib.parse import urlsplit
 
 import httpx
 
-# linkup first: cheap, long snippets, and allowed under Zero Data Retention. Measured 2026-10-02 on one
-# query: linkup 20 results ~1.8k chars each $0.006; sofya ~2.8k chars (page extracts) $0.005; firecrawl
-# whole pages $0.0105; tavily/valyu ~1k chars; brave ~370; kagi ~210 chars $0.025; exa titles only;
-# perplexity failed (504) on every query
-PROVIDERS = ("linkup", "sofya", "firecrawl", "tavily", "valyu", "brave", "kagi", "exa", "perplexity")
-FALLBACK = "linkup"
+# Best first, from DA-Assistant's measurement (2026-09-21: three queries, eight results each, scored
+# by primary sources): perplexity 10/16 with ~1,300 clean characters per result; valyu 5/16, clean
+# prose; tavily 4/16, thin; kagi good links but ~150-210 characters of text, and the dearest at $0.025;
+# linkup 2/16 and drifts language (an English Windows question got Vietnamese, Russian and Danish
+# pages); brave leaves HTML in; sofya returned raw HTML then (clean extracts by 2026-10-02); exa
+# returns titles only. Firecrawl (whole pages, $0.0105) wasn't in that test.
+PROVIDERS = ("perplexity", "valyu", "tavily", "kagi", "linkup", "brave", "sofya", "firecrawl", "exa")
+FALLBACK = "valyu"         # when the chosen provider fails on NanoGPT's side (5xx)
+ZDR_FALLBACK = "linkup"    # the only provider allowed under Zero Data Retention
 MODES = ("ask", "auto", "off")
 TIMEOUT = 60
 
@@ -43,7 +46,7 @@ def search_url(base_url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}/api/web"
 
 
-async def web_search(base_url: str, api_key: str, query: str, provider: str = "linkup",
+async def web_search(base_url: str, api_key: str, query: str, provider: str = "perplexity",
                      http: httpx.AsyncClient | None = None) -> dict:
     """{"results": [...], "provider": str, "cost": float | None}"""
     body = {"query": query, "provider": provider, "outputType": "searchResults"}

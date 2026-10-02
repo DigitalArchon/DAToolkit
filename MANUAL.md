@@ -62,18 +62,19 @@ the system's own; in the browser they're the browser's.
   knows what is still pending and what has run but not been sent.
 - If a model replies with commands but no message (thinking models sometimes go straight from
   reasoning to tool calls), DAToolkit asks it once for the message.
-- **Web search**: the AI can search the web through NanoGPT (Linkup by default; Sofya,
-  Firecrawl, Tavily, Valyu, Brave, Kagi, Exa or Perplexity in Settings → General) for
-  advisories, release notes and exact syntax. By default each query appears in the AI's message
-  for you to edit, approve or skip; "search without asking" applies to Open cases only,
-  Confidential cases always ask, and Sovereign cases never search, because queries reach the
-  search provider in the clear. Searches are billed to the NanoGPT key; each search card shows
-  its cost. Providers differ a lot in how much of each page they return (one test query,
-  October 2026): Linkup about 1,800 characters per result for $0.006; Sofya page extracts,
-  about 2,800, for $0.005; Firecrawl whole pages for $0.0105; Kagi about 200 for $0.025; Exa
-  titles only. When the chosen provider fails on NanoGPT's side (Perplexity returned an error
-  for every query then), or the account has Zero Data Retention required (which only Linkup is
-  allowed under), the search is made again with Linkup and the card says so.
+- **Web search**: the AI can search the web through NanoGPT (Perplexity by default; Valyu,
+  Tavily, Kagi, Linkup, Brave, Sofya, Firecrawl or Exa in Settings → General) for advisories,
+  release notes and exact syntax. By default each query appears in the AI's message for you to
+  edit, approve or skip; "search without asking" applies to Open cases only, Confidential cases
+  always ask, and Sovereign cases never search, because queries reach the search provider in
+  the clear. Searches are billed to the NanoGPT key; each search card shows its cost.
+  Providers differ a lot. Measured over three queries (September 2026), Perplexity found the
+  most primary sources with about 1,300 characters of clean text per result; Valyu came next;
+  Kagi finds good links but returns only a line of text per result, at $0.025 the dearest;
+  Linkup returns long text but drifted into other languages; Exa returns titles only. When the
+  chosen provider fails on NanoGPT's side (Perplexity was down in early October 2026), the
+  search is made again with Valyu; when the account has Zero Data Retention required, which
+  only Linkup is allowed under, with Linkup. The card says which ran.
 - **Research agent.** A search returns only snippets; when the AI needs the documentation
   actually read, it hands a brief (product, exact version, what it needs, what you see) to a
   research agent, a second model (Claude Sonnet 5.5 by default, Settings → Model). The agent

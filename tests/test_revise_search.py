@@ -151,7 +151,7 @@ async def test_search_waits_for_approval_and_can_be_edited(search):
 
     assert fs.calls[0]["url"] == "https://nano-gpt.com/api/web"
     assert fs.calls[0]["auth"] == "Bearer sk-nano"
-    assert fs.calls[0]["body"] == {"query": "OPNsense 25.1 OpenVPN renegotiation", "provider": "linkup", "outputType": "searchResults"}
+    assert fs.calls[0]["body"] == {"query": "OPNsense 25.1 OpenVPN renegotiation", "provider": "perplexity", "outputType": "searchResults"}
     tool_reply = [m for m in fake.requests[1]["messages"] if m["role"] == "tool"][-1]["content"]
     assert "OPNsense 25.1 advisory" in tool_reply and "Untrusted" in tool_reply and "edited your query" in tool_reply
     rec = engine.chat[-1]["searches"][0]
@@ -265,7 +265,7 @@ async def test_zero_data_retention_falls_back_to_linkup(search):
     assert r["results"][0]["title"] == "It's fixed" and r["results"][0]["snippet"] == "a & b"
 
 
-async def test_a_provider_failing_on_nanogpts_side_falls_back_to_linkup(search):
+async def test_a_provider_failing_on_nanogpts_side_falls_back_to_valyu(search):
     engine, fake, _, fs = search
     engine.cfg.settings.search_provider = "perplexity"
 
@@ -278,8 +278,8 @@ async def test_a_provider_failing_on_nanogpts_side_falls_back_to_linkup(search):
                                          "metadata": {"cost": 0.006}})
     engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     r = await engine.test_search("q")
-    assert fs.calls == ["perplexity", "linkup"] and r["provider"] == "linkup" and r["count"] == 1
-    assert r["note"].startswith("perplexity failed (504") and r["note"].endswith("used linkup")
+    assert fs.calls == ["perplexity", "valyu"] and r["provider"] == "valyu" and r["count"] == 1
+    assert r["note"].startswith("perplexity failed (504") and r["note"].endswith("used valyu")
     # a request error (4xx other than Zero Data Retention) is not retried elsewhere
     fs.calls.clear()
     engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(
