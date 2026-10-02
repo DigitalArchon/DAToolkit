@@ -68,7 +68,7 @@ class Settings:
     auto_review: str = "off"
     # AI web searches through NanoGPT: "ask" (approve each), "auto" (Open cases only), "off"
     search_mode: str = "ask"
-    search_provider: str = "kagi"
+    search_provider: str = "linkup"
     # name of the NanoGPT provider whose key pays for searches; empty = the first NanoGPT one
     search_via: str = ""
     # "provider|model" of the research agent (research tool); empty = Claude Sonnet 5.5 on the

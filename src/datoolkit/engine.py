@@ -1523,8 +1523,9 @@ class Engine:
         return {"mode": mode, "why": "", "provider": self.cfg.settings.search_provider, "via": prov.name}
 
     async def _run_search(self, query: str) -> dict:
-        """{"results", "provider", "cost", "note"}. An account with Zero Data Retention required
-        rejects most providers; Linkup is compatible, so fall back to it and say so."""
+        """{"results", "provider", "cost", "note"}. When the chosen provider fails on NanoGPT's
+        side (a 5xx: Perplexity returned 504 for every query in October 2026) or is refused under
+        Zero Data Retention, which only Linkup is allowed under, search again with Linkup and say so."""
         prov = self._search_provider()
         if not prov:
             raise UserError("Web search needs a NanoGPT provider.")
@@ -1536,13 +1537,15 @@ class Engine:
             out = await websearch.web_search(prov.base_url, key, query, want, http=self._search_http)
             out["note"] = ""
         except websearch.SearchError as e:
-            if e.code != "zero_data_retention" or want == "linkup":
+            zdr = e.code == "zero_data_retention"
+            if want == websearch.FALLBACK or not (zdr or e.status >= 500):
                 raise UserError(str(e)) from e
             try:
-                out = await websearch.web_search(prov.base_url, key, query, "linkup", http=self._search_http)
+                out = await websearch.web_search(prov.base_url, key, query, websearch.FALLBACK, http=self._search_http)
             except websearch.SearchError as e2:
-                raise UserError(str(e2)) from e2
-            out["note"] = f"{want} is not allowed while Zero Data Retention is on for this NanoGPT account; used linkup"
+                raise UserError(f"{e}; {e2}") from e2
+            out["note"] = (f"{want} is not allowed while Zero Data Retention is on for this NanoGPT account; used linkup"
+                           if zdr else f"{want} failed ({str(e).split('(', 1)[-1].rstrip(')')[:120]}); used linkup")
         return out
 
     async def test_search(self, query: str) -> dict:
@@ -2087,9 +2090,9 @@ class Engine:
         queue, hypotheses)."""
         seen = self._outputs_seen()
         roster = [{**s, "outputs_seen": seen.get(s["id"], 0)} for s in self.sessions.roster()]
-        families = {recipes.os_family(s) for s in roster if not s.get("exited")} or {"linux", "windows"}
-        rs = [r for r in recipes.load_all() if r.os == "any" or r.os in families]
-        static = prompts.build_static(self.case.name, self.case.notes, recipes=recipes.roster_text(rs),
+        # every recipe, whatever is open: each line names its OS, and a list that followed the open
+        # sessions changed the system prompt (and lost the whole cached conversation) when one opened
+        static = prompts.build_static(self.case.name, self.case.notes, recipes=recipes.roster_text(recipes.load_all()),
                                       runbooks=self._runbooks, search=self.search_status()["mode"])
         return static, prompts.build_state(roster, self.hypotheses, self.queue.to_list())
 

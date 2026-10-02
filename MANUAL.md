@@ -62,15 +62,18 @@ the system's own; in the browser they're the browser's.
   knows what is still pending and what has run but not been sent.
 - If a model replies with commands but no message (thinking models sometimes go straight from
   reasoning to tool calls), DAToolkit asks it once for the message.
-- **Web search**: the AI can search the web through NanoGPT (Kagi by default; Perplexity,
-  Linkup, Tavily, Exa, Brave or Valyu in Settings → General) for advisories, release notes
-  and exact syntax. By default each query appears in the AI's message for you to edit,
-  approve or skip; "search without asking" applies to Open cases only, Confidential cases
-  always ask, and Sovereign cases never search, because queries reach the search provider in
-  the clear. Searches are billed to the NanoGPT key (at the time of writing Kagi $0.025,
-  Perplexity $0.005, Linkup $0.006 per search; each search card shows its cost). If the
-  account has Zero Data Retention required, NanoGPT only allows Linkup, so DAToolkit falls
-  back to it and says so on the card.
+- **Web search**: the AI can search the web through NanoGPT (Linkup by default; Sofya,
+  Firecrawl, Tavily, Valyu, Brave, Kagi, Exa or Perplexity in Settings → General) for
+  advisories, release notes and exact syntax. By default each query appears in the AI's message
+  for you to edit, approve or skip; "search without asking" applies to Open cases only,
+  Confidential cases always ask, and Sovereign cases never search, because queries reach the
+  search provider in the clear. Searches are billed to the NanoGPT key; each search card shows
+  its cost. Providers differ a lot in how much of each page they return (one test query,
+  October 2026): Linkup about 1,800 characters per result for $0.006; Sofya page extracts,
+  about 2,800, for $0.005; Firecrawl whole pages for $0.0105; Kagi about 200 for $0.025; Exa
+  titles only. When the chosen provider fails on NanoGPT's side (Perplexity returned an error
+  for every query then), or the account has Zero Data Retention required (which only Linkup is
+  allowed under), the search is made again with Linkup and the card says so.
 - **Research agent.** A search returns only snippets; when the AI needs the documentation
   actually read, it hands a brief (product, exact version, what it needs, what you see) to a
   research agent, a second model (Claude Sonnet 5.5 by default, Settings → Model). The agent
@@ -377,6 +380,12 @@ hypotheses) is sent after the conversation instead of in the system prompt; the 
 shows it as "Current state". The context figure above the chat shows how much of the last
 request came from the cache. Other models cache automatically where their provider does; the
 research agent and write-ups don't cache.
+
+Within one reply, Claude Opus 5.5 through NanoGPT caches only up to your latest message: search
+results and research reports the AI receives while it works are paid at the full input price
+in each further step of that reply, then cached with your next message. (Sonnet caches them at
+once.) The recipe list in the system prompt is always the full one, so opening a session
+doesn't throw the cached conversation away.
 
 ## Model tiers and end-to-end encryption
 

@@ -56,6 +56,12 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// Element.append writes null as the text "null"; this skips empty children, as h() does.
+function add(el, ...children) {
+  for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c);
+  return el;
+}
+
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
@@ -535,12 +541,12 @@ function searchCard(rec) {
     const q = h("input", { type: "text", value: rec.query, spellcheck: "false" });
     const answer = (approve) => guarded(async () => { await api("POST", `/api/web-search/${rec.id}`, { approve, query: q.value }); });
     q.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); answer(true); } });
-    el.append(q, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
+    add(el, q, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
       h("div", { class: "muted small" }, "The query goes to the search provider through NanoGPT, in the clear. Edit out anything that identifies the client."),
       h("div", { class: "pactions" }, h("button", { type: "button", class: "small primary", onclick: () => answer(true) }, "Search"),
         h("button", { type: "button", class: "small", onclick: () => answer(false) }, "Skip")));
   } else {
-    el.append(h("div", { class: "pcmd" }, rec.query), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
+    add(el, h("div", { class: "pcmd" }, rec.query), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
       rec.note ? h("div", { class: "small warn" }, rec.note) : null);
   }
   if (rec.status === "done" && rec.results.length) {
@@ -572,7 +578,7 @@ function researchCard(rec) {
     const input = page ? h("input", { type: "text", value: rec.url, spellcheck: "false" })
       : h("textarea", { rows: 4, spellcheck: "false" }, rec.brief);
     const answer = (approve) => guarded(async () => { await api("POST", `/api/research/${rec.id}`, { approve, text: input.value }); });
-    el.append(input, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
+    add(el, input, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
       h("div", { class: "muted small" }, page
         ? (rec.unknown_url ? "This URL didn't come from a search result, a report or you, so it is always asked about: a URL can carry data out. " : "")
           + "The page is fetched through NanoGPT's scraper, then the research model checks it for text aimed at an AI before the chat model gets it whole."
@@ -580,11 +586,11 @@ function researchCard(rec) {
       h("div", { class: "pactions" }, h("button", { type: "button", class: "small primary", onclick: () => answer(true) }, page ? "Fetch" : "Research"),
         h("button", { type: "button", class: "small", onclick: () => answer(false) }, "Skip")));
   } else {
-    el.append(h("div", { class: "pcmd" }, page ? rec.url : rec.brief), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null);
+    add(el, h("div", { class: "pcmd" }, page ? rec.url : rec.brief), rec.reason ? h("div", { class: "muted small" }, rec.reason) : null);
   }
   if (rec.steps?.length) {
     el.append(h("ol", { class: "rsteps small" }, rec.steps.map((st) => h("li", { class: `r-${st.status}` },
-      st.kind === "search" ? `🔎 ${st.query}${st.status === "done" ? ` → ${st.count} result${st.count === 1 ? "" : "s"}` : st.status === "failed" ? ` ✕ ${st.error}` : " …"}`
+      st.kind === "search" ? `🔎 ${st.query}${st.status === "done" ? ` → ${st.count} result${st.count === 1 ? "" : "s"}${st.note ? ` (${st.note})` : ""}` : st.status === "failed" ? ` ✕ ${st.error}` : " …"}`
       : st.kind === "check" ? (st.status !== "done" ? "🛡 Checking the page for text aimed at an AI …"
         : st.unreadable ? "🛡 Page check: no readable verdict" : st.flagged ? `🛡 Page check: ${st.flagged} passage(s) flagged, ${st.removed} removed` : "🛡 Page check: clean")
       : st.status === "done" ? h("span", {}, "📄 ", ...st.pages.map((pg, i) => h("span", {}, i ? ", " : "",
@@ -2639,7 +2645,10 @@ function openSettings(tab = "providers") {
     const nanos = S.state.config.providers.filter((p) => /(^|\.)nano-gpt\.com$/.test((() => { try { return new URL(p.base_url).hostname; } catch { return ""; } })()));
     const search = {
       search_mode: sel(s.search_mode || "ask", [["ask", "Ask me before each search"], ["auto", "Search without asking (Open cases only)"], ["off", "Off"]]),
-      search_provider: sel(s.search_provider || "kagi", ["kagi", "perplexity", "linkup", "tavily", "exa", "brave", "valyu"].map((x) => [x, x])),
+      search_provider: sel(s.search_provider || "linkup", [["linkup", "linkup: long snippets, $0.006 (recommended)"],
+        ["sofya", "sofya: page extracts, $0.005"], ["firecrawl", "firecrawl: whole pages, $0.0105"], ["tavily", "tavily: $0.01"],
+        ["valyu", "valyu: $0.015"], ["brave", "brave: short snippets, $0.005"], ["kagi", "kagi: short snippets, $0.025"],
+        ["exa", "exa: titles only, $0.005"], ["perplexity", "perplexity: was failing on NanoGPT (Oct 2026)"]]),
       search_via: sel(s.search_via || "", [["", nanos.length ? `First NanoGPT provider (${nanos[0].name})` : "No NanoGPT provider configured"], ...nanos.map((p) => [p.name, p.name])]),
     };
     const uiMode = sel(s.ui_mode || "window", [["window", "The app window (needs WebKitGTK)"], ["browser", "My default web browser"]]);

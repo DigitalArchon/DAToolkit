@@ -405,3 +405,12 @@ async def test_automatic_research_model_and_settings(rs):
     assert engine.cfg.settings.research_model == "Fake|anthropic/claude-sonnet-5.5"
     with pytest.raises(UserError):
         engine.save_settings({"research_model": "Nope|x"})
+
+
+async def test_opening_a_session_leaves_the_cached_system_prompt_alone(env):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("c", "open")
+    before, _ = engine._prompt_parts()
+    engine.open_session("local")
+    after, state = engine._prompt_parts()
+    assert before == after and "disk-usage-windows" in after and "local" in state

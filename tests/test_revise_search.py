@@ -151,7 +151,7 @@ async def test_search_waits_for_approval_and_can_be_edited(search):
 
     assert fs.calls[0]["url"] == "https://nano-gpt.com/api/web"
     assert fs.calls[0]["auth"] == "Bearer sk-nano"
-    assert fs.calls[0]["body"] == {"query": "OPNsense 25.1 OpenVPN renegotiation", "provider": "kagi", "outputType": "searchResults"}
+    assert fs.calls[0]["body"] == {"query": "OPNsense 25.1 OpenVPN renegotiation", "provider": "linkup", "outputType": "searchResults"}
     tool_reply = [m for m in fake.requests[1]["messages"] if m["role"] == "tool"][-1]["content"]
     assert "OPNsense 25.1 advisory" in tool_reply and "Untrusted" in tool_reply and "edited your query" in tool_reply
     rec = engine.chat[-1]["searches"][0]
@@ -258,7 +258,38 @@ async def test_zero_data_retention_falls_back_to_linkup(search):
         return httpx.Response(200, json={"data": [{"title": "It&#x27;s fixed", "url": "https://x.example", "content": "a &amp; b"}],
                                          "metadata": {"cost": 0.006}})
     engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    engine.cfg.settings.search_provider = "kagi"
     r = await engine.test_search("q")
     assert [c["provider"] for c in fs.calls] == ["kagi", "linkup"]
     assert r["provider"] == "linkup" and r["cost"] == 0.006 and "Zero Data Retention" in r["note"]
     assert r["results"][0]["title"] == "It's fixed" and r["results"][0]["snippet"] == "a & b"
+
+
+async def test_a_provider_failing_on_nanogpts_side_falls_back_to_linkup(search):
+    engine, fake, _, fs = search
+    engine.cfg.settings.search_provider = "perplexity"
+
+    def handler(request):
+        body = json.loads(request.content)
+        fs.calls.append(body["provider"])
+        if body["provider"] == "perplexity":
+            return httpx.Response(504, json={"error": "Search returned no usable results."})
+        return httpx.Response(200, json={"data": [{"title": "T", "url": "https://x.example", "content": "c"}],
+                                         "metadata": {"cost": 0.006}})
+    engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    r = await engine.test_search("q")
+    assert fs.calls == ["perplexity", "linkup"] and r["provider"] == "linkup" and r["count"] == 1
+    assert r["note"].startswith("perplexity failed (504") and r["note"].endswith("used linkup")
+    # a request error (4xx other than Zero Data Retention) is not retried elsewhere
+    fs.calls.clear()
+    engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: (fs.calls.append(1), httpx.Response(402, json={"error": "Insufficient balance"}))[1]))
+    with pytest.raises(UserError, match="insufficient NanoGPT balance"):
+        await engine.test_search("q")
+    assert fs.calls == [1]
+
+
+def test_snippets_are_cut_at_the_given_length():
+    long = [{"title": "T", "url": "https://x", "snippet": "a" * 3000, "date": ""}]
+    assert websearch.format_for_model("q", "p", long).count("a") < 1300
+    assert websearch.format_for_model("q", "p", long, snippet_chars=2500).count("a") >= 2500
