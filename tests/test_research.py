@@ -11,7 +11,7 @@ from datoolkit import creds
 from datoolkit.config import Provider
 from datoolkit.engine import UserError
 from datoolkit.export import full_transcript
-from datoolkit.llm import prompts, research
+from datoolkit.llm import prompts, research, websearch
 from datoolkit.llm.client import ToolCall, TurnResult, _split_params
 
 from test_engine import env, sse, wait_turn  # noqa: F401
@@ -218,7 +218,8 @@ async def test_agent_only_fetches_what_it_was_shown_and_reports_when_out_of_roun
         seen.append((list(messages), tools))
         return replies.pop(0)
 
-    async def search(q):
+    async def search(q, use="answer"):
+        assert use == "answer"
         return {"results": [{"title": "t", "url": DOC, "snippet": "s", "date": ""}], "provider": "kagi", "cost": 0.01}
 
     steps = []
@@ -414,3 +415,59 @@ async def test_opening_a_session_leaves_the_cached_system_prompt_alone(env):  # 
     engine.open_session("local")
     after, state = engine._prompt_parts()
     assert before == after and "disk-usage-windows" in after and "local" in state
+
+
+# ---------------------------------------------------------------- what a search is for
+
+async def test_the_agent_finds_links_with_kagi_and_answers_with_perplexity(rs):
+    engine, fake, _, web = rs
+    engine.cfg.settings.search_mode = "auto"
+    setup(engine)
+    fake.responses += [research_call(),
+                       multi_tool_stream([("web_search", {"query": "Sophos 21 DHCP relay", "mode": "links"}),
+                                          ("web_search", {"query": "how to set a DHCP relay on Sophos 21"})], text=""),
+                       say("## Answer\nNetwork > DHCP > Relay."), say("Done.")]
+    engine.send("x")
+    await wait_turn(engine)
+    searches = [b for path, b in web.calls if path == "/api/web"]
+    assert [(b["provider"], b.get("kagiSource")) for b in searches] == [("kagi", "search"), ("perplexity", None)]
+    steps = engine.chat[-1]["research"][0]["steps"]
+    assert [(s["mode"], s["provider"]) for s in steps] == [("links", "kagi"), ("answer", "perplexity")]
+    assert "mode" in json.dumps(research.AGENT_TOOLS) and '"links"' in research.RESEARCH_PROMPT
+
+
+async def test_confidential_cases_search_only_with_linkup_and_never_fall_back(env):  # noqa: F811
+    engine, _, _ = env
+    nano(engine)
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body["provider"])
+        return httpx.Response(504, json={"error": "Search returned no usable results."})
+    engine._search_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    engine.new_case("conf", "confidential")
+    assert engine.search_status()["provider"] == "linkup" and engine.search_status()["private"] is True
+    with pytest.raises(UserError, match="504"):
+        await engine._run_search("q", "links")
+    assert calls == ["linkup"]                       # not kagi, and no fallback to valyu
+
+    engine.new_case("open", "open")
+    calls.clear()
+    with pytest.raises(UserError):
+        await engine._run_search("q", "links")
+    assert calls == ["kagi", "valyu"]                # the link finder, then the fallback
+
+
+def test_the_chat_model_gets_longer_snippets():
+    long = [{"title": f"T{i}", "url": f"https://x/{i}", "snippet": "a" * 3000, "date": ""} for i in range(5)]
+    text = websearch.format_for_model("q", "perplexity", long)
+    assert text.count("a" * 2000) == 5 and "truncated" not in text
+
+
+async def test_settings_validate_the_link_provider(env):  # noqa: F811
+    engine, _, _ = env
+    engine.save_settings({"search_links_provider": "brave"})
+    assert engine.cfg.settings.search_links_provider == "brave"
+    with pytest.raises(UserError):
+        engine.save_settings({"search_links_provider": "google"})

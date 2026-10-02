@@ -590,7 +590,7 @@ function researchCard(rec) {
   }
   if (rec.steps?.length) {
     el.append(h("ol", { class: "rsteps small" }, rec.steps.map((st) => h("li", { class: `r-${st.status}` },
-      st.kind === "search" ? `🔎 ${st.query}${st.status === "done" ? ` → ${st.count} result${st.count === 1 ? "" : "s"}${st.note ? ` (${st.note})` : ""}` : st.status === "failed" ? ` ✕ ${st.error}` : " …"}`
+      st.kind === "search" ? `🔎 ${st.mode === "links" ? "links: " : ""}${st.query}${st.status === "done" ? ` → ${st.count} result${st.count === 1 ? "" : "s"} (${st.note || st.provider})` : st.status === "failed" ? ` ✕ ${st.error}` : " …"}`
       : st.kind === "check" ? (st.status !== "done" ? "🛡 Checking the page for text aimed at an AI …"
         : st.unreadable ? "🛡 Page check: no readable verdict" : st.flagged ? `🛡 Page check: ${st.flagged} passage(s) flagged, ${st.removed} removed` : "🛡 Page check: clean")
       : st.status === "done" ? h("span", {}, "📄 ", ...st.pages.map((pg, i) => h("span", {}, i ? ", " : "",
@@ -2650,6 +2650,9 @@ function openSettings(tab = "providers") {
         ["kagi", "kagi: good links, little text, $0.025"], ["linkup", "linkup: long text, may drift language, $0.006"],
         ["brave", "brave: short snippets, $0.005"], ["sofya", "sofya: page extracts, $0.005"],
         ["firecrawl", "firecrawl: whole pages, $0.0105"], ["exa", "exa: titles only, $0.005"]]),
+      search_links_provider: sel(s.search_links_provider || "kagi", [["kagi", "kagi: best links, $0.025 (recommended)"],
+        ["brave", "brave: fast links, $0.005"], ["perplexity", "perplexity"], ["valyu", "valyu"], ["tavily", "tavily"],
+        ["linkup", "linkup"], ["sofya", "sofya"], ["firecrawl", "firecrawl"], ["exa", "exa: titles only"]]),
       search_via: sel(s.search_via || "", [["", nanos.length ? `First NanoGPT provider (${nanos[0].name})` : "No NanoGPT provider configured"], ...nanos.map((p) => [p.name, p.name])]),
     };
     const uiMode = sel(s.ui_mode || "window", [["window", "The app window (needs WebKitGTK)"], ["browser", "My default web browser"]]);
@@ -2672,9 +2675,10 @@ function openSettings(tab = "providers") {
       h("h3", {}, "Web search"),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "AI web searches and research"), search.search_mode),
-        h("label", { class: "field" }, h("span", {}, "Search provider"), search.search_provider),
+        h("label", { class: "field" }, h("span", {}, "Search provider (answers)"), search.search_provider),
+        h("label", { class: "field" }, h("span", {}, "Link finder (research agent)"), search.search_links_provider),
         h("label", { class: "field" }, h("span", {}, "Paid with the key of"), search.search_via)),
-      h("div", { class: "muted small" }, "Searches go through NanoGPT to the provider in the clear, whatever the chat model's tier, and are billed to that NanoGPT key. Sovereign cases never search; Confidential cases always ask. Each query is redacted first and you can edit it before it runs. The same setting gates the research agent (its brief, searches and page fetches); see Settings → Model."),
+      h("div", { class: "muted small" }, "Searches go through NanoGPT to the provider in the clear, whatever the chat model's tier, and are billed to that NanoGPT key. Sovereign cases never search; Confidential cases always ask. Each query is redacted first and you can edit it before it runs. The same setting gates the research agent (its brief, searches and page fetches); see Settings → Model. The research agent searches with the answers provider when it wants a question answered with sources, and with the link finder when it wants the best pages to read itself. Confidential cases search only with Linkup (zero data retention), with no fallback; elsewhere a provider failing on NanoGPT's side falls back to Valyu."),
       h("div", { class: "row" }, testQ, h("button", { type: "button", onclick: () => guarded(async () => {
         testOut.textContent = "Searching…";
         await api("POST", "/api/settings", Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])));

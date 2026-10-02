@@ -69,6 +69,8 @@ class Settings:
     # AI web searches through NanoGPT: "ask" (approve each), "auto" (Open cases only), "off"
     search_mode: str = "ask"
     search_provider: str = "perplexity"
+    # the research agent's "links" searches: the best pages fast, which it then reads itself
+    search_links_provider: str = "kagi"
     # name of the NanoGPT provider whose key pays for searches; empty = the first NanoGPT one
     search_via: str = ""
     # "provider|model" of the research agent (research tool); empty = Claude Sonnet 5.5 on the

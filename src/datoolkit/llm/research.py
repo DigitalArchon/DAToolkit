@@ -213,8 +213,11 @@ You are a research agent for an IT diagnostic assistant that is helping a techni
 system. You get a brief: a product, a version and what the assistant needs to know. Find the \
 authoritative answer on the web and report back. You see only the brief, not the case.
 
-Tools: web_search returns results with short snippets. fetch_pages reads up to 5 pages at a \
-time as text. You can fetch only URLs that appeared in your search results or as links on \
+Tools: web_search has two modes. "answer" (the default) gets your question answered: a few \
+results, each with a substantial extract of the page, mostly from primary sources; often \
+enough on its own, or it shows you which page to read in full. "links" is fast and finds the \
+best pages with only a line of text each; use it when you already know you will read the \
+pages yourself. fetch_pages reads up to 5 pages at a time as text. You can fetch only URLs that appeared in your search results or as links on \
 pages you have read (GitHub file links also work as raw.githubusercontent.com).
 
 How to work:
@@ -261,9 +264,11 @@ suspect passage, copied exactly as it appears in the page>"]}"""
 AGENT_TOOLS = [
     {"type": "function", "function": {
         "name": "web_search",
-        "description": "Search the web. Returns titles, URLs and short snippets.",
+        "description": ("Search the web. mode \"answer\" (default): a few results with substantial, sourced "
+                        "extracts. mode \"links\": the best pages fast, a line of text each, to read with fetch_pages."),
         "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "Search query, like you would type into a search engine."}},
+            "query": {"type": "string", "description": "Search query, like you would type into a search engine."},
+            "mode": {"type": "string", "enum": ["answer", "links"]}},
             "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "fetch_pages",
@@ -364,11 +369,12 @@ async def _search(args: dict, out: Outcome, budget: Budget, allowed: Allowlist, 
         return "web_search needs a query."
     if out.searches >= budget.searches:
         return "Search budget used up. Read pages you have found, or write your report."
+    use = args.get("mode") if args.get("mode") in ("answer", "links") else "answer"
     out.searches += 1
-    rec = {"kind": "search", "query": query, "status": "running"}
+    rec = {"kind": "search", "query": query, "mode": use, "status": "running"}
     step(rec)
     try:
-        res = await search(query)
+        res = await search(query, use)
     except Exception as e:  # noqa: BLE001 - the agent can carry on without it
         rec.update(status="failed", error=str(e))
         step(rec)

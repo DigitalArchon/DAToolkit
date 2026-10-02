@@ -291,5 +291,5 @@ async def test_a_provider_failing_on_nanogpts_side_falls_back_to_valyu(search):
 
 def test_snippets_are_cut_at_the_given_length():
     long = [{"title": "T", "url": "https://x", "snippet": "a" * 3000, "date": ""}]
-    assert websearch.format_for_model("q", "p", long).count("a") < 1300
+    assert 2000 <= websearch.format_for_model("q", "p", long).count("a") < 2100
     assert websearch.format_for_model("q", "p", long, snippet_chars=2500).count("a") >= 2500

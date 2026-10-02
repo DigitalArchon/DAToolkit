@@ -683,6 +683,10 @@ class Engine:
             if data["search_provider"] not in websearch.PROVIDERS:
                 raise UserError(f"Search provider must be one of {', '.join(websearch.PROVIDERS)}.")
             s.search_provider = data["search_provider"]
+        if "search_links_provider" in data:
+            if data["search_links_provider"] not in websearch.PROVIDERS:
+                raise UserError(f"Link provider must be one of {', '.join(websearch.PROVIDERS)}.")
+            s.search_links_provider = data["search_links_provider"]
         if "search_via" in data:
             s.search_via = str(data["search_via"] or "").strip()
         if "prompt_cache" in data:
@@ -1517,30 +1521,36 @@ class Engine:
             return {"mode": "off", "why": "Web search needs a NanoGPT provider."}
         if self.case and self.case.sensitivity == "sovereign":
             return {"mode": "off", "why": "Sovereign case: search queries would leave the network."}
-        if self.case and self.case.sensitivity == "confidential" and mode == "auto":
+        private = bool(self.case and self.case.sensitivity == "confidential")
+        provider = websearch.PRIVATE if private else self.cfg.settings.search_provider
+        if private and mode == "auto":
             return {"mode": "ask", "why": "Confidential case: every search needs your approval.",
-                    "provider": self.cfg.settings.search_provider, "via": prov.name}
-        return {"mode": mode, "why": "", "provider": self.cfg.settings.search_provider, "via": prov.name}
+                    "provider": provider, "private": True, "via": prov.name}
+        return {"mode": mode, "why": "", "provider": provider, "private": private, "via": prov.name}
 
-    async def _run_search(self, query: str) -> dict:
-        """{"results", "provider", "cost", "note"}. When the chosen provider fails on NanoGPT's
-        side (a 5xx: Perplexity returned 504 for every query on 2026-10-02), search again with
-        Valyu; when it is refused under Zero Data Retention, which only Linkup is allowed under,
-        with Linkup. The card says which ran."""
+    async def _run_search(self, query: str, use: str = "answer") -> dict:
+        """{"results", "provider", "cost", "note"}. `use` is what the search is for (websearch.
+        MODES_OF_USE): "answer" goes to the search provider, "links" to the link provider.
+        A Confidential case searches only with Linkup (zero data retention) and never falls back.
+        Otherwise, when the provider fails on NanoGPT's side (a 5xx: Perplexity returned 504 for
+        every query on 2026-10-02), search again with Valyu; when it is refused under Zero Data
+        Retention, which only Linkup is allowed under, with Linkup. The card says which ran."""
         prov = self._search_provider()
         if not prov:
             raise UserError("Web search needs a NanoGPT provider.")
         key = self._get_secret_safe("provider", prov.name)
         if not key:
             raise UserError(f"No API key stored for {prov.name}.")
-        want = self.cfg.settings.search_provider
+        s = self.cfg.settings
+        private = bool(self.case and self.case.sensitivity == "confidential")
+        want = websearch.PRIVATE if private else s.search_links_provider if use == "links" else s.search_provider
         try:
             out = await websearch.web_search(prov.base_url, key, query, want, http=self._search_http)
-            out["note"] = ""
+            out["note"] = "Confidential case: searched with linkup (zero data retention)" if private else ""
         except websearch.SearchError as e:
             zdr = e.code == "zero_data_retention"
             other = websearch.ZDR_FALLBACK if zdr else websearch.FALLBACK
-            if want == other or not (zdr or e.status >= 500):
+            if private or want == other or not (zdr or e.status >= 500):
                 raise UserError(str(e)) from e
             try:
                 out = await websearch.web_search(prov.base_url, key, query, other, http=self._search_http)
@@ -1569,7 +1579,8 @@ class Engine:
             return f"Invalid web_search arguments ({e})."
         query, n_redacted = redact(str(args.get("query", "")).strip()[:300])
         rec = {"id": str(next(self._search_ids)), "query": query, "reason": str(args.get("reason", ""))[:300],
-               "provider": self.cfg.settings.search_provider, "status": "pending", "results": []}
+               "provider": self.search_status().get("provider", self.cfg.settings.search_provider), "status": "pending",
+               "results": []}
         entry.setdefault("searches", []).append(rec)
         status = self.search_status()
 
@@ -1834,8 +1845,8 @@ class Engine:
         if not key:
             raise UserError(f"No API key stored for {sprov.name}.")
 
-        async def search_(query: str) -> dict:
-            return await self._run_search(redact(query)[0])
+        async def search_(query: str, use: str = "answer") -> dict:
+            return await self._run_search(redact(query)[0], use)
 
         async def fetch_(urls: list[str]) -> dict:
             try:

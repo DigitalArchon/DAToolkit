@@ -71,14 +71,23 @@ the system's own; in the browser they're the browser's.
   Providers differ a lot. Measured over three queries (September 2026), Perplexity found the
   most primary sources with about 1,300 characters of clean text per result; Valyu came next;
   Kagi finds good links but returns only a line of text per result, at $0.025 the dearest;
-  Linkup returns long text but drifted into other languages; Exa returns titles only. When the
-  chosen provider fails on NanoGPT's side (Perplexity was down in early October 2026), the
-  search is made again with Valyu; when the account has Zero Data Retention required, which
-  only Linkup is allowed under, with Linkup. The card says which ran.
+  Linkup returns long text but drifted into other languages; Exa returns titles only. Perplexity's
+  results (tested again in October 2026 on eight support queries) were mostly the vendors' own
+  documentation, about 2,000 characters of clean steps, menu paths and CLI per result; the AI
+  gets up to 2,000 characters of each. When the chosen provider fails on NanoGPT's side
+  (Perplexity was down in early October 2026), the search is made again with Valyu; when the
+  account has Zero Data Retention required, which only Linkup is allowed under, with Linkup.
+  The card says which ran.
+- **Confidential cases search only with Linkup**, which keeps no data (zero data retention),
+  whatever provider is chosen, for the AI and the research agent alike, and never fall back to
+  another provider: if Linkup fails, the search fails.
 - **Research agent.** A search returns only snippets; when the AI needs the documentation
   actually read, it hands a brief (product, exact version, what it needs, what you see) to a
   research agent, a second model (Claude Sonnet 5.5 by default, Settings → Model). The agent
-  searches, reads the pages it finds through NanoGPT's scraper (vendor docs, release notes,
+  searches in one of two ways: for an answer (the search provider, Perplexity by default: a
+  few results with substantial sourced extracts), or for links (the link finder, Kagi by
+  default: the best pages fast, a line each, which it then reads itself); both are set in
+  Settings → General, and the research card marks link searches. It reads the pages it finds through NanoGPT's scraper (vendor docs, release notes,
   knowledge-base articles, GitHub files), and reports back with the steps quoted and the
   sources numbered. The AI is told to call it whenever it isn't sure of the exact steps:
   products it knows less well, a version that may differ from what it knows, when you say the
