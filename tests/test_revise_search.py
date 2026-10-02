@@ -151,7 +151,8 @@ async def test_search_waits_for_approval_and_can_be_edited(search):
 
     assert fs.calls[0]["url"] == "https://nano-gpt.com/api/web"
     assert fs.calls[0]["auth"] == "Bearer sk-nano"
-    assert fs.calls[0]["body"] == {"query": "OPNsense 25.1 OpenVPN renegotiation", "provider": "perplexity", "outputType": "searchResults"}
+    assert fs.calls[0]["body"] == {"query": "OPNsense 25.1 OpenVPN renegotiation", "provider": "perplexity", "outputType": "searchResults",
+                                   "excludeDomains": list(websearch.UNREADABLE)}
     tool_reply = [m for m in fake.requests[1]["messages"] if m["role"] == "tool"][-1]["content"]
     assert "OPNsense 25.1 advisory" in tool_reply and "Untrusted" in tool_reply and "edited your query" in tool_reply
     rec = engine.chat[-1]["searches"][0]

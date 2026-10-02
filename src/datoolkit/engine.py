@@ -1528,13 +1528,15 @@ class Engine:
                     "provider": provider, "private": True, "via": prov.name}
         return {"mode": mode, "why": "", "provider": provider, "private": private, "via": prov.name}
 
-    async def _run_search(self, query: str, use: str = "answer") -> dict:
+    async def _run_search(self, query: str, use: str = "answer", sites: list[str] | None = None,
+                          after: str = "", before: str = "") -> dict:
         """{"results", "provider", "cost", "note"}. `use` is what the search is for (websearch.
         MODES_OF_USE): "answer" goes to the search provider, "links" to the link provider.
         A Confidential case searches only with Linkup (zero data retention) and never falls back.
         Otherwise, when the provider fails on NanoGPT's side (a 5xx: Perplexity returned 504 for
         every query on 2026-10-02), search again with Valyu; when it is refused under Zero Data
-        Retention, which only Linkup is allowed under, with Linkup. The card says which ran."""
+        Retention, which only Linkup is allowed under, with Linkup. The card says which ran.
+        `sites`, `after` and `before` narrow the search (websearch.web_search)."""
         prov = self._search_provider()
         if not prov:
             raise UserError("Web search needs a NanoGPT provider.")
@@ -1544,8 +1546,9 @@ class Engine:
         s = self.cfg.settings
         private = bool(self.case and self.case.sensitivity == "confidential")
         want = websearch.PRIVATE if private else s.search_links_provider if use == "links" else s.search_provider
+        narrow = {"sites": sites, "after": after, "before": before}
         try:
-            out = await websearch.web_search(prov.base_url, key, query, want, http=self._search_http)
+            out = await websearch.web_search(prov.base_url, key, query, want, http=self._search_http, **narrow)
             out["note"] = "Confidential case: searched with linkup (zero data retention)" if private else ""
         except websearch.SearchError as e:
             zdr = e.code == "zero_data_retention"
@@ -1553,11 +1556,14 @@ class Engine:
             if private or want == other or not (zdr or e.status >= 500):
                 raise UserError(str(e)) from e
             try:
-                out = await websearch.web_search(prov.base_url, key, query, other, http=self._search_http)
+                out = await websearch.web_search(prov.base_url, key, query, other, http=self._search_http, **narrow)
             except websearch.SearchError as e2:
                 raise UserError(f"{e}; {e2}") from e2
             out["note"] = (f"{want} is not allowed while Zero Data Retention is on for this NanoGPT account; used {other}"
                            if zdr else f"{want} failed on NanoGPT's side (HTTP {e.status}); used {other}")
+        if out.get("dates_dropped"):
+            out["note"] = "; ".join(x for x in (out["note"], f"{out['provider']} can't filter by date, so the dates were "
+                                                "left out") if x)
         return out
 
     async def test_search(self, query: str) -> dict:
@@ -1845,8 +1851,8 @@ class Engine:
         if not key:
             raise UserError(f"No API key stored for {sprov.name}.")
 
-        async def search_(query: str, use: str = "answer") -> dict:
-            return await self._run_search(redact(query)[0], use)
+        async def search_(query: str, use: str = "answer", **narrow) -> dict:
+            return await self._run_search(redact(query)[0], use, **narrow)
 
         async def fetch_(urls: list[str]) -> dict:
             try:

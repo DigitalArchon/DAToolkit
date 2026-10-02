@@ -87,7 +87,13 @@ the system's own; in the browser they're the browser's.
   searches in one of two ways: for an answer (the search provider, Perplexity by default: a
   few results with substantial sourced extracts), or for links (the link finder, Kagi by
   default: the best pages fast, a line each, which it then reads itself); both are set in
-  Settings → General, and the research card marks link searches. It reads the pages it finds through NanoGPT's scraper (vendor docs, release notes,
+  Settings → General, and the research card marks link searches. It can narrow a search to
+  a vendor's own sites (e.g. `docs.sophos.com`; Kagi, Valyu and Linkup keep to them, Perplexity
+  mostly, Brave not at all) and to pages from a date range, e.g. after a version's release
+  (not with Kagi, which NanoGPT can't filter by date: that search runs without the dates and
+  the agent is told). Every search, the AI's own included, leaves out video and social sites
+  whose pages can't be read: YouTube, Vimeo, TikTok, Facebook, Instagram, X, Pinterest and
+  LinkedIn. It reads the pages it finds through NanoGPT's scraper (vendor docs, release notes,
   knowledge-base articles, GitHub files), and reports back with the steps quoted and the
   sources numbered. The AI is told to call it whenever it isn't sure of the exact steps:
   products it knows less well, a version that may differ from what it knows, when you say the

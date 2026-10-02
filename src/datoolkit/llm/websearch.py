@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from urllib.parse import urlsplit
 
 import httpx
@@ -26,6 +27,30 @@ PRIVATE = "linkup"         # Confidential cases: zero data retention, and no fal
 # (Perplexity: ~2,000 clean characters per result, mostly vendor docs, on 2026-10-02). "links":
 # the best pages, fast, a line of text each, for the research agent to read itself (Kagi).
 MODES_OF_USE = ("answer", "links")
+# Left out of every search: pages DAToolkit can't read (video, and social sites behind a login).
+# NanoGPT passes excludeDomains to every provider (checked 2026-10-02); for Kagi it took a query's
+# YouTube and Facebook results from 6 of 18 to none. Reddit stays: it is readable and often useful.
+UNREADABLE = ("youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "facebook.com", "instagram.com",
+              "x.com", "twitter.com", "pinterest.com", "linkedin.com")
+# Providers NanoGPT refuses date filters for ("Kagi does not support fromDate/toDate filters").
+NO_DATES = ("kagi",)
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_DOMAIN = re.compile(r"^(?=.{1,253}$)([a-z0-9-]+\.)+[a-z]{2,}$")
+
+
+def clean_sites(sites) -> list[str]:
+    """Domains to search within, from what a model wrote ("https://docs.sophos.com/nsg/" -> docs.sophos.com)."""
+    out = []
+    for s in sites if isinstance(sites, list) else []:
+        host = urlsplit(s if "//" in str(s) else f"//{s}").hostname or ""
+        if _DOMAIN.match(host) and host not in out:
+            out.append(host)
+    return out[:10]
+
+
+def clean_date(value) -> str:
+    """YYYY-MM-DD, or "" for anything else."""
+    return value if isinstance(value, str) and _DAY.fullmatch(value) else ""
 MODES = ("ask", "auto", "off")
 TIMEOUT = 60
 
@@ -52,11 +77,23 @@ def search_url(base_url: str) -> str:
 
 
 async def web_search(base_url: str, api_key: str, query: str, provider: str = "perplexity",
-                     http: httpx.AsyncClient | None = None) -> dict:
-    """{"results": [...], "provider": str, "cost": float | None}"""
-    body = {"query": query, "provider": provider, "outputType": "searchResults"}
+                     http: httpx.AsyncClient | None = None, sites: list[str] | None = None,
+                     after: str = "", before: str = "") -> dict:
+    """{"results": [...], "provider": str, "cost": float | None, "dates_dropped": bool}. `sites`
+    limits the search to those domains (Kagi, Valyu and Linkup keep to them, Perplexity mostly,
+    Brave not at all); `after`/`before` (YYYY-MM-DD) to pages from that window, where the provider
+    allows it (not Kagi: then the search runs without them and dates_dropped says so)."""
+    body = {"query": query, "provider": provider, "outputType": "searchResults", "excludeDomains": list(UNREADABLE)}
     if provider == "kagi":
         body["kagiSource"] = "search"   # full web search; "web" and "news" are enrichment tiers that find little
+    if sites:
+        body["includeDomains"] = sites
+    dates_dropped = bool(after or before) and provider in NO_DATES
+    if not dates_dropped:
+        if after:
+            body["fromDate"] = after
+        if before:
+            body["toDate"] = before
     client = http or httpx.AsyncClient(timeout=TIMEOUT)
     try:
         r = await client.post(search_url(base_url), json=body, headers={"Authorization": f"Bearer {api_key}"})
@@ -83,7 +120,7 @@ async def web_search(base_url: str, api_key: str, query: str, provider: str = "p
     meta = payload.get("metadata") if isinstance(payload, dict) else None
     cost = meta.get("cost") if isinstance(meta, dict) and isinstance(meta.get("cost"), (int, float)) else None
     return {"results": normalize(payload.get("data", payload) if isinstance(payload, dict) else payload),
-            "provider": provider, "cost": cost}
+            "provider": provider, "cost": cost, "dates_dropped": dates_dropped}
 
 
 _TITLE = ("title", "name", "heading")

@@ -218,8 +218,8 @@ async def test_agent_only_fetches_what_it_was_shown_and_reports_when_out_of_roun
         seen.append((list(messages), tools))
         return replies.pop(0)
 
-    async def search(q, use="answer"):
-        assert use == "answer"
+    async def search(q, use="answer", **narrow):
+        assert use == "answer" and narrow == {"sites": [], "after": "", "before": ""}
         return {"results": [{"title": "t", "url": DOC, "snippet": "s", "date": ""}], "provider": "kagi", "cost": 0.01}
 
     steps = []
@@ -471,3 +471,35 @@ async def test_settings_validate_the_link_provider(env):  # noqa: F811
     assert engine.cfg.settings.search_links_provider == "brave"
     with pytest.raises(UserError):
         engine.save_settings({"search_links_provider": "google"})
+
+
+async def test_the_agent_can_keep_to_sites_and_dates_and_unreadable_sites_are_left_out(rs):
+    engine, fake, _, web = rs
+    engine.cfg.settings.search_mode = "auto"
+    setup(engine)
+    fake.responses += [research_call(),
+                       multi_tool_stream([
+                           ("web_search", {"query": "DHCP relay", "mode": "links", "sites": ["https://docs.sophos.com/nsg/", "bad"],
+                                           "after": "2026-06-01"}),
+                           ("web_search", {"query": "v21 DHCP relay changes", "after": "2026-06-01", "before": "June"})], text=""),
+                       say("## Answer\nok"), say("Done.")]
+    engine.send("x")
+    await wait_turn(engine)
+    links, answer = [b for path, b in web.calls if path == "/api/web"]
+    assert links["provider"] == "kagi" and links["includeDomains"] == ["docs.sophos.com"]
+    assert "fromDate" not in links                                   # Kagi refuses date filters
+    assert answer["provider"] == "perplexity" and answer["fromDate"] == "2026-06-01" and "toDate" not in answer
+    assert "youtube.com" in links["excludeDomains"] and answer["excludeDomains"] == links["excludeDomains"]
+    agent_req = fake.requests[2]
+    replies = [m["content"] for m in agent_req["messages"] if m["role"] == "tool"]
+    assert "kagi can't filter by date" in replies[0] and "can't filter by date" not in replies[1]
+    steps = engine.chat[-1]["research"][0]["steps"]
+    assert steps[0]["sites"] == ["docs.sophos.com"] and steps[0]["after"] == "2026-06-01"
+    assert "dates were left out" in steps[0]["note"]
+
+
+def test_sites_and_dates_are_cleaned():
+    assert websearch.clean_sites(["https://docs.sophos.com/x", "help.mikrotik.com", "no", "docs.sophos.com", 3]) == [
+        "docs.sophos.com", "help.mikrotik.com"]
+    assert websearch.clean_sites("docs.sophos.com") == []
+    assert websearch.clean_date("2026-06-01") == "2026-06-01" and websearch.clean_date("June 2026") == ""
