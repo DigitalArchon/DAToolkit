@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datoolkit"
-version = "0.1.0b7"
+version = "0.1.0b8"
 description = "Gated AI diagnostic console: the AI proposes commands, the technician decides."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
