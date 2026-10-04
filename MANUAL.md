@@ -163,9 +163,17 @@ the system's own; in the browser they're the browser's.
   queue, audit log, transcripts, request log, images, runbook), or tick several and use
   **Delete selected**. The filter box narrows the list. The open case can't be deleted;
   exports saved elsewhere are left alone.
-- The top bar shows `ctx 23k`: the prompt size of the last request. It turns amber past the
-  threshold in **Settings → General** (default 100k), which is the cue to export a ticket
-  summary and start a fresh case.
+- The top bar shows `ctx 23k / 200k`: the prompt size of the last request, against the
+  selected model's context window when that is known. It turns amber past the threshold in
+  **Settings → General** (default 100k) or at 75% of the window, whichever comes first, which
+  is the cue to export a ticket summary and start a fresh case; red at 90% of the window means
+  the next request may not fit. The window comes from NanoGPT's model details, from
+  Settings → Providers → "Context window" (set it for local models to match the server, such
+  as Ollama's `num_ctx`), or from the error the first time a request is too long.
+- When a request is too long for the model, the chat says so with **What the AI knows…** and
+  **Retry**: remove earlier exchanges, then retry, or pick a model with a larger window. Some
+  local servers (Ollama) cut an over-long prompt silently instead of refusing it; set their
+  context window override so the figure warns in time.
 - Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V.
 
 ### Hypothesis board

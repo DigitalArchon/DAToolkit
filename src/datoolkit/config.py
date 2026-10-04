@@ -31,6 +31,8 @@ class Provider:
     tier_overrides: dict[str, str] = field(default_factory=dict)
     # model id -> "yes" | "no": can it read images (overrides what the provider reports)
     vision_overrides: dict[str, str] = field(default_factory=dict)
+    # model id -> context window in tokens (for providers that don't report it, e.g. local models)
+    context_overrides: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

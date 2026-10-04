@@ -53,3 +53,30 @@ def lookup(caps: dict[str, dict], model_id: str) -> dict | None:
     twins = [mid for mid in caps if _norm(mid) == n]
     twins.sort(key=lambda mid: (not mid.startswith("TEE/"), mid))     # the enclave build first
     return caps[twins[0]] if twins else None
+
+
+# How providers say a request didn't fit (OpenAI/vLLM, Anthropic, Gemini, llama.cpp, generic).
+_OVERFLOW = re.compile(r"context[_ ]length[_ ]exceeded|maximum context length|context (?:window|size|length) "
+                       r"(?:exceeded|is exceeded|limit)|exceeds? (?:the )?(?:available |model'?s? )?context|prompt is too long|"
+                       r"too many (?:input )?tokens|input token count .* exceeds|reduce the length of (?:the )?(?:messages|prompt)",
+                       re.I)
+_LIMIT = [re.compile(p, re.I) for p in (
+    r"maximum context length is (\d+)",                 # OpenAI, vLLM
+    r"\d+ tokens > (\d+) maximum",                      # Anthropic
+    r"maximum number of tokens allowed \((\d+)\)",      # Gemini
+    r"context (?:window|size|length)(?: limit)? (?:of|is) (\d+)",
+    r"n_ctx(?:_slot)?\s*[=:]\s*(\d+)",                  # llama.cpp
+)]
+
+
+def overflow(err: Exception | str) -> tuple[bool, int | None]:
+    """Whether a provider error says the request was too long for the model's context window,
+    and the window size when the message names it."""
+    text = str(err)
+    if not _OVERFLOW.search(text):
+        return False, None
+    for pat in _LIMIT:
+        m = pat.search(text)
+        if m and int(m.group(1)) >= 1024:
+            return True, int(m.group(1))
+    return True, None

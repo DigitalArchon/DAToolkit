@@ -172,6 +172,7 @@ class Engine:
         self._img_desc: dict[str, dict] = {}           # image file -> {"model", "text"} from the vision helper
         self._last_turn_error: str | None = None
         self._unsupported: dict[tuple[str, str], set[str]] = {}   # generation settings a model's route refused
+        self._learned_ctx: dict[tuple[str, str], int] = {}        # context windows named in overflow errors
         # TEE models (llm/tee.py): (provider, model) -> (attested client, when, attestation shown)
         self._tee: dict[tuple[str, str], tuple[tee_mod.TeeClient, float, dict]] = {}
         self._tee_factory: Callable | None = None      # tests: (base_url, key, model) -> TeeClient
@@ -227,6 +228,7 @@ class Engine:
             "can_retry": self.can_retry,
             "last_error": self._last_turn_error,
             "last_usage": self.last_usage,
+            "context_limit": self.context_limit(),
             "hypotheses": self.hypotheses,
             "similar_cases": [{k: v for k, v in c.items() if k != "runbook"} for c in self._similar],
         }
@@ -274,8 +276,16 @@ class Engine:
         bad = [k for k, v in vision.items() if v not in ("yes", "no")]
         if bad:
             raise UserError(f"Vision overrides must be yes or no ({', '.join(bad)}).")
+        context = {}
+        for k, v in (data.get("context_overrides") or {}).items():
+            v = str(v).strip().lower().replace(",", "").replace("_", "")
+            n = int(float(v[:-1]) * 1000) if v.endswith("k") and v[:-1].replace(".", "", 1).isdigit() else (int(v) if v.isdigit() else 0)
+            if k.strip() and n < 1024:
+                raise UserError(f"Context window for {k.strip()} must be a number of tokens, such as 32768 or 32k.")
+            if k.strip():
+                context[k.strip()] = n
         prov = Provider(name=name, base_url=base_url, default_model=str(data.get("default_model", "")).strip(),
-                        tier_overrides=overrides, vision_overrides=vision)
+                        tier_overrides=overrides, vision_overrides=vision, context_overrides=context)
         old = self.cfg.provider(original_name or name)
         if original_name and original_name != name and old:
             key = creds.get_secret("provider", original_name)
@@ -376,6 +386,37 @@ class Engine:
 
     def caps_for(self, prov: Provider, model: str) -> dict | None:
         return capabilities.lookup(self._caps.get(prov.name, {}), model)
+
+    def context_limit(self, prov: Provider | None = None, model: str = "") -> dict | None:
+        """The model's context window in tokens, and who says so: the technician's override, the
+        provider's model list, or an earlier overflow error. None when nobody knows. Defaults to
+        the active model."""
+        if prov is None:
+            prov, model = self.cfg.provider(self.cfg.active_provider), self.cfg.active_model
+        if not prov or not model:
+            return None
+        if (prov.context_overrides or {}).get(model):
+            return {"tokens": int(prov.context_overrides[model]), "source": "override"}
+        caps = self.caps_for(prov, model)
+        if caps and caps.get("context"):
+            return {"tokens": int(caps["context"]), "source": "provider"}
+        if (prov.name, model) in self._learned_ctx:
+            return {"tokens": self._learned_ctx[(prov.name, model)], "source": "learned"}
+        return None
+
+    def _overflow_message(self, prov: Provider, model: str, err: Exception) -> str | None:
+        """A plain explanation when `err` says the request didn't fit the model's context window
+        (the window it names is remembered for this model), or None for any other error."""
+        hit, limit = capabilities.overflow(err)
+        if not hit:
+            return None
+        if limit and not (prov.context_overrides or {}).get(model):
+            self._learned_ctx[(prov.name, model)] = limit
+        known = self.context_limit(prov, model)
+        size = f" ({known['tokens']:,} tokens)" if known else ""
+        self.log("context_overflow", model=model, limit=known["tokens"] if known else None, error=str(err)[:500])
+        return (f"failed: the conversation is too long for {model}'s context window{size}. Remove earlier exchanges "
+                "under Export ▾ → What the AI knows…, then retry; or switch to a model with a larger window.")
 
     def vision_of(self, prov: Provider, model: str) -> bool | None:
         """True/False, or None when nobody knows (non-NanoGPT providers without an override)."""
@@ -1408,7 +1449,7 @@ class Engine:
             cur["tokens"] += est(m)
             cur["messages"] += 1
         return {"system_tokens": est(system), "system": system, "groups": groups,
-                "total_tokens": est(system) + sum(g["tokens"] for g in groups)}
+                "total_tokens": est(system) + sum(g["tokens"] for g in groups), "limit": self.context_limit()}
 
     def drop_context(self, group_indices: list[int]) -> None:
         """Remove whole technician turns (message + the model's replies to it) from what the
@@ -2145,6 +2186,7 @@ class Engine:
         entry = {"kind": "assistant", "text": "", "reasoning": "", "proposals": [], "model": model, "tier": tier}
         usage = None
         error = None
+        overflowed = None     # a plain explanation when the request was too long for the model
         in_flight = None      # (system, messages sent, ...) of the request being streamed, for the log
         try:
             client = self._client(prov, model)
@@ -2224,6 +2266,9 @@ class Engine:
         except Exception as e:  # noqa: BLE001
             error = f"not sent: {e}" if isinstance(e, UserError) else f"{type(e).__name__}: {e}"
             self._log_failed_round(in_flight, model, tier, entry, error)
+            overflowed = not isinstance(e, UserError) and self._overflow_message(prov, model, e)
+            if overflowed:
+                error = overflowed
         entry["text"] = entry["text"].strip()
         if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches",
                                       "research")):
@@ -2237,7 +2282,8 @@ class Engine:
                 task.add_done_callback(self._background.discard)
         self._last_turn_error = error
         if error:
-            self.chat.append({"kind": "note", "text": f"AI request {error}", "retry": True})
+            self.chat.append({"kind": "note", "text": f"AI request {error}", "retry": True,
+                              **({"context": True} if overflowed else {})})
             self.log("turn_error", error=error)
         if usage:
             self.last_usage = usage
@@ -2597,7 +2643,7 @@ class Engine:
             text = await self._complete(self._client(prov, model), prov, model, messages)
         except Exception as e:  # noqa: BLE001
             self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)})
-            raise UserError(f"{purpose} request failed: {e}") from e
+            raise UserError(f"{purpose} request " + (self._overflow_message(prov, model, e) or f"failed: {e}")) from e
         self._log_request(purpose, model, tier, system_prompt, messages[1:], {"content": text})
         path = self.case.dir / filename
         path.write_text(text + "\n", encoding="utf-8")

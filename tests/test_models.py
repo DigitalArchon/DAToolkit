@@ -269,3 +269,66 @@ async def test_image_not_sent_to_a_helper_that_fails_attestation(env, monkeypatc
     await wait_turn(engine)
     assert "complete" not in helper.calls                      # nothing sealed to an unproven enclave
     assert "could not be attested" in engine._last_turn_error and engine.can_retry
+
+
+# ---------------------------------------------------------------- context window
+
+def test_overflow_errors_are_recognised_and_name_the_window():
+    o = capabilities.overflow
+    assert o("Error code: 400 - {'error': {'message': \"This model's maximum context length is 131072 tokens. "
+             "However, your messages resulted in 140000 tokens.\", 'code': 'context_length_exceeded'}}") == (True, 131072)
+    assert o("prompt is too long: 210345 tokens > 200000 maximum") == (True, 200000)
+    assert o("The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).") == (True, 1048576)
+    assert o("the request exceeds the available context size, try increasing it") == (True, None)
+    assert o("503 all routes failed") == (False, None)
+    assert o("moonshotai/kimi-k3 does not support temperature on the selected route") == (False, None)
+
+
+async def test_context_limit_comes_from_override_then_provider_then_errors(env):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("c", "open")
+    engine._caps["Fake"] = capabilities.parse(DETAILED)
+    prov = engine.cfg.provider("Fake")
+    engine.select_model("Fake", "moonshotai/kimi-k3")
+    assert engine.snapshot()["context_limit"] == {"tokens": 1048576, "source": "provider"}
+    assert engine.context_view()["limit"]["tokens"] == 1048576
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")     # the provider doesn't say
+    assert engine.context_limit() is None
+    engine.save_provider({"name": "Fake", "base_url": prov.base_url,
+                          "context_overrides": {"anthropic/claude-opus-5.5": "200k", "moonshotai/kimi-k3": "32,768"}},
+                         original_name="Fake")
+    prov = engine.cfg.provider("Fake")
+    assert prov.context_overrides == {"anthropic/claude-opus-5.5": 200000, "moonshotai/kimi-k3": 32768}
+    assert engine.context_limit() == {"tokens": 200000, "source": "override"}
+    assert engine.context_limit(prov, "moonshotai/kimi-k3")["tokens"] == 32768   # beats the provider's figure
+    with pytest.raises(UserError, match="number of tokens"):
+        engine.save_provider({"name": "Fake", "base_url": prov.base_url, "context_overrides": {"m": "lots"}},
+                             original_name="Fake")
+
+
+async def test_a_request_too_long_for_the_model_says_so_and_points_to_the_context_view(env):  # noqa: F811
+    engine, fake, _ = env
+    engine.new_case("long", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    fake.overflow = "prompt is too long: 210345 tokens > 200000 maximum"
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    note = engine.chat[-1]
+    assert note["context"] is True and note["retry"] is True and engine.can_retry
+    assert "too long for anthropic/claude-opus-5.5's context window (200,000 tokens)" in note["text"]
+    assert "What the AI knows" in note["text"]
+    assert engine.context_limit() == {"tokens": 200000, "source": "learned"}     # remembered for the figure
+    # write-ups say the same
+    with pytest.raises(UserError, match="too long for anthropic/claude-opus-5.5's context window"):
+        await engine.ticket_summary()
+    # other failures are unchanged
+    fake.overflow = None
+    engine.retry()
+    await wait_turn(engine)                       # no reply queued: an ordinary failure
+    assert "context" not in engine.chat[-1] and engine.chat[-1]["retry"] is True
+
+
+def test_ui_shows_the_window_and_offers_the_context_view_on_overflow():
+    from pathlib import Path
+    js = (Path(__file__).parent.parent / "src/datoolkit/web/app.js").read_text()
+    assert "S.state.context_limit" in js and "e.context && last" in js and "context_overrides" in js

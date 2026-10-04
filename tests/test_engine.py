@@ -43,6 +43,7 @@ class FakeAPI:
         self.completions = []  # queued texts for non-streaming requests
         self.requests = []    # captured request JSON
         self.refuse = {}      # model -> a setting its route rejects with HTTP 400 (as NanoGPT does)
+        self.overflow = None  # an error message for "too long for the context window" (HTTP 400)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
@@ -57,6 +58,8 @@ class FakeAPI:
         if setting and setting in body:
             return httpx.Response(400, json={"error": {"message": f"{body['model']} does not support {setting} on the "
                                                                   "selected route. Omit it or select another model."}})
+        if self.overflow:
+            return httpx.Response(400, json={"error": {"message": self.overflow, "code": "context_length_exceeded"}})
         if not body.get("stream"):                  # plain completion (write-ups, vision helper)
             return httpx.Response(200, json={"id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
                                              "choices": [{"index": 0, "finish_reason": "stop",

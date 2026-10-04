@@ -374,16 +374,22 @@ function renderUsage() {
   const el = $("#usage");
   const u = S.state?.last_usage;
   if (!u || !u.prompt_tokens) { el.textContent = ""; el.className = "muted small"; el.title = ""; return; }
-  const warn = S.state.config.settings.context_warn_tokens || 100000;
+  const setting = S.state.config.settings.context_warn_tokens || 100000;
+  const lim = S.state.context_limit;           // the selected model's window, when known
+  const warn = lim ? Math.min(setting, Math.round(lim.tokens * 0.75)) : setting;
+  const bad = lim ? Math.round(lim.tokens * 0.9) : setting * 1.5;
   const p = u.prompt_tokens;
-  el.textContent = `ctx ${fmtTokens(p)}`;
-  el.className = `muted small usage${p >= warn * 1.5 ? " bad" : p >= warn ? " warn" : ""}`;
+  el.textContent = `ctx ${fmtTokens(p)}` + (lim ? ` / ${fmtTokens(lim.tokens)}` : "");
+  el.className = `muted small usage${p >= bad ? " bad" : p >= warn ? " warn" : ""}`;
   const cached = u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
   const written = u.cache_creation_input_tokens || 0;
   if (cached) el.textContent += ` · ${Math.round(100 * cached / p)}% cached`;
   el.title = `Last request: ${p.toLocaleString()} prompt tokens, ${(u.completion_tokens || 0).toLocaleString()} completion tokens.`
     + (cached || written ? `\nPrompt cache: ${cached.toLocaleString()} read, ${written.toLocaleString()} written.` : "")
-    + (p >= warn ? `\nThe conversation is getting long (warning threshold ${warn.toLocaleString()} in Settings → General). Consider a new case or a ticket summary.` : "");
+    + (lim ? `\n${S.state.config.active_model}'s context window: ${lim.tokens.toLocaleString()} tokens (${{ override: "your override in Settings → Providers", provider: "reported by the provider", learned: "named in an earlier error" }[lim.source]}).`
+      : "\nThe selected model's context window isn't known; set it under Settings → Providers for local models.")
+    + (lim && p >= bad ? "\nThe next request may not fit. Remove earlier exchanges under Export ▾ → What the AI knows…."
+      : p >= warn ? `\nThe conversation is getting long (warning threshold ${setting.toLocaleString()} in Settings → General). Consider a new case or a ticket summary.` : "");
 }
 
 function renderAll() {
@@ -426,7 +432,9 @@ function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeigh
 function renderEntry(e, live = false) {
   if (e.kind === "note") {
     const last = S.state.chat[S.state.chat.length - 1] === e;
-    return h("div", { class: "msg note" }, e.text, e.retry && last && S.state.can_retry && !S.state.busy ? h("span", {}, " ", retryButton()) : null);
+    return h("div", { class: "msg note" }, e.text,
+      e.context && last && !S.state.busy ? h("span", {}, " ", h("button", { class: "small", onclick: () => guarded(openContextView) }, "What the AI knows…")) : null,
+      e.retry && last && S.state.can_retry && !S.state.busy ? h("span", {}, " ", retryButton()) : null);
   }
   if (e.kind === "user") {
     const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You", e.via === "phone" ? " · 📱 from your phone" : ""));
@@ -1851,7 +1859,9 @@ async function openContextView() {
   const checks = ctx.groups.map(() => h("input", { type: "checkbox" }));
   modal({ title: "What the AI knows", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
-      h("div", { class: "muted small" }, `About ${fmtTokens(ctx.total_tokens)} tokens will be sent on the next turn (estimate). Tick exchanges to remove them from the AI's context; the chat and audit log keep them.`),
+      h("div", { class: "muted small" }, `About ${fmtTokens(ctx.total_tokens)} tokens will be sent on the next turn (estimate)`
+        + (ctx.limit ? ` of ${fmtTokens(ctx.limit.tokens)} the model can take` : "")
+        + ". Tick exchanges to remove them from the AI's context; the chat and audit log keep them."),
       h("details", {}, h("summary", {}, `System prompt · ~${fmtTokens(ctx.system_tokens)} tokens`), h("pre", { class: "prompt-text", style: "max-height:30vh;overflow:auto" }, ctx.system)),
       ...ctx.groups.map((g, i) => h("label", { class: "result-block" }, h("div", { class: "head" }, checks[i], h("b", {}, `Exchange ${i + 1}`),
         h("span", { class: "muted small" }, `~${fmtTokens(g.tokens)} tokens · ${g.messages} message(s)`)), h("div", { class: "small mono" }, g.summary)))),
@@ -2375,6 +2385,9 @@ function openSettings(tab = "providers") {
     const visionOv = h("textarea", { rows: 2, class: "mono",
       value: Object.entries(p.vision_overrides || {}).map(([k, v]) => `${k} = ${v}`).join("\n"),
       placeholder: "One per line: model-id = yes | no   (for providers that don't report it, e.g. local models)" });
+    const contextOv = h("textarea", { rows: 2, class: "mono",
+      value: Object.entries(p.context_overrides || {}).map(([k, v]) => `${k} = ${v}`).join("\n"),
+      placeholder: "One per line: model-id = tokens, e.g. qwen3:32b = 32k   (for providers that don't report it; match the server's setting, such as Ollama's num_ctx)" });
     const status = h("div", { class: "muted small" });
     const payload = () => {
       const tier_overrides = {};
@@ -2387,7 +2400,12 @@ function openSettings(tab = "providers") {
         const [k, v] = line.split("=").map((s) => (s || "").trim());
         if (k && v) vision_overrides[k] = v.toLowerCase();
       }
-      return { provider: { name: name.value.trim(), base_url: url.value.trim(), default_model: def.value.trim(), tier_overrides, vision_overrides },
+      const context_overrides = {};
+      for (const line of contextOv.value.split("\n")) {
+        const [k, v] = line.split("=").map((s) => (s || "").trim());
+        if (k && v) context_overrides[k] = v;
+      }
+      return { provider: { name: name.value.trim(), base_url: url.value.trim(), default_model: def.value.trim(), tier_overrides, vision_overrides, context_overrides },
         api_key: key.value.trim() || null, original_name: p._new ? null : p.name };
     };
     const save = async () => {
@@ -2404,6 +2422,7 @@ function openSettings(tab = "providers") {
       h("label", { class: "field" }, h("span", {}, "Default model"), def),
       h("label", { class: "field" }, h("span", {}, "Tier overrides"), overrides),
       h("label", { class: "field" }, h("span", {}, "Reads images (overrides)"), visionOv),
+      h("label", { class: "field" }, h("span", {}, "Context window (overrides)"), contextOv),
       h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave, attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict) and each reply's signature checked, but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models, attested with Tinfoil's verifier); LOCAL = your own hardware (localhost/private IP URLs)."),
       status,
       h("div", { class: "row" },
