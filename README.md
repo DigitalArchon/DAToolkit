@@ -87,14 +87,12 @@ is handled.
 
 ## Roadmap
 
-- Reproducible AppImages attached to releases
 - Connectors: ConnectWise (push ticket notes and transcripts) and Confluence (pull site
   notes, push runbooks)
 - Newer guacd (1.5+) so guacd itself enforces the pinned RDP certificate; RDP session
   recording into the case timeline
 - IP/hostname pseudonymisation with local reverse mapping
 - Per-client notes library
-- Context compaction for long sessions
 
 ## Contributing and security
 

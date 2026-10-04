@@ -1,4 +1,6 @@
 :root {
+  color-scheme: dark;          /* native scrollbars and form controls match the theme */
+  scrollbar-color: #3a424e transparent;   /* browsers that still draw light scrollbars */
   --bg: #111418;
   --panel: #171b21;
   --panel-2: #1d232b;
