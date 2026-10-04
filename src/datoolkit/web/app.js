@@ -1857,19 +1857,100 @@ async function openContextView() {
   hideMenus();
   const ctx = await api("GET", "/api/context");
   const checks = ctx.groups.map(() => h("input", { type: "checkbox" }));
-  modal({ title: "What the AI knows", wide: true,
+  const m = modal({ title: "What the AI knows", wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "muted small" }, `About ${fmtTokens(ctx.total_tokens)} tokens will be sent on the next turn (estimate)`
         + (ctx.limit ? ` of ${fmtTokens(ctx.limit.tokens)} the model can take` : "")
-        + ". Tick exchanges to remove them from the AI's context; the chat and audit log keep them."),
+        + ". Compact older exchanges into a summary, or tick exchanges to remove them; the chat and audit log keep everything."),
+      compactPanel(ctx, () => m.close()),
       h("details", {}, h("summary", {}, `System prompt · ~${fmtTokens(ctx.system_tokens)} tokens`), h("pre", { class: "prompt-text", style: "max-height:30vh;overflow:auto" }, ctx.system)),
-      ...ctx.groups.map((g, i) => h("label", { class: "result-block" }, h("div", { class: "head" }, checks[i], h("b", {}, `Exchange ${i + 1}`),
+      ...ctx.groups.map((g, i) => h("label", { class: "result-block" }, h("div", { class: "head" }, checks[i], h("b", {}, exchangeLabel(ctx, i)),
         h("span", { class: "muted small" }, `~${fmtTokens(g.tokens)} tokens · ${g.messages} message(s)`)), h("div", { class: "small mono" }, g.summary)))),
     buttons: [{ label: "Close" }, { label: "Remove ticked", kind: "danger", onClick: async () => {
       const groups = ctx.groups.map((_, i) => i).filter((i) => checks[i].checked);
       if (!groups.length) throw new Error("Nothing ticked.");
       await api("POST", "/api/context/drop", { groups });
       toast(`Removed ${groups.length} exchange(s) from the AI's context.`, "ok");
+    } }] });
+}
+
+// After a compaction the summary comes first, and the exchanges are numbered from 1 after it.
+function exchangeLabel(ctx, i) {
+  if (ctx.groups[i].compacted) return "Summary";
+  return `Exchange ${i + 1 - ctx.groups.slice(0, i).filter((g) => g.compacted).length}`;
+}
+
+// Compaction: the chat model summarises exchanges 1..N; the later ones stay word for word.
+function compactPanel(ctx, closeParent) {
+  const n = ctx.groups.length;
+  const undo = S.state.can_undo_compaction
+    ? h("button", { class: "small", onclick: () => guarded(async () => {
+      if (!await confirmModal("Undo compaction", "Put the original exchanges back in place of the latest summary? Anything after the summary stays.", "Undo")) return;
+      await api("POST", "/api/context/compact/undo");
+      closeParent();
+      toast("The original exchanges are back in the AI's context.", "ok");
+    }) }, "Undo last compaction") : null;
+  const first = ctx.groups[0]?.compacted ? 1 : 0;           // a summary alone is never worth summarising again
+  if (n - 1 <= first) return h("div", { class: "muted small" }, "Nothing to compact yet: the latest exchange always stays as it is. ", undo);
+  const b = ctx.compact_budget;
+  const sel = h("select", {}, ctx.groups.slice(first, n - 1).map((g, j) => h("option", { value: j + first }, exchangeLabel(ctx, j + first).replace("Exchange ", ""))));
+  sel.value = String(Math.max(first, n - 3));               // keep the last two exchanges by default
+  const est = h("span", { class: "muted small" });
+  const figures = () => {
+    const upto = Number(sel.value);
+    const old = ctx.groups.slice(0, upto + 1).reduce((a, g) => a + g.tokens, 0);
+    const summary = Math.max(b.min, Math.min(b.max, Math.round(old * b.ratio)));
+    return { upto, old, summary, after: ctx.total_tokens - old + summary };
+  };
+  const update = () => {
+    const f = figures();
+    const little = f.summary >= f.old * 0.7;
+    go.disabled = little;
+    est.textContent = little ? `Only ~${fmtTokens(f.old)} tokens: too little for a summary to save much. Choose more exchanges, or remove them instead.`
+      : `~${fmtTokens(f.old)} tokens become a summary of up to ~${fmtTokens(f.summary)}: about ${fmtTokens(f.after)} sent next turn`
+      + (ctx.limit ? ` (${Math.round(100 * f.after / ctx.limit.tokens)}% of the window)` : "") + `, keeping ${n - 1 - f.upto} exchange(s) word for word.`;
+  };
+  sel.addEventListener("change", update);
+  const go = h("button", { class: "primary small", onclick: () => guarded(async () => {
+    const f = figures();
+    const cost = ctx.cache
+      ? `This request re-reads the conversation, from the prompt cache if it is still warm (otherwise at the full input price). Applying the summary changes the start of the conversation, so the next turn writes the new, shorter context to the cache again (${ctx.cache === "1h" ? "2×" : "1.25×"} the input price for that part, once).`
+      : "This request re-reads the conversation, and the summary replaces part of it from the next turn on.";
+    if (!await confirmModal("Compact the AI's context",
+      h("div", {}, h("p", {}, `${ctx.model} will summarise ${f.upto === 0 ? exchangeLabel(ctx, 0).toLowerCase() : `${exchangeLabel(ctx, 0).toLowerCase()} to ${exchangeLabel(ctx, f.upto).toLowerCase()}`} (~${fmtTokens(f.old)} tokens). You see the summary, and can edit it, before anything changes.`),
+        h("p", { class: "muted small" }, cost)), "Write summary")) return;
+    closeParent();
+    await openCompactPreview(f.upto);
+  }) }, "Compact…");
+  update();
+  return h("div", { class: "result-block" },
+    h("div", { class: "head" }, h("b", {}, "Compact"), h("span", {}, first ? "the summary and exchanges 1 to " : "exchanges 1 to "), sel, go, undo),
+    est);
+}
+
+async function openCompactPreview(upto) {
+  const m = modal({ title: "Compaction summary", wide: true, dismissable: false,
+    body: h("div", { class: "muted" }, h("span", { class: "spinner" }), " Asking the AI to summarise…"),
+    buttons: [{ label: "Cancel" }] });
+  let r;
+  try {
+    r = await api("POST", "/api/context/compact", { upto });
+  } catch (e) {
+    m.box.querySelector(".content").replaceChildren(h("div", { class: "warnbox" }, e.message));
+    return;
+  }
+  m.close();
+  const ta = h("textarea", { rows: 22, value: r.summary });
+  modal({ title: "Compaction summary", wide: true, dismissable: false,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, `${r.model} summarised ${r.exchanges} exchange(s), ~${fmtTokens(r.summarised_tokens)} tokens, in ~${fmtTokens(r.summary_tokens)} tokens. `
+        + `About ${fmtTokens(r.after_tokens)} tokens will be sent next turn${r.limit ? ` of ${fmtTokens(r.limit.tokens)}` : ""}; ${r.kept} exchange(s) stay word for word. `
+        + "Check it keeps what matters, especially changes made to systems, and edit if needed."),
+      r.truncated ? h("div", { class: "warnbox" }, "The summary was cut off at the model's output limit. Edit it, or cancel and compact fewer exchanges.") : null,
+      ta),
+    buttons: [{ label: "Cancel" }, { label: "Apply", kind: "primary", onClick: async () => {
+      await api("POST", "/api/context/compact/apply", { summary: ta.value });
+      toast("Context compacted.", "ok");
     } }] });
 }
 

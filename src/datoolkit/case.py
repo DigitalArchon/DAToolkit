@@ -95,10 +95,10 @@ class Case:
                                              "notes": self.notes, "started": self.started})
 
     def save_state(self, conv: list[dict], chat: list[dict], queue: list[dict],
-                   hypotheses: list[dict] | None = None) -> None:
+                   hypotheses: list[dict] | None = None, compactions: list[dict] | None = None) -> None:
         """Persist everything needed to resume the case later."""
         _write_json(self.dir / "state.json", {"version": 2, "conv": conv, "chat": chat, "queue": queue,
-                                              "hypotheses": hypotheses or []})
+                                              "hypotheses": hypotheses or [], "compactions": compactions or []})
 
     def load_state(self) -> dict | None:
         path = self.dir / "state.json"

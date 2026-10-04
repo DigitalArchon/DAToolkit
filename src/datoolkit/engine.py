@@ -50,6 +50,10 @@ from .sessions.ssh import ssh_argv, target_label
 # A TEE model's attestation is made again, with a fresh nonce, before a send once it is this old.
 TEE_REATTEST_SECONDS = 900
 MAX_TOOL_ROUNDS = 6          # rounds per turn: searches and the no-message nudge each take one
+# Compaction: the summary may use about this share of the tokens it replaces, within these bounds.
+COMPACT_RATIO, COMPACT_MIN, COMPACT_MAX = 0.15, 600, 6000
+_COMPACT_MARK = prompts.COMPACT_HEADER.split("{")[0]
+
 PROMPT_TIMEOUT = 300
 MAX_SEARCHES_PER_TURN = 4
 MAX_RESEARCH_PER_TURN = 2
@@ -173,6 +177,9 @@ class Engine:
         self._last_turn_error: str | None = None
         self._unsupported: dict[tuple[str, str], set[str]] = {}   # generation settings a model's route refused
         self._learned_ctx: dict[tuple[str, str], int] = {}        # context windows named in overflow errors
+        self._overflowed = False                                  # the last chat request was too long for the model
+        self.compactions: list[dict] = []    # applied compactions, newest last (backup file, messages replaced)
+        self._compact_pending: dict | None = None                 # a summary written but not yet applied
         # TEE models (llm/tee.py): (provider, model) -> (attested client, when, attestation shown)
         self._tee: dict[tuple[str, str], tuple[tee_mod.TeeClient, float, dict]] = {}
         self._tee_factory: Callable | None = None      # tests: (base_url, key, model) -> TeeClient
@@ -229,6 +236,7 @@ class Engine:
             "last_error": self._last_turn_error,
             "last_usage": self.last_usage,
             "context_limit": self.context_limit(),
+            "can_undo_compaction": self._undoable_compaction() is not None,
             "hypotheses": self.hypotheses,
             "similar_cases": [{k: v for k, v in c.items() if k != "runbook"} for c in self._similar],
         }
@@ -415,8 +423,9 @@ class Engine:
         known = self.context_limit(prov, model)
         size = f" ({known['tokens']:,} tokens)" if known else ""
         self.log("context_overflow", model=model, limit=known["tokens"] if known else None, error=str(err)[:500])
-        return (f"failed: the conversation is too long for {model}'s context window{size}. Remove earlier exchanges "
-                "under Export ▾ → What the AI knows…, then retry; or switch to a model with a larger window.")
+        return (f"failed: the conversation is too long for {model}'s context window{size}. Compact or remove "
+                "earlier exchanges under Export ▾ → What the AI knows…, then retry; or switch to a model with a "
+                "larger window.")
 
     def vision_of(self, prov: Provider, model: str) -> bool | None:
         """True/False, or None when nobody knows (non-NanoGPT providers without an override)."""
@@ -785,6 +794,7 @@ class Engine:
         self.conv, self.chat = [], []
         self.last_usage = None
         self.hypotheses, self._runbooks, self._similar = [], "", []
+        self.compactions, self._compact_pending, self._overflowed = [], None, False
         self._attach_case()
         self._persist()
 
@@ -825,6 +835,7 @@ class Engine:
         self.queue = Queue.from_list(state.get("queue", []))
         self.last_usage = None
         self.hypotheses = list(state.get("hypotheses", []))
+        self.compactions, self._compact_pending, self._overflowed = list(state.get("compactions", [])), None, False
         self._runbooks, self._similar = "", []
         self.log("case_resumed", messages=len(self.chat), queue=len(self.queue.items))
         self._attach_case()
@@ -856,7 +867,7 @@ class Engine:
         if not self.case:
             return
         try:
-            self.case.save_state(self.conv, self.chat, self.queue.to_list(), self.hypotheses)
+            self.case.save_state(self.conv, self.chat, self.queue.to_list(), self.hypotheses, self.compactions)
         except OSError as e:
             self.emit("toast", level="error", text=f"Could not save case state: {e}")
 
@@ -1445,11 +1456,16 @@ class Engine:
                 if isinstance(c, list):
                     c = " ".join(part.get("text", "[image]") if part.get("type") == "text" else "[image]" for part in c)
                 cur["summary"] = (str(c or "")[:140]).replace("\n", " ")
+                if isinstance(c, str) and c.startswith(_COMPACT_MARK):
+                    cur["compacted"] = True
+                    cur["summary"] = "Summary of earlier exchanges"
             cur["end"] = i
             cur["tokens"] += est(m)
             cur["messages"] += 1
         return {"system_tokens": est(system), "system": system, "groups": groups,
-                "total_tokens": est(system) + sum(g["tokens"] for g in groups), "limit": self.context_limit()}
+                "total_tokens": est(system) + sum(g["tokens"] for g in groups), "limit": self.context_limit(),
+                "model": self.cfg.active_model, "cache": self._active_cache_ttl(),
+                "compact_budget": {"ratio": COMPACT_RATIO, "min": COMPACT_MIN, "max": COMPACT_MAX}}
 
     def drop_context(self, group_indices: list[int]) -> None:
         """Remove whole technician turns (message + the model's replies to it) from what the
@@ -1470,10 +1486,172 @@ class Engine:
         while kept and kept[0].get("role") in ("tool", "assistant"):
             kept.pop(0)
         self.conv = kept
+        self._req_conv_len = 0      # rebuilt: the next request log entry carries the whole conversation
+        self._compact_pending = None
         self.chat.append({"kind": "note", "text": f"Removed {len(group_indices)} exchange(s) from the AI's context."})
         self.log("context_dropped", groups=sorted(int(g) for g in group_indices), removed_messages=len(drop))
         self.emit("chat", entry=self.chat[-1])
         self._persist()
+
+    def _active_cache_ttl(self) -> str:
+        prov = self.cfg.provider(self.cfg.active_provider)
+        if not prov or not self.cfg.active_model:
+            return ""
+        try:
+            return self._cache_ttl(prov, self.cfg.active_model, self._check_tier(prov, self.cfg.active_model))
+        except UserError:
+            return ""
+
+    @staticmethod
+    def _conv_sha(conv: list[dict]) -> str:
+        return hashlib.sha256(json.dumps(conv, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    async def compact_preview(self, upto: int) -> dict:
+        """Ask the chat model to summarise exchanges 0..upto (as context_view groups them); the
+        later exchanges stay word for word. Nothing changes until compact_apply. With the
+        conversation fitting the model, the request is the chat request plus an instruction,
+        so a warm prompt cache serves it; after an overflow, only the part to summarise is sent."""
+        if not self.case:
+            raise UserError("No case.")
+        if self.busy:
+            raise UserError("Wait for the AI to finish first.")
+        view = self.context_view()
+        groups = view["groups"]
+        upto = int(upto)
+        if not 0 <= upto < len(groups) - 1:
+            raise UserError("Choose which exchanges to compact; the latest one always stays as it is.")
+        prov, model, tier = self._require_model()
+        end = groups[upto]["end"]
+        summarised = sum(g["tokens"] for g in groups[:upto + 1])
+        budget = max(COMPACT_MIN, min(COMPACT_MAX, int(summarised * COMPACT_RATIO)))
+        limit = self.context_limit()
+        whole = not self._overflowed and (not limit or view["total_tokens"] < limit["tokens"] * 0.9)
+        sha = self._conv_sha(self.conv)
+
+        client = self._client(prov, model)
+        if isinstance(client, PrivateModeClient):
+            await client.attest()     # nothing is sent until the enclave has proved itself
+        await self._tee_guard(prov, model, "chat")
+        conv = await self._conv_for_model(self.vision_status())
+        ttl = self._cache_ttl(prov, model, tier) if whole else ""
+        static, state = self._prompt_parts()
+        messages, extra = self._chat_request(static, state, conv if whole else conv[:end + 1], ttl)
+        if whole:
+            nxt = groups[upto + 1]["summary"][:80]
+            scope = f'everything in this conversation before the technician\'s message that begins "{nxt}"'
+            keep = "That message and everything after it stay as they are, so leave them out of the summary. "
+        else:
+            scope, keep = "the conversation above", ""
+        instruction = prompts.COMPACT_PROMPT.format(scope=scope, keep=keep, words=int(budget * 0.75))
+        if ttl:      # after the state message, past the cache boundary
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] + "\n\n" + instruction}
+        else:
+            messages.append({"role": "user", "content": instruction})
+        tools = prompts.tools(search=self.search_status()["mode"] != "off")   # as the chat sends them: cached with it
+        self.log("sent_to_ai", purpose="compact", provider=prov.name, model=model, tier=tier,
+                 exchanges=upto + 1, whole_conversation=whole)
+        start = self._req_conv_len if whole and self._req_conv_len <= len(self.conv) else 0
+        sent = messages[1 + start:]
+        result = None
+        for _ in range(2):
+            refused = self._unsupported.get((prov.name, model), set())
+            params = {**self._params(prov, model), **{k: v for k, v in extra.items() if k not in refused}}
+            try:
+                async for kind, val in client.stream(model, messages, tools, params):
+                    if kind == "done":
+                        result = val
+                break
+            except Exception as e:  # noqa: BLE001
+                if self._learn_unsupported(prov, model, params, e):
+                    continue
+                self._log_request("compact", model, tier, messages[0]["content"], sent, {"error": str(e)}, conv_index=start)
+                if capabilities.overflow(e)[0]:
+                    self._overflow_message(prov, model, e)
+                    raise UserError(f"Even the part to compact is too long for {model}. Compact fewer exchanges, "
+                                    "or remove some first.") from e
+                raise UserError(f"Compaction request failed: {e}") from e
+        text = (result.content or "").strip() if result else ""
+        self._log_request("compact", model, tier, messages[0]["content"], sent, {
+            "content": text, "reasoning": result.reasoning if result else "",
+            "finish_reason": result.finish_reason if result else None, "usage": result.usage if result else None},
+            conv_index=start)
+        if not text:
+            raise UserError(f"{model} returned no summary. Try again, or remove exchanges instead.")
+        if self._conv_sha(self.conv) != sha:
+            raise UserError("The conversation changed while the summary was being written; compact again.")
+        est = (len(text) + 3) // 4
+        self._compact_pending = {"upto": upto, "end": end, "sha": sha, "model": model}
+        return {"summary": text, "exchanges": upto + 1, "kept": len(groups) - upto - 1, "model": model,
+                "summarised_tokens": summarised, "summary_tokens": est,
+                "after_tokens": view["total_tokens"] - summarised + est, "limit": limit,
+                "truncated": bool(result and result.finish_reason == "length"), "whole": whole,
+                "usage": result.usage if result else None}
+
+    def compact_apply(self, summary: str) -> None:
+        """Replace the exchanges summarised by compact_preview with the (possibly edited)
+        summary. The old conversation is kept in the case folder, for compact_undo and the record."""
+        pending = self._compact_pending
+        if self.busy:
+            raise UserError("Wait for the AI to finish first.")
+        if not pending or not self.case:
+            raise UserError("Write a summary first.")
+        if self._conv_sha(self.conv) != pending["sha"]:
+            self._compact_pending = None
+            raise UserError("The conversation changed since the summary was written; compact again.")
+        summary = summary.strip()
+        if not summary:
+            raise UserError("The summary is empty.")
+        end = pending["end"]
+        before = self.context_view()["total_tokens"]
+        n = 1 + max((int(m.group(1)) for f in self.case.dir.glob("context-before-compact-*.json")
+                     if (m := re.search(r"-(\d+)\.json$", f.name))), default=0)
+        backup = f"context-before-compact-{n}.json"
+        (self.case.dir / backup).write_text(json.dumps(
+            {"ts": time.time(), "model": pending["model"], "replaced_messages": end + 1, "conv": self.conv},
+            ensure_ascii=False), encoding="utf-8")
+        head = prompts.COMPACT_HEADER.format(model=pending["model"], when=f"{datetime.now():%Y-%m-%d %H:%M}")
+        msg = {"role": "user", "content": head + "\n\n" + summary}
+        self.conv = [msg, {"role": "assistant", "content": prompts.COMPACT_ACK}] + self.conv[end + 1:]
+        self.compactions.append({"file": backup, "replaced": end + 1, "sha": self._conv_sha([msg])})
+        self._req_conv_len = 0
+        self._compact_pending = None
+        after = self.context_view()["total_tokens"]
+        self.log("context_compacted", exchanges=pending["upto"] + 1, replaced_messages=end + 1, model=pending["model"],
+                 before_tokens=before, after_tokens=after, summary=summary, backup=backup)
+        self.chat.append({"kind": "note", "text": f"Compacted {pending['upto'] + 1} exchange(s) of the AI's context into "
+                          f"a summary: about {before:,} → {after:,} tokens. The chat and audit log keep everything; "
+                          "Export ▾ → What the AI knows… can undo it."})
+        self.emit("chat", entry=self.chat[-1])
+        self._persist()
+        self._changed()
+
+    def _undoable_compaction(self) -> dict | None:
+        """The latest compaction, while its summary still opens the conversation."""
+        if not self.compactions or len(self.conv) < 2:
+            return None
+        rec = self.compactions[-1]
+        return rec if self._conv_sha(self.conv[:1]) == rec["sha"] else None
+
+    def compact_undo(self) -> None:
+        """Put back the exchanges the latest compaction replaced; what came after it stays."""
+        if self.busy:
+            raise UserError("Wait for the AI to finish first.")
+        rec = self._undoable_compaction()
+        if not rec:
+            raise UserError("There is no compaction to undo (or its summary was removed or compacted again).")
+        try:
+            old = json.loads((self.case.dir / rec["file"]).read_text(encoding="utf-8"))["conv"]
+        except (OSError, ValueError, KeyError) as e:
+            raise UserError(f"Could not read {rec['file']}: {e}") from e
+        self.conv = old[:rec["replaced"]] + self.conv[2:]
+        self.compactions.pop()
+        self._req_conv_len = 0
+        self._compact_pending = None
+        self.log("context_compaction_undone", backup=rec["file"], restored_messages=rec["replaced"])
+        self.chat.append({"kind": "note", "text": "Undid the compaction: the AI's context has the original exchanges again."})
+        self.emit("chat", entry=self.chat[-1])
+        self._persist()
+        self._changed()
 
     # ---------------------------------------------------------------- timeline
 
@@ -2269,6 +2447,7 @@ class Engine:
             overflowed = not isinstance(e, UserError) and self._overflow_message(prov, model, e)
             if overflowed:
                 error = overflowed
+                self._overflowed = True
         entry["text"] = entry["text"].strip()
         if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches",
                                       "research")):
@@ -2287,6 +2466,7 @@ class Engine:
             self.log("turn_error", error=error)
         if usage:
             self.last_usage = usage
+            self._overflowed = False
             self.log("usage", model=model, **{k: v for k, v in usage.items() if isinstance(v, int)})
         self._turn = None      # finished: can_retry must not see this task as still busy
         self.emit("turn_end", entry=entry, error=error, usage=usage, chat=self.chat, can_retry=self.can_retry)

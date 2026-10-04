@@ -137,7 +137,8 @@ def full_transcript(case: dict, requests: list[dict], conv: list[dict], chat: li
         if purpose == "chat" and r.get("conv_index") == 0 and n > 1 and len(msgs) > 1:
             out += ["*The conversation was trimmed or rebuilt before this request, so all of it was sent again:*", ""]
         if msgs:
-            out += ["**Sent**" + (" (new since the previous request)" if purpose == "chat" else ""), ""]
+            out += ["**Sent**" + (" (new since the previous request)" if purpose == "chat" or
+                                  (purpose == "compact" and r.get("conv_index")) else ""), ""]
             for m in msgs:
                 out += _message_md(m)
         resp = r.get("response", {})

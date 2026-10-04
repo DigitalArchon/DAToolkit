@@ -171,7 +171,8 @@ the system's own; in the browser they're the browser's.
   Settings → Providers → "Context window" (set it for local models to match the server, such
   as Ollama's `num_ctx`), or from the error the first time a request is too long.
 - When a request is too long for the model, the chat says so with **What the AI knows…** and
-  **Retry**: remove earlier exchanges, then retry, or pick a model with a larger window. Some
+  **Retry**: compact or remove earlier exchanges, then retry, or pick a model with a larger
+  window. Some
   local servers (Ollama) cut an over-long prompt silently instead of refusing it; set their
   context window override so the figure warns in time.
 - Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V.
@@ -287,6 +288,18 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
 - **Export ▾ → What the AI knows** shows the exact context the model gets next turn, with a
   size estimate per exchange, and lets you remove exchanges from it. The chat and the audit
   log keep them.
+- **Compact** (in the same dialog) has the chat model summarise the older exchanges, by
+  default all but the last two, which stay word for word. The summary keeps the problem,
+  findings with their evidence, every change made to a system, what was ruled out, your
+  instructions and open threads, with hostnames, addresses and errors copied exactly. You
+  see it and can edit it before **Apply**; nothing changes until then. The request uses the
+  chat model, so the case's sensitivity rules apply as usual, and with Claude it reads the
+  conversation from the prompt cache while that is warm. Applying changes the start of the
+  conversation, so the next turn writes the shorter context to the cache once (see Prompt
+  caching). After a request that was too long, only the part to summarise is sent. The
+  previous context is saved in the case folder (`context-before-compact-N.json`), and
+  **Undo last compaction** puts it back while the summary still opens the conversation;
+  exchanges added since are kept.
 - **Export ▾ → Client update** writes the plain-language version of the ticket note.
 - **Export ▾ → Distil runbook** turns a solved case into `runbook.md`. When a new case's
   first message resembles a past case, the similar cases are noted in the chat and their

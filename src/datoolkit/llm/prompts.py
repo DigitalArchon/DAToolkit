@@ -462,6 +462,24 @@ RESEARCH_NOTE = (
 STATE_HEADER = ("[DAToolkit: the current state, as of this request. This is not a message from the technician; "
                 "it replaces any earlier state.]")
 
+# Compaction (Engine.compact_preview): the model summarises the older part of its own context.
+COMPACT_HEADER = ("[DAToolkit: earlier exchanges in this case were compacted into this summary by {model} on {when}, "
+                  "at the technician's request, to save context. The original messages are no longer in your context; "
+                  "the technician still has them. Treat the summary as what was established. When a detail you need "
+                  "isn't in it, ask or check again rather than guess.]")
+COMPACT_ACK = "Noted. I'll carry on from this summary."
+COMPACT_PROMPT = """[DAToolkit: this is not a message from the technician. The technician is compacting your context: {scope} will be replaced by a summary that you write now. {keep}Don't call any tools and don't carry on troubleshooting: reply with the summary only.
+
+Write it for yourself, to carry on the case from it, under these headings:
+- Problem and environment: the symptom as reported; the systems, hosts, OS and versions involved.
+- Findings: what has been established, each with its evidence (the command and the telling part of its output).
+- Changes made: every command that changed a system, in full, with its result. Leave none out.
+- Ruled out: causes eliminated, and why.
+- Technician's instructions: anything the technician asked you to do or avoid, word for word where short.
+- Open threads: questions not yet answered, and what you were about to check.
+
+Copy hostnames, IP addresses, paths, error messages, IDs and version numbers exactly. Keep [REDACTED] markers as they are. The hypothesis board, the command queue and the sessions are sent separately each turn, so don't repeat them. Use at most about {words} words; fewer is fine when little happened.]"""
+
 
 def build_static(case_name: str, case_notes: str = "", recipes: str = "", runbooks: str = "",
                  search: str = "") -> str:

@@ -484,6 +484,20 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.drop_context([int(g) for g in body.get("groups", [])])
         return {"ok": True}
 
+    @app.post("/api/context/compact")
+    async def context_compact(body: dict, e: Engine = Depends(auth)):
+        return await e.compact_preview(int(body.get("upto", -1)))
+
+    @app.post("/api/context/compact/apply")
+    async def context_compact_apply(body: dict, e: Engine = Depends(auth)):
+        e.compact_apply(str(body.get("summary", "")))
+        return {"ok": True}
+
+    @app.post("/api/context/compact/undo")
+    async def context_compact_undo(e: Engine = Depends(auth)):
+        e.compact_undo()
+        return {"ok": True}
+
     @app.get("/api/case/timeline")
     async def timeline(e: Engine = Depends(auth)):
         return e.timeline()
