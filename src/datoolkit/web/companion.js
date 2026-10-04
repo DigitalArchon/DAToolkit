@@ -155,7 +155,7 @@ function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/events?t=${encodeURIComponent(TOKEN)}`);
   ws.onmessage = (m) => { const ev = JSON.parse(m.data); if (ev.type === "state") render(ev.state); };
   ws.onclose = (e) => {
-    if (e.code === 4403) { toast("Disconnected: DAToolkit stopped the companion or issued a new code. Scan the connect code again."); return; }
+    if (e.code === 4403) { toast("Disconnected: DA Toolkit stopped the companion or issued a new code. Scan the connect code again."); return; }
     setTimeout(reconnect, 2000);
   };
 }
@@ -164,10 +164,10 @@ async function reconnect() {
   try { render(await api("GET", "/api/companion/state")); connect(); }
   catch (e) {
     if (e instanceof TypeError) setTimeout(reconnect, 3000);  // unreachable for now: keep trying
-    else toast("Disconnected: DAToolkit stopped the companion or issued a new code. Scan the connect code again.");
+    else toast("Disconnected: DA Toolkit stopped the companion or issued a new code. Scan the connect code again.");
   }
 }
-if (!TOKEN) toast("No pairing token. Scan the connect code on the DAToolkit screen.");
+if (!TOKEN) toast("No pairing token. Scan the connect code on the DA Toolkit screen.");
 else { api("GET", "/api/companion/state").then(render).catch((e) => toast(e.message)); connect(); }
 
 // ---- photo to AI: take or choose, black out, describe, send

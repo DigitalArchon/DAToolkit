@@ -229,7 +229,7 @@ function handleEvent(ev) {
       S.state.can_retry = !!ev.can_retry;
       S.state.last_error = ev.error || null;
       if (ev.usage) S.state.last_usage = ev.usage;
-      if (document.hidden) document.title = ev.error ? "✕ DAToolkit" : "✓ DAToolkit: your turn";
+      if (document.hidden) document.title = ev.error ? "✕ DA Toolkit" : "✓ DA Toolkit: your turn";
       chatActivity();
       renderBusy();
       renderChat(true);
@@ -1931,12 +1931,16 @@ function compactPanel(ctx, closeParent) {
 async function openCompactPreview(upto) {
   const m = modal({ title: "Compaction summary", wide: true, dismissable: false,
     body: h("div", { class: "muted" }, h("span", { class: "spinner" }), " Asking the AI to summarise…"),
-    buttons: [{ label: "Cancel" }] });
-  let r;
+    buttons: [{ label: "Cancel", onClick: async () => {      // stops the request at the provider too
+      cancelled = true;
+      await api("POST", "/api/context/compact/cancel");
+      toast("Compaction cancelled; nothing was changed.");
+    } }] });
+  let r, cancelled = false;
   try {
     r = await api("POST", "/api/context/compact", { upto });
   } catch (e) {
-    m.box.querySelector(".content").replaceChildren(h("div", { class: "warnbox" }, e.message));
+    if (!cancelled) m.box.querySelector(".content").replaceChildren(h("div", { class: "warnbox" }, e.message));
     return;
   }
   m.close();
@@ -2770,8 +2774,8 @@ function openSettings(tab = "providers") {
         h("label", { class: "field" }, h("span", {}, "Phone companion port (HTTPS)"), f.companion_port)),
       h("div", { class: "muted small" }, "The phone companion always uses this port, so a firewall only needs this one open (e.g. sudo ufw allow <port>/tcp). Changing it while the companion runs restarts it, and phones pair again."),
       h("div", { class: "row" },
-        h("label", { class: "field" }, h("span", {}, "Open DAToolkit in"), uiMode), h("span", { class: "field" })),
-      h("div", { class: "muted small" }, "Takes effect the next time DAToolkit starts. Without WebKitGTK it uses the browser anyway and says what to install. From a terminal, --browser or --window overrides this for one run."),
+        h("label", { class: "field" }, h("span", {}, "Open DA Toolkit in"), uiMode), h("span", { class: "field" })),
+      h("div", { class: "muted small" }, "Takes effect the next time DA Toolkit starts. Without WebKitGTK it uses the browser anyway and says what to install. From a terminal, --browser or --window overrides this for one run."),
       h("h3", {}, "Web search"),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "AI web searches and research"), search.search_mode),
@@ -3052,7 +3056,7 @@ function init() {
   }, true);
   setInterval(tickElapsed, 10000);
   setInterval(() => { if (S.state?.busy) renderStatus(); }, 1000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "DAToolkit"; });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "DA Toolkit"; });
   $("#shot-btn").addEventListener("click", () => guarded(attachScreenshot));
   $("#tab-shot-btn").addEventListener("click", () => guarded(attachScreenshot));
   $("#stop-btn").addEventListener("click", () => guarded(() => api("POST", "/api/stop")));
@@ -3067,9 +3071,9 @@ function init() {
   // the app window quits when it is closed; a browser tab doesn't, so the browser gets a Quit button
   $("#quit-btn").classList.toggle("hidden", DESKTOP);
   $("#quit-btn").addEventListener("click", () => guarded(async () => {
-    if (!(await confirmModal("Quit DAToolkit", "Quit DAToolkit? Open sessions are closed and the phone companion stops.", "Quit", "danger"))) return;
+    if (!(await confirmModal("Quit DA Toolkit", "Quit DA Toolkit? Open sessions are closed and the phone companion stops.", "Quit", "danger"))) return;
     await api("POST", "/api/quit");
-    document.body.replaceChildren(h("div", { class: "quit-note" }, h("h2", {}, "DAToolkit has quit."), h("p", {}, "You can close this tab.")));
+    document.body.replaceChildren(h("div", { class: "quit-note" }, h("h2", {}, "DA Toolkit has quit."), h("p", {}, "You can close this tab.")));
   }));
   api("GET", "/api/phone").then((i) => { S.phoneRunning = i.running; S.phones = i.phones; renderPhoneBtn(); }).catch(() => {});
   $("#vision-btn").addEventListener("click", () => openSettings("model"));

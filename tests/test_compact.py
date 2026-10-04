@@ -145,3 +145,41 @@ def test_ui_offers_compaction_with_a_review_step_and_undo():
     for needle in ('"/api/context/compact"', '"/api/context/compact/apply"', '"/api/context/compact/undo"',
                    "can_undo_compaction", "writes the new, shorter context to the cache again", "exchangeLabel"):
         assert needle in js, needle
+
+
+async def test_cancel_stops_the_summary_and_closes_the_connection(env, monkeypatch):  # noqa: F811
+    import asyncio
+
+    import httpx
+
+    from datoolkit.llm.client import LLMClient
+    engine, fake, _ = env
+    old = await _three_exchanges(engine, fake)
+    started, closed = asyncio.Event(), asyncio.Event()
+
+    class Hanging(httpx.AsyncByteStream):          # the provider starts replying, then keeps generating
+        async def __aiter__(self):
+            yield b'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"Problem"},"finish_reason":null}]}\n\n'
+            started.set()
+            await asyncio.sleep(3600)
+            yield b""
+
+        async def aclose(self):
+            closed.set()
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, stream=Hanging(), headers={"content-type": "text/event-stream"})))
+    monkeypatch.setattr(engine, "_client", lambda prov, model="": LLMClient(prov.base_url, "sk-test", http))
+    task = asyncio.create_task(engine.compact_preview(1))
+    await asyncio.wait_for(started.wait(), 5)
+    with pytest.raises(UserError, match="already being written"):
+        await engine.compact_preview(1)
+    assert engine.compact_cancel() is True
+    with pytest.raises(UserError, match="cancelled; nothing was changed"):
+        await task
+    await asyncio.wait_for(closed.wait(), 5)           # the HTTP response was closed, not left streaming
+    assert engine.conv == old and engine._compact_pending is None and engine.compact_cancel() is False
+    log = (engine.case.dir / "requests.jsonl").read_text().splitlines()
+    assert json.loads(log[-1])["response"]["error"] == "cancelled by the technician"
+    with pytest.raises(UserError, match="Write a summary first"):
+        engine.compact_apply("Problem")

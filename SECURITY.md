@@ -10,11 +10,11 @@ but reports are taken seriously and credited in the fix unless you'd rather not 
 
 ## Supported versions
 
-DAToolkit is in beta. Only the latest release (or `master`) gets fixes.
+DA Toolkit is in beta. Only the latest release (or `master`) gets fixes.
 
 ## What's in scope
 
-Anything that breaks one of DAToolkit's promises, for example:
+Anything that breaks one of DA Toolkit's promises, for example:
 
 - the AI (or text in command output) getting a command executed without a technician's click;
 - data from a Confidential or Sovereign case reaching a model or service its tier forbids;
@@ -26,4 +26,4 @@ Anything that breaks one of DAToolkit's promises, for example:
 - a model reply that makes the page load remote resources or run script.
 
 Weaknesses in upstream projects (NanoGPT, Tinfoil, guacd, xterm.js and so on) should go to
-those projects, though a heads-up is welcome if DAToolkit can mitigate them.
+those projects, though a heads-up is welcome if DA Toolkit can mitigate them.

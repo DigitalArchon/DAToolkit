@@ -1,9 +1,9 @@
-# DAToolkit manual
+# DA Toolkit manual
 
-This is the full reference. For what DAToolkit is and how to install it, see the
+This is the full reference. For what DA Toolkit is and how to install it, see the
 [README](README.md).
 
-> **Beta.** DAToolkit is beta software and is not intended for production use. Use it at
+> **Beta.** DA Toolkit is beta software and is not intended for production use. Use it at
 > your own risk.
 
 ## Contents
@@ -18,13 +18,13 @@ This is the full reference. For what DAToolkit is and how to install it, see the
 
 ## First run
 
-DAToolkit opens in its own window, which uses your system's WebKitGTK (see the
+DA Toolkit opens in its own window, which uses your system's WebKitGTK (see the
 [README](README.md#install) for the package). If that isn't installed, or there's no graphical
 display, it opens in your default web browser instead, with a banner saying why and what to
-install. To always use the browser, set **Settings → General → Open DAToolkit in** (it applies
+install. To always use the browser, set **Settings → General → Open DA Toolkit in** (it applies
 from the next start); from a terminal, `datoolkit --browser` or `--window` overrides that for one
 run, and `--no-open` just prints the local URL. In the browser, use **Quit** in the top bar to end
-DAToolkit: closing the tab leaves it running. The app window's clipboard and Save dialog are
+DA Toolkit: closing the tab leaves it running. The app window's clipboard and Save dialog are
 the system's own; in the browser they're the browser's.
 
 1. **Start a case.** Give it a name or ticket number and pick a sensitivity:
@@ -61,7 +61,7 @@ the system's own; in the browser they're the browser's.
   **show done** to see them) and **Restore** puts one back. The AI sees the queue, so it
   knows what is still pending and what has run but not been sent.
 - If a model replies with commands but no message (thinking models sometimes go straight from
-  reasoning to tool calls), DAToolkit asks it once for the message.
+  reasoning to tool calls), DA Toolkit asks it once for the message.
 - **Web search**: the AI can search the web through NanoGPT (Perplexity by default; Valyu,
   Tavily, Kagi, Linkup, Brave, Sofya, Firecrawl or Exa in Settings → General) for advisories,
   release notes and exact syntax. By default each query appears in the AI's message for you to
@@ -275,7 +275,7 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
 - **Exports are saved where you choose**: the app window opens the system Save dialog (in
   `--browser` mode the browser downloads the file). A copy still goes into the case folder.
   - **Export transcript (Markdown)** is the readable case record.
-  - **Full export** is a ZIP with every request DAToolkit made to a model, in order: the
+  - **Full export** is a ZIP with every request DA Toolkit made to a model, in order: the
     system prompt (in full whenever it changed), the messages sent, the model's reasoning as
     the provider returned it, and its reply with tool calls (`full-transcript.md`); the images
     exactly as the model received them; the AI-written documents; and the raw data (request
@@ -292,7 +292,8 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
   default all but the last two, which stay word for word. The summary keeps the problem,
   findings with their evidence, every change made to a system, what was ruled out, your
   instructions and open threads, with hostnames, addresses and errors copied exactly. You
-  see it and can edit it before **Apply**; nothing changes until then. The request uses the
+  see it and can edit it before **Apply**; nothing changes until then. **Cancel** while it is
+  being written stops the request at the provider. The request uses the
   chat model, so the case's sensitivity rules apply as usual, and with Claude it reads the
   conversation from the prompt cache while that is warm. Applying changes the start of the
   conversation, so the next turn writes the shorter context to the cache once (see Prompt
@@ -334,7 +335,7 @@ so nobody on the network can tie the app up by sending it data.
 checked who the phone is talking to:
 
 1. **Check the certificate.** Press **Start** and scan the first code. It opens a page with
-   no secret on it. The browser warns that the connection isn't private: DAToolkit uses a
+   no secret on it. The browser warns that the connection isn't private: DA Toolkit uses a
    self-signed certificate made for this install. Accept the warning, open the certificate
    details (Android Chrome: the icon left of the address → Certificate information; iPhone
    Safari: Show Details → view the certificate → More Details) and compare its **SHA-256
@@ -470,7 +471,7 @@ edit. Sovereign cases do neither.
    - Each attestation is recorded in the case's `events.jsonl`.
    - Attestation is redone every five minutes.
 
-Like SealedLore, DAToolkit doesn't use NanoGPT's `npx @nanogpt/private-mode@latest` proxy,
+Like SealedLore, DA Toolkit doesn't use NanoGPT's `npx @nanogpt/private-mode@latest` proxy,
 because that would let NanoGPT change the code that holds your plaintext.
 
 Verifying an enclave contacts NanoGPT's relay (for the attestation bundle), Sigstore and
@@ -524,10 +525,10 @@ collateral and NVIDIA's keys are cached for an hour.
     not supported.
   - Variables persist between commands.
 - **RDP** opens the remote desktop in a tab, through Apache Guacamole's `guacd`
-  (`sudo apt install guacd`; it runs as a local service on 127.0.0.1:4822). DAToolkit only
+  (`sudo apt install guacd`; it runs as a local service on 127.0.0.1:4822). DA Toolkit only
   connects to guacd on this machine, since that link isn't encrypted, and does the connection
   handshake itself, so the password never reaches the page. Add RDP hosts under Settings → Hosts with the security mode and keyboard layout.
-  - **Certificates are trusted on first use and pinned.** Before every connection DAToolkit
+  - **Certificates are trusted on first use and pinned.** Before every connection DA Toolkit
     reads the server's TLS certificate itself. The first time it shows you the subject,
     issuer and SHA-256 fingerprint to verify (on Windows: the Remote Desktop certificate in
     `certlm.msc`); after that, a different certificate blocks the connection until you forget

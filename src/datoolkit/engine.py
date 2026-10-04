@@ -180,6 +180,7 @@ class Engine:
         self._overflowed = False                                  # the last chat request was too long for the model
         self.compactions: list[dict] = []    # applied compactions, newest last (backup file, messages replaced)
         self._compact_pending: dict | None = None                 # a summary written but not yet applied
+        self._compact_task: asyncio.Task | None = None            # a summary being written
         # TEE models (llm/tee.py): (provider, model) -> (attested client, when, attestation shown)
         self._tee: dict[tuple[str, str], tuple[tee_mod.TeeClient, float, dict]] = {}
         self._tee_factory: Callable | None = None      # tests: (base_url, key, model) -> TeeClient
@@ -789,6 +790,7 @@ class Engine:
     def new_case(self, name: str, sensitivity: str, notes: str = "") -> None:
         if self.busy:
             raise UserError("Wait for the AI to finish (or stop it) before starting a new case.")
+        self.compact_cancel()        # a summary of the old case's conversation is no use now
         self.case = Case.create(name.strip() or "Untitled case", sensitivity, notes.strip())
         self.queue = Queue()
         self.conv, self.chat = [], []
@@ -824,6 +826,7 @@ class Engine:
         """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
         if self.busy:
             raise UserError("Wait for the AI to finish (or stop it) before opening a case.")
+        self.compact_cancel()        # a summary of the old case's conversation is no use now
         try:
             case = Case.load(case_id)
             state = case.load_state() or {}
@@ -1507,6 +1510,28 @@ class Engine:
         return hashlib.sha256(json.dumps(conv, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     async def compact_preview(self, upto: int) -> dict:
+        """Write a compaction summary (_compact_preview) as a task compact_cancel can stop."""
+        if self._compact_task and not self._compact_task.done():
+            raise UserError("A summary is already being written.")
+        task = self._compact_task = asyncio.create_task(self._compact_preview(upto))
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():     # this call itself was cancelled, not just the summary
+                raise
+            raise UserError("Compaction cancelled; nothing was changed.") from None
+        finally:
+            self._compact_task = None
+
+    def compact_cancel(self) -> bool:
+        """Stop a summary being written: the connection to the provider is closed, so it stops
+        generating. Returns whether there was one."""
+        if not self._compact_task or self._compact_task.done():
+            return False
+        self._compact_task.cancel()
+        return True
+
+    async def _compact_preview(self, upto: int) -> dict:
         """Ask the chat model to summarise exchanges 0..upto (as context_view groups them); the
         later exchanges stay word for word. Nothing changes until compact_apply. With the
         conversation fitting the model, the request is the chat request plus an instruction,
@@ -1561,6 +1586,11 @@ class Engine:
                     if kind == "done":
                         result = val
                 break
+            except asyncio.CancelledError:
+                self._log_request("compact", model, tier, messages[0]["content"], sent,
+                                  {"error": "cancelled by the technician"}, conv_index=start)
+                self.log("compact_cancelled", model=model)
+                raise
             except Exception as e:  # noqa: BLE001
                 if self._learn_unsupported(prov, model, params, e):
                     continue

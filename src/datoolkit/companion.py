@@ -68,7 +68,7 @@ def fingerprint(cert_pem: bytes) -> str:
 def _make_cert(cert_path: Path, key_path: Path, ip: str) -> None:
     key = ec.generate_private_key(ec.SECP256R1())
     host = socket.gethostname()
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"DAToolkit companion ({host})")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"DA Toolkit companion ({host})")])
     alt: list[x509.GeneralName] = [x509.DNSName(host)]
     try:
         alt.append(x509.IPAddress(ipaddress.ip_address(ip)))
@@ -144,7 +144,7 @@ class CompanionServer:
         except OSError as e:
             sock.close()
             if e.errno == errno.EADDRINUSE:
-                raise UserError(f"Port {port} is already in use, by another program or another DAToolkit "
+                raise UserError(f"Port {port} is already in use, by another program or another DA Toolkit "
                                 "with its phone companion running. Close that, or choose another port in "
                                 "Settings → General.") from e
             raise UserError(f"Can't listen on port {port}: {e.strerror}. Choose another port in "

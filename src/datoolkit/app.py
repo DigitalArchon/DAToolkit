@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None) -> None:
     url = f"http://127.0.0.1:{port}/?t={token}"
     try:
         if use_browser:
-            print(f"DAToolkit running. Open this URL (keep it private - it grants terminal access):\n{url}",
+            print(f"DA Toolkit running. Open this URL (keep it private - it grants terminal access):\n{url}",
                   flush=True)
             if not args.no_open:
                 import webbrowser
@@ -191,8 +191,8 @@ def main(argv: list[str] | None = None) -> None:
             # the window's class, which desktops match to datoolkit.desktop (and its icon); under
             # `python -m datoolkit` it would otherwise be "__main__.py"
             GLib.set_prgname("datoolkit")
-            GLib.set_application_name("DAToolkit")
-            desktop._window = webview.create_window("DAToolkit", url + "&desktop=1", width=1500, height=950,
+            GLib.set_application_name("DA Toolkit")
+            desktop._window = webview.create_window("DA Toolkit", url + "&desktop=1", width=1500, height=950,
                                                     min_size=(900, 600))
             window = desktop._window
 

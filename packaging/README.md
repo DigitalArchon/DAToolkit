@@ -1,6 +1,6 @@
 # Packaging: the AppImage
 
-DAToolkit ships as a single AppImage for x86-64 Linux, built so that anyone can rebuild a
+DA Toolkit ships as a single AppImage for x86-64 Linux, built so that anyone can rebuild a
 release from its commit and get the same file, byte for byte.
 
 ## What's in it, and what comes from the system
@@ -13,8 +13,8 @@ release from its commit and get the same file, byte for byte.
 | A fallback `libgirepository-2.0` for hosts that lack it | The Secret Service keyring (GNOME Keyring, KWallet) |
 
 WebKitGTK is deliberately **not** bundled: it renders the AI's output and the RDP canvas, so it
-should get the distribution's security updates, not wait for a DAToolkit release. Without it,
-DAToolkit opens in the default web browser instead and says what to install:
+should get the distribution's security updates, not wait for a DA Toolkit release. Without it,
+DA Toolkit opens in the default web browser instead and says what to install:
 
 | Distribution | Install the app window's engine |
 |---|---|

@@ -130,7 +130,7 @@ def test_export_labels_the_state_message():
              "messages": [{"role": "user", "content": "hello"},
                           {"role": "user", "content": prompts.STATE_HEADER + "\n\nOpen sessions: none."}], "response": {}}]
     md = full_transcript({"id": "c", "name": "c"}, reqs, [], [], "sys")
-    assert "**Current state (sent by DAToolkit" in md and "Open sessions: none." in md
+    assert "**Current state (sent by DA Toolkit" in md and "Open sessions: none." in md
 
 
 # ---------------------------------------------------------------- research: building blocks

@@ -1,14 +1,14 @@
-# DAToolkit
+# DA Toolkit
 
 A gated AI diagnostic console for Linux. You describe a problem; the AI proposes commands;
 **you** decide what runs and what output the AI gets to see.
 
 > [!WARNING]
-> **Beta.** DAToolkit is beta software and is not intended for production use. Use it at
+> **Beta.** DA Toolkit is beta software and is not intended for production use. Use it at
 > your own risk. It helps you run commands on real systems, so read every command before
 > you run it: the risk labels and reviews are aids, not guarantees.
 
-![DAToolkit working a disk-full case on a Linux server: the AI's hypotheses and proposed commands on the left, the SSH session on the right, the command queue with risk badges below](docs/screenshot.png)
+![DA Toolkit working a disk-full case on a Linux server: the AI's hypotheses and proposed commands on the left, the SSH session on the right, the command queue with risk badges below](docs/screenshot.png)
 
 <sub>A training scenario: the scripted training model and a mock host, no real systems.</sub>
 
@@ -34,7 +34,7 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
 
 ## Who it's for
 
-MSPs and sysadmins who work from Linux. DAToolkit is developed and tested on
+MSPs and sysadmins who work from Linux. DA Toolkit is developed and tested on
 Debian/Ubuntu/Mint. It manages Windows machines fine (WinRM and RDP), but it runs on Linux.
 
 Anyone is welcome to port it to Windows or macOS, but I won't be making any effort to do so
@@ -53,7 +53,7 @@ so that it gets your distribution's security updates:
 | Fedora | `sudo dnf install webkit2gtk4.1` | `sudo dnf install guacd` |
 | Arch, CachyOS | `sudo pacman -S webkit2gtk-4.1` | `guacamole-server` (AUR) |
 
-Without WebKitGTK, DAToolkit opens in your default web browser instead and says what to install.
+Without WebKitGTK, DA Toolkit opens in your default web browser instead and says what to install.
 You can also choose the browser yourself (Settings → General, or `--browser`); the browser
 version has a **Quit** button, because closing the tab doesn't end the app. Every release can
 be rebuilt from its commit to the same bytes: see [packaging/README.md](packaging/README.md).
@@ -74,7 +74,7 @@ it grants terminal access.
 ## Quick start
 
 1. **Start a case**: give it a name or ticket number and pick a sensitivity.
-2. **Add a model** under Settings → AI providers. To try DAToolkit without an API key, add
+2. **Add a model** under Settings → AI providers. To try DA Toolkit without an API key, add
    the **training provider**: a scripted model that walks through a canned case (the one in
    the screenshot) with nothing leaving the machine.
 3. **+ Session** opens a local shell or a saved host (add hosts under Settings → Hosts).

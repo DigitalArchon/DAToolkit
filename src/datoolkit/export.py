@@ -18,9 +18,9 @@ from .case import fence
 from .llm.prompts import STATE_HEADER
 
 README = """\
-DAToolkit full export of case "{name}" ({id}), made {when}.
+DA Toolkit full export of case "{name}" ({id}), made {when}.
 
-full-transcript.md   Every request DAToolkit made to an AI model, in order: the system prompt
+full-transcript.md   Every request DA Toolkit made to an AI model, in order: the system prompt
                      (shown in full whenever it changed), the messages sent, the model's
                      reasoning as the provider returned it, and its reply including tool calls.
 images/              The images exactly as the model received them (already redacted by the
@@ -71,7 +71,7 @@ def _tool_calls_md(calls: list[dict]) -> list[str]:
 def _message_md(m: dict) -> list[str]:
     role = m.get("role")
     if role == "user" and str(m.get("content", "")).startswith(STATE_HEADER):
-        return ["**Current state (sent by DAToolkit after the conversation, so the prompt cache keeps the rest)**", "",
+        return ["**Current state (sent by DA Toolkit after the conversation, so the prompt cache keeps the rest)**", "",
                 fence(str(m["content"])[len(STATE_HEADER):].strip()), ""]
     if role == "user":
         return ["**Technician → AI**", ""] + [x for c in _content_md(m.get("content")) for x in (c, "")]
@@ -104,7 +104,7 @@ def full_transcript(case: dict, requests: list[dict], conv: list[dict], chat: li
     first_logged = chat_requests[0].get("conv_index", 0) if chat_requests else len(conv)
     if first_logged > 0:
         out += ["## Conversation before request logging (reconstructed)", "",
-                "This case began before DAToolkit logged each model request, so the requests themselves "
+                "This case began before DA Toolkit logged each model request, so the requests themselves "
                 "cannot be shown. These are the messages as kept for the model; the system prompt at the "
                 "end is the one that would be sent now, and earlier requests' prompts differed in detail.", ""]
         for m in conv[:first_logged]:

@@ -1,6 +1,6 @@
-# Contributing to DAToolkit
+# Contributing to DA Toolkit
 
-Thanks for helping. DAToolkit is a small project with a clear purpose and a maintainer who
+Thanks for helping. DA Toolkit is a small project with a clear purpose and a maintainer who
 decides what goes in, so please open an issue to discuss anything bigger than a bug fix
 before you spend time on it.
 
@@ -22,7 +22,7 @@ Two related rules:
 
 ## Scope
 
-- **Linux only.** DAToolkit is developed and tested on Debian/Ubuntu/Mint. Ports to Windows
+- **Linux only.** DA Toolkit is developed and tested on Debian/Ubuntu/Mint. Ports to Windows
   or macOS are welcome as forks, but the maintainer won't take on a port or its upkeep, so
   please don't send platform abstraction layers upstream.
 - **GUI only.** The desktop window (pywebview) and `--browser` mode share one web front end.
@@ -54,7 +54,7 @@ flow without an API key.
 
 ## Licence
 
-DAToolkit is AGPL-3.0-or-later. By contributing you agree that your contribution is licensed
+DA Toolkit is AGPL-3.0-or-later. By contributing you agree that your contribution is licensed
 under the same terms.
 
 ## Security issues

@@ -103,9 +103,12 @@ class LLMClient:
         kwargs.update(_split_params(params))
         acc = StreamAccumulator()
         stream = await self._client.chat.completions.create(**kwargs)
-        async for chunk in stream:
-            for event in acc.feed(chunk):
-                yield event
+        try:
+            async for chunk in stream:
+                for event in acc.feed(chunk):
+                    yield event
+        finally:
+            await stream.close()     # stopped or cancelled: drop the connection, so the provider stops generating
         yield "done", acc.finish()
 
     async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:

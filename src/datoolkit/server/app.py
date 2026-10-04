@@ -488,6 +488,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def context_compact(body: dict, e: Engine = Depends(auth)):
         return await e.compact_preview(int(body.get("upto", -1)))
 
+    @app.post("/api/context/compact/cancel")
+    async def context_compact_cancel(e: Engine = Depends(auth)):
+        return {"cancelled": e.compact_cancel()}
+
     @app.post("/api/context/compact/apply")
     async def context_compact_apply(body: dict, e: Engine = Depends(auth)):
         e.compact_apply(str(body.get("summary", "")))
