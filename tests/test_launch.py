@@ -92,3 +92,37 @@ def test_a_variable_changed_for_datoolkit_itself_reaches_children_unchanged(monk
     hostenv.set_for_self("XDG_DATA_DIRS", "/appimage/share:/usr/share")
     env = host_env()
     assert "GI_TYPELIB_PATH" not in env and env["XDG_DATA_DIRS"] == "/usr/share"
+
+
+def test_the_window_takes_the_name_of_the_installed_desktop_entry(tmp_path, monkeypatch):
+    from datoolkit.app import desktop_id
+    img = tmp_path / "Apps" / "DA Toolkit.AppImage"
+    img.parent.mkdir()
+    img.write_bytes(b"")
+    (tmp_path / "link.AppImage").symlink_to(img)
+    home, sys_dir = tmp_path / "home", tmp_path / "sys"
+    (home / "applications" / "kde").mkdir(parents=True)
+    (sys_dir / "applications").mkdir(parents=True)
+    monkeypatch.setenv("XDG_DATA_HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_DIRS", str(sys_dir))
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    assert desktop_id() == "datoolkit"                         # not an AppImage
+    monkeypatch.setenv("APPIMAGE", str(img))
+    (home / "applications" / "other.desktop").write_text("[Desktop Entry]\nExec=/usr/bin/other %U\n")
+    assert desktop_id() == "datoolkit"                         # AppImage, but not integrated
+    # AppImageLauncher style: its own file name, the AppImage path quoted, reached through a link
+    (home / "applications" / "appimagekit_5c1e-DA_Toolkit.desktop").write_text(
+        f'[Desktop Entry]\nName=DA Toolkit\nExec="{tmp_path / "link.AppImage"}" %U\n')
+    assert desktop_id() == "appimagekit_5c1e-DA_Toolkit"
+    (home / "applications" / "appimagekit_5c1e-DA_Toolkit.desktop").unlink()
+    (home / "applications" / "kde" / "datoolkit.desktop").write_text(f"[Desktop Entry]\nTryExec={img}\nExec=x\n")
+    assert desktop_id() == "kde-datoolkit"                     # a subdirectory joins the id with "-"
+
+
+def test_the_window_icon_is_one_gtk_can_load(tmp_path, monkeypatch):
+    from datoolkit.app import window_icon
+    monkeypatch.delenv("APPDIR", raising=False)
+    assert window_icon().endswith("icon.svg")
+    monkeypatch.setenv("APPDIR", str(tmp_path))
+    (tmp_path / "datoolkit.png").write_bytes(b"not a png")    # unreadable: falls back
+    assert window_icon().endswith("icon.svg")

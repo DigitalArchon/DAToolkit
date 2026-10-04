@@ -18,9 +18,18 @@
   <span id="sens-badge" class="badge"></span>
   <span class="spacer"></span>
   <button id="model-btn" class="ghost" title="Choose model"><span id="model-name">Choose model</span> <span id="tier-badge" class="badge"></span></button>
+  <div class="menu-wrap">
+    <button id="context-btn" class="ghost"><span id="usage">Context</span> ▾</button>
+    <div id="context-menu" class="menu hidden">
+      <button data-act="context">What the AI knows…</button>
+      <button data-act="similar">Similar past cases…</button>
+      <button data-act="timeline">Timeline replay</button>
+      <div class="sep"></div>
+      <button data-act="folder">Open case folder</button>
+    </div>
+  </div>
   <button id="attest-btn" class="ghost small hidden" title="Re-check the enclave's attestation"></button>
   <button id="vision-btn" class="ghost small" title=""></button>
-  <span id="usage" class="muted small"></span>
   <button id="phone-btn" class="ghost small" title="Phone companion: follow the case and tick off commands from your phone">📱</button>
   <div class="menu-wrap">
     <button id="export-btn" class="ghost">Export ▾</button>
@@ -30,12 +39,6 @@
       <button data-act="summary">Ticket summary (AI)</button>
       <button data-act="client">Client update (AI)</button>
       <button data-act="runbook">Distil runbook (AI)</button>
-      <div class="sep"></div>
-      <button data-act="timeline">Timeline replay</button>
-      <button data-act="context">What the AI knows…</button>
-      <button data-act="similar">Similar past cases…</button>
-      <div class="sep"></div>
-      <button data-act="folder">Open case folder</button>
     </div>
   </div>
   <button id="settings-btn" class="ghost">Settings</button>

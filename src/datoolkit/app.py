@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shlex
 import signal
 import socket
 import sys
@@ -90,6 +91,64 @@ WEBKIT_INSTALL = ("Ubuntu, Mint, Debian: sudo apt install gir1.2-webkit2-4.1 · 
 
 HOST_TYPELIB_DIRS = ("/usr/lib64/girepository-1.0", "/usr/lib/x86_64-linux-gnu/girepository-1.0",
                      "/usr/lib/girepository-1.0")
+
+
+def desktop_id() -> str:
+    """The name the window identifies itself by (X11 WM_CLASS, Wayland app_id). Desktops find
+    the window's icon by matching it to an installed .desktop file: KWin on Wayland only by
+    exact file name. AppImage integrators (AppImageLauncher, Gear Lever, ...) install our
+    datoolkit.desktop under a name of their own, so when running from an AppImage, use the name
+    of the installed entry that launches this AppImage; otherwise "datoolkit"."""
+    appimage = os.environ.get("APPIMAGE")
+    if not appimage:
+        return "datoolkit"
+    target = os.path.realpath(appimage)
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    dirs = [data_home] + (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+    for base in dict.fromkeys(d for d in dirs if d):
+        apps = Path(base) / "applications"
+        try:
+            entries = sorted(apps.rglob("*.desktop"))
+        except OSError:
+            continue
+        for f in entries:
+            try:
+                lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if key == "TryExec" and value:
+                    program = value                       # a plain path
+                elif key == "Exec" and value:
+                    try:
+                        program = shlex.split(value)[0]   # a command line, the path maybe quoted
+                    except (ValueError, IndexError):
+                        continue
+                else:
+                    continue
+                if os.path.realpath(os.path.expanduser(program)) == target:
+                    # a desktop-file id: the path under applications/, with "/" as "-"
+                    return str(f.relative_to(apps))[:-len(".desktop")].replace("/", "-")
+    return "datoolkit"
+
+
+def window_icon() -> str | None:
+    """The icon file for the window itself (X11 shows it; Wayland takes the desktop entry's)."""
+    appdir = os.environ.get("APPDIR")
+    for path in ([Path(appdir) / "datoolkit.png"] if appdir else []) + [Path(__file__).parent / "web" / "icon.svg"]:
+        if not path.is_file():
+            continue
+        try:
+            import gi
+            gi.require_version("GdkPixbuf", "2.0")
+            from gi.repository import GdkPixbuf
+            GdkPixbuf.Pixbuf.new_from_file(str(path))    # GTK would refuse a file it can't load
+            return str(path)
+        except Exception:  # noqa: BLE001 - no loader for it: try the next, or go without
+            continue
+    return None
 
 
 def _bundled_girepository() -> None:
@@ -188,9 +247,9 @@ def main(argv: list[str] | None = None) -> None:
             import webview
             from gi.repository import GLib
 
-            # the window's class, which desktops match to datoolkit.desktop (and its icon); under
-            # `python -m datoolkit` it would otherwise be "__main__.py"
-            GLib.set_prgname("datoolkit")
+            # the window's class and Wayland app_id, which desktops match to our desktop entry (and its
+            # icon); under `python -m datoolkit` it would otherwise be "__main__.py"
+            GLib.set_prgname(desktop_id())
             GLib.set_application_name("DA Toolkit")
             desktop._window = webview.create_window("DA Toolkit", url + "&desktop=1", width=1500, height=950,
                                                     min_size=(900, 600))
@@ -206,7 +265,7 @@ def main(argv: list[str] | None = None) -> None:
                 for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, close)
 
-            webview.start(on_started, gui="gtk", private_mode=True)
+            webview.start(on_started, gui="gtk", private_mode=True, icon=window_icon())
     except KeyboardInterrupt:
         pass
     finally:

@@ -273,6 +273,7 @@ body.rdp-max .term-host { inset: 0; }
 /* context usage indicator (top bar) */
 #usage.warn { color: var(--warn); }
 #usage.bad { color: var(--danger); font-weight: 600; }
+#context-menu { left: 0; right: auto; }      /* opens under the button, which sits mid-bar */
 
 /* resume a case */
 details.resume summary { cursor: pointer; color: var(--muted); font-size: 13px; }

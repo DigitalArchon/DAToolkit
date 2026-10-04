@@ -425,7 +425,7 @@ class Engine:
         size = f" ({known['tokens']:,} tokens)" if known else ""
         self.log("context_overflow", model=model, limit=known["tokens"] if known else None, error=str(err)[:500])
         return (f"failed: the conversation is too long for {model}'s context window{size}. Compact or remove "
-                "earlier exchanges under Export ▾ → What the AI knows…, then retry; or switch to a model with a "
+                "earlier exchanges under Context ▾ → What the AI knows…, then retry; or switch to a model with a "
                 "larger window.")
 
     def vision_of(self, prov: Provider, model: str) -> bool | None:
@@ -1650,7 +1650,7 @@ class Engine:
                  before_tokens=before, after_tokens=after, summary=summary, backup=backup)
         self.chat.append({"kind": "note", "text": f"Compacted {pending['upto'] + 1} exchange(s) of the AI's context into "
                           f"a summary: about {before:,} → {after:,} tokens. The chat and audit log keep everything; "
-                          "Export ▾ → What the AI knows… can undo it."})
+                          "Context ▾ → What the AI knows… can undo it."})
         self.emit("chat", entry=self.chat[-1])
         self._persist()
         self._changed()

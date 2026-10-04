@@ -163,18 +163,17 @@ the system's own; in the browser they're the browser's.
   queue, audit log, transcripts, request log, images, runbook), or tick several and use
   **Delete selected**. The filter box narrows the list. The open case can't be deleted;
   exports saved elsewhere are left alone.
-- The top bar shows `ctx 23k / 200k`: the prompt size of the last request, against the
-  selected model's context window when that is known. It turns amber past the threshold in
-  **Settings → General** (default 100k) or at 75% of the window, whichever comes first, which
-  is the cue to export a ticket summary and start a fresh case; red at 90% of the window means
-  the next request may not fit. The window comes from NanoGPT's model details, from
-  Settings → Providers → "Context window" (set it for local models to match the server, such
-  as Ollama's `num_ctx`), or from the error the first time a request is too long.
+- **Context ▾**, next to the model, shows `Context 23k / 200k`: the prompt size of the last
+  request, against the selected model's context window when that is known. It turns amber past
+  the threshold in **Settings → General** (default 100k) or at 75% of the window, whichever
+  comes first, which is the cue to export a ticket summary and start a fresh case; red at 90%
+  of the window means the next request may not fit. The window comes from NanoGPT's model
+  details, from Settings → Providers → "Context window" (set it for local models to match the
+  server, such as Ollama's `num_ctx`), or from the error the first time a request is too long.
 - When a request is too long for the model, the chat says so with **What the AI knows…** and
   **Retry**: compact or remove earlier exchanges, then retry, or pick a model with a larger
-  window. Some
-  local servers (Ollama) cut an over-long prompt silently instead of refusing it; set their
-  context window override so the figure warns in time.
+  window. Some local servers (Ollama) cut an over-long prompt silently instead of refusing it;
+  set their context window override so the figure warns in time.
 - Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V.
 
 ### Hypothesis board
@@ -283,9 +282,9 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
     optional because they are unredacted. Cases started before request logging existed get
     their earlier conversation reconstructed, marked as such.
   - Ticket summary, client update and runbook have **Save as…** next to Copy.
-- **Export ▾ → Timeline replay** plays the case back: events on the left, the terminal
+- **Context ▾ → Timeline replay** plays the case back: events on the left, the terminal
   transcript on the right, on one slider.
-- **Export ▾ → What the AI knows** shows the exact context the model gets next turn, with a
+- **Context ▾ → What the AI knows** shows the exact context the model gets next turn, with a
   size estimate per exchange, and lets you remove exchanges from it. The chat and the audit
   log keep them.
 - **Compact** (in the same dialog) has the chat model summarise the older exchanges, by
@@ -304,7 +303,8 @@ you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines
 - **Export ▾ → Client update** writes the plain-language version of the ticket note.
 - **Export ▾ → Distil runbook** turns a solved case into `runbook.md`. When a new case's
   first message resembles a past case, the similar cases are noted in the chat and their
-  runbooks go into the AI's context as leads. **Similar past cases…** searches by hand.
+  runbooks go into the AI's context as leads. **Context ▾ → Similar past cases…** searches by
+  hand, and **Context ▾ → Open case folder** opens the case's files.
 
 ### Companion view
 

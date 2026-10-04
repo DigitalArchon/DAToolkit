@@ -372,23 +372,28 @@ function fmtTokens(n) { return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 
 
 function renderUsage() {
   const el = $("#usage");
+  const btn = $("#context-btn");
   const u = S.state?.last_usage;
-  if (!u || !u.prompt_tokens) { el.textContent = ""; el.className = "muted small"; el.title = ""; return; }
+  if (!u || !u.prompt_tokens) {
+    el.textContent = "Context"; el.className = "";
+    btn.title = "What the AI knows, similar past cases, timeline replay, the case folder";
+    return;
+  }
   const setting = S.state.config.settings.context_warn_tokens || 100000;
   const lim = S.state.context_limit;           // the selected model's window, when known
   const warn = lim ? Math.min(setting, Math.round(lim.tokens * 0.75)) : setting;
   const bad = lim ? Math.round(lim.tokens * 0.9) : setting * 1.5;
   const p = u.prompt_tokens;
-  el.textContent = `ctx ${fmtTokens(p)}` + (lim ? ` / ${fmtTokens(lim.tokens)}` : "");
-  el.className = `muted small usage${p >= bad ? " bad" : p >= warn ? " warn" : ""}`;
+  el.textContent = `Context ${fmtTokens(p)}` + (lim ? ` / ${fmtTokens(lim.tokens)}` : "");
+  el.className = p >= bad ? "bad" : p >= warn ? "warn" : "";
   const cached = u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
   const written = u.cache_creation_input_tokens || 0;
   if (cached) el.textContent += ` · ${Math.round(100 * cached / p)}% cached`;
-  el.title = `Last request: ${p.toLocaleString()} prompt tokens, ${(u.completion_tokens || 0).toLocaleString()} completion tokens.`
+  btn.title = `Last request: ${p.toLocaleString()} prompt tokens, ${(u.completion_tokens || 0).toLocaleString()} completion tokens.`
     + (cached || written ? `\nPrompt cache: ${cached.toLocaleString()} read, ${written.toLocaleString()} written.` : "")
     + (lim ? `\n${S.state.config.active_model}'s context window: ${lim.tokens.toLocaleString()} tokens (${{ override: "your override in Settings → Providers", provider: "reported by the provider", learned: "named in an earlier error" }[lim.source]}).`
       : "\nThe selected model's context window isn't known; set it under Settings → Providers for local models.")
-    + (lim && p >= bad ? "\nThe next request may not fit. Remove earlier exchanges under Export ▾ → What the AI knows…."
+    + (lim && p >= bad ? "\nThe next request may not fit. Compact or remove earlier exchanges under Context ▾ → What the AI knows…."
       : p >= warn ? `\nThe conversation is getting long (warning threshold ${setting.toLocaleString()} in Settings → General). Consider a new case or a ticket summary.` : "");
 }
 
@@ -3079,6 +3084,8 @@ function init() {
   $("#vision-btn").addEventListener("click", () => openSettings("model"));
   $("#export-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#export-menu")); });
   $("#export-menu").addEventListener("click", (e) => { const a = e.target.closest("button")?.dataset.act; if (a) doExport(a); });
+  $("#context-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#context-menu")); });
+  $("#context-menu").addEventListener("click", (e) => { const a = e.target.closest("button")?.dataset.act; if (a) doExport(a); });
   $("#new-session-btn").addEventListener("click", (e) => {
     e.stopPropagation();
     if (!S.state.case) return toast("Start a case first.");
