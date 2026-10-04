@@ -332,3 +332,22 @@ def test_ui_shows_the_window_and_offers_the_context_view_on_overflow():
     from pathlib import Path
     js = (Path(__file__).parent.parent / "src/datoolkit/web/app.js").read_text()
     assert "S.state.context_limit" in js and "e.context && last" in js and "context_overrides" in js
+
+
+async def test_a_resumed_case_shows_its_last_request_size(env):  # noqa: F811
+    import json as _json
+    engine, fake, _ = env
+    engine.new_case("sized", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    chunk = {"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": "m", "choices": [],
+             "usage": {"prompt_tokens": 23000, "completion_tokens": 400, "total_tokens": 23400}}
+    fake.responses.append(sse(({"role": "assistant", "content": "Hello."}, "stop"))
+                          .replace("data: [DONE]", f"data: {_json.dumps(chunk)}\n\ndata: [DONE]"))
+    engine.send("hi")
+    await wait_turn(engine)
+    assert engine.last_usage["prompt_tokens"] == 23000
+    case_id = engine.case.id
+    engine.new_case("other", "open")
+    assert engine.snapshot()["last_usage"] is None             # a new case starts empty
+    engine.open_case(case_id)
+    assert engine.snapshot()["last_usage"]["prompt_tokens"] == 23000

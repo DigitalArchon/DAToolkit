@@ -836,7 +836,8 @@ class Engine:
         self.conv = list(state.get("conv", []))
         self.chat = list(state.get("chat", []))
         self.queue = Queue.from_list(state.get("queue", []))
-        self.last_usage = None
+        # the last request's size, so the context figure shows on resume, before the next request
+        self.last_usage = state.get("last_usage") if isinstance(state.get("last_usage"), dict) else None
         self.hypotheses = list(state.get("hypotheses", []))
         self.compactions, self._compact_pending, self._overflowed = list(state.get("compactions", [])), None, False
         self._runbooks, self._similar = "", []
@@ -870,7 +871,8 @@ class Engine:
         if not self.case:
             return
         try:
-            self.case.save_state(self.conv, self.chat, self.queue.to_list(), self.hypotheses, self.compactions)
+            self.case.save_state(self.conv, self.chat, self.queue.to_list(), self.hypotheses, self.compactions,
+                                 self.last_usage)
         except OSError as e:
             self.emit("toast", level="error", text=f"Could not save case state: {e}")
 
