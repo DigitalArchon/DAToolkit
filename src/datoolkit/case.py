@@ -45,10 +45,8 @@ class Case:
     @classmethod
     def load(cls, case_id: str, root: Path | None = None) -> "Case":
         """Reopen a case directory written by create()."""
-        d = (root or data_dir() / "cases") / case_id
+        d = _case_dir(case_id, root)
         meta = _read_meta(d)
-        if meta is None:
-            raise FileNotFoundError(f"No case {case_id}")
         return cls(name=meta["name"], sensitivity=meta["sensitivity"], notes=meta.get("notes", ""),
                    id=case_id, dir=d, started=meta.get("started", ""))
 
@@ -80,15 +78,16 @@ class Case:
 
     @staticmethod
     def delete(case_id: str, root: Path | None = None) -> None:
-        """Remove a case directory and everything in it. Only a direct child of the cases
-        directory that is a case (has case.json or a case_started event) can be removed."""
-        base = (root or data_dir() / "cases").resolve()
-        if not re.fullmatch(r"[\w.-]+", case_id) or case_id in (".", ".."):
-            raise ValueError(f"Bad case id {case_id!r}")
-        d = base / case_id
-        if d.is_symlink() or not d.is_dir() or d.resolve().parent != base or _read_meta(d) is None:
-            raise FileNotFoundError(f"No case {case_id}")
-        shutil.rmtree(d)
+        """Remove a case directory and everything in it."""
+        shutil.rmtree(_case_dir(case_id, root))
+
+    def edit(self, name: str, notes: str) -> None:
+        """Rename the case and replace its notes. The directory keeps its original id."""
+        if (name, notes) == (self.name, self.notes):
+            return
+        self.log("case_edited", name=name, notes=notes, old_name=self.name, old_notes=self.notes)
+        self.name, self.notes = name, notes
+        self.write_meta()
 
     def write_meta(self) -> None:
         _write_json(self.dir / "case.json", {"name": self.name, "sensitivity": self.sensitivity,
@@ -172,6 +171,18 @@ def _write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
     tmp.replace(path)
+
+
+def _case_dir(case_id: str, root: Path | None = None) -> Path:
+    """The directory of a case. Only a direct child of the cases directory that is a case (has
+    case.json or a case_started event) counts: no paths, no symlinks."""
+    base = (root or data_dir() / "cases").resolve()
+    if not re.fullmatch(r"[\w.-]+", case_id) or case_id in (".", ".."):
+        raise ValueError(f"Bad case id {case_id!r}")
+    d = base / case_id
+    if d.is_symlink() or not d.is_dir() or d.resolve().parent != base or _read_meta(d) is None:
+        raise FileNotFoundError(f"No case {case_id}")
+    return d
 
 
 def _read_meta(d: Path) -> dict | None:

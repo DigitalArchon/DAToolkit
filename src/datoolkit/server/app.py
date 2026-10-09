@@ -337,6 +337,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def delete_cases(body: dict, e: Engine = Depends(auth)):
         return e.delete_cases([str(i) for i in body.get("ids", [])])
 
+    @app.post("/api/case/edit")
+    async def edit_case(body: dict, e: Engine = Depends(auth)):
+        notes = body.get("notes")
+        return e.edit_case(str(body.get("id", "")), str(body.get("name", "")), None if notes is None else str(notes))
+
     @app.post("/api/case/open")
     async def open_case(body: dict, e: Engine = Depends(auth)):
         e.open_case(str(body.get("id", "")))

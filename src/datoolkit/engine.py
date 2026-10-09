@@ -822,6 +822,33 @@ class Engine:
             self.emit("similar", cases=self.snapshot()["similar_cases"])
         return {"deleted": deleted, "errors": errors}
 
+    def edit_case(self, case_id: str, name: str, notes: str | None = None) -> dict:
+        """Rename a case, the open one or one on disk, and change its notes if given. The AI sees
+        the new name and notes from its next request."""
+        name = name.strip()
+        if not name:
+            raise UserError("A case needs a name.")
+        if self.case and case_id == self.case.id:
+            case = self.case
+        else:
+            try:
+                case = Case.load(case_id)
+            except (OSError, ValueError) as e:
+                raise UserError(f"Could not edit case {case_id}: {e}") from e
+        try:
+            case.edit(name, case.notes if notes is None else notes.strip())
+        except OSError as e:
+            raise UserError(f"Could not save case {case_id}: {e}") from e
+        if any(h["id"] == case.id for h in self._similar):
+            for h in self._similar:
+                if h["id"] == case.id:
+                    h["name"] = case.name
+            self._runbooks = search.runbook_context(self._similar)   # the runbook heading names the case
+            self.emit("similar", cases=self.snapshot()["similar_cases"])
+        if case is self.case:
+            self._changed()
+        return {"id": case.id, "name": case.name, "notes": case.notes}
+
     def open_case(self, case_id: str) -> None:
         """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
         if self.busy:

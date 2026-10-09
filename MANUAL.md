@@ -163,6 +163,10 @@ the system's own; in the browser they're the browser's.
   queue, audit log, transcripts, request log, images, runbook), or tick several and use
   **Delete selected**. The filter box narrows the list. The open case can't be deleted;
   exports saved elsewhere are left alone.
+- **Rename a case**: **✎** beside the case name in the top bar edits the open case's name
+  and notes; **Edit** in the case list does the same for an earlier case. The AI sees the
+  new name and notes from your next message. The case folder keeps its original name, and
+  the change is recorded in the audit log.
 - **Context ▾**, next to the model, shows `Context 23k / 200k`: the prompt size of the last
   request (kept with the case, so a resumed case shows it too), against the selected model's
   context window when that is known. It turns amber past the threshold in **Settings →

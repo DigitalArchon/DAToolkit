@@ -283,6 +283,7 @@ function handleEvent(ev) {
 function renderTop() {
   const st = S.state;
   $("#case-btn").textContent = st.case ? st.case.name : "No case";
+  $("#case-edit-btn").classList.toggle("hidden", !st.case);
   const sb = $("#sens-badge");
   sb.textContent = st.case ? st.case.sensitivity : "";
   sb.className = `badge ${st.case?.sensitivity || ""}`;
@@ -2227,6 +2228,33 @@ function showCredentialPrompt(p) {
 
 // ------------------------------------------------------------------ case
 
+// Rename a case and change its notes: the open case from the top bar, any other from the case list.
+// Resolves with the saved {id, name, notes}, or null when cancelled.
+function editCaseModal(c) {
+  return new Promise((resolve) => {
+    let saved = null;
+    const name = h("input", { type: "text", value: c.name });
+    const notes = h("textarea", { rows: 4, value: c.notes || "", placeholder: "Site/client notes for the AI (optional): environment, known quirks, what's been tried…" });
+    const save = async () => {
+      if (!name.value.trim()) throw new Error("A case needs a name.");
+      saved = await api("POST", "/api/case/edit", { id: c.id, name: name.value.trim(), notes: notes.value.trim() });
+    };
+    const m = modal({
+      title: "Edit case",
+      body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
+        h("label", { class: "field" }, h("span", {}, "Case name / ticket"), name),
+        h("label", { class: "field" }, h("span", {}, "Notes"), notes),
+        c.id === S.state.case?.id ? h("div", { class: "muted small" }, "The AI sees the new name and notes from your next message.") : null),
+      buttons: [{ label: "Cancel" }, { label: "Save", kind: "primary", onClick: save }],
+      onClose: () => resolve(saved),
+    });
+    name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); m.box.querySelector(".buttons button.primary").click(); }
+    });
+    setTimeout(() => name.select(), 40);
+  });
+}
+
 function openCaseModal(first) {
   const st = S.state;
   const name = h("input", { type: "text", placeholder: "e.g. TKT-1042 Acme file server slow" });
@@ -2247,7 +2275,7 @@ function openCaseModal(first) {
   const selAll = h("input", { type: "checkbox", title: "Select every case shown" });
   const delSel = h("button", { type: "button", class: "small danger", disabled: true }, "Delete selected");
   const tools = h("div", { class: "row case-tools" }, h("label", { class: "check" }, selAll, "All"), filter, delSel);
-  const resumeBox = h("details", { class: "resume" }, h("summary", {}, "Previous cases (resume or delete)"), tools, resumeList);
+  const resumeBox = h("details", { class: "resume" }, h("summary", {}, "Previous cases (open, edit or delete)"), tools, resumeList);
   body.append(resumeBox);
   let m;
   let cases = [];
@@ -2291,6 +2319,10 @@ function openCaseModal(first) {
             m.close();
             toast(`Resumed ${c.name}.`, "ok");
           }) }, "Open"),
+          h("button", { type: "button", class: "small ghost", title: "Rename this case or change its notes", onclick: () => guarded(async () => {
+            const r = await editCaseModal(c);
+            if (r) { Object.assign(c, r); draw(); }
+          }) }, "Edit"),
           h("button", { type: "button", class: "small ghost danger", title: "Delete this case from disk", onclick: () => guarded(() => remove([c])) }, "Delete")));
     }) : [h("div", { class: "muted small" }, cases.length ? "No case matches the filter." : "No previous cases.")]));
     syncBulk();
@@ -3066,6 +3098,7 @@ function init() {
   $("#tab-shot-btn").addEventListener("click", () => guarded(attachScreenshot));
   $("#stop-btn").addEventListener("click", () => guarded(() => api("POST", "/api/stop")));
   $("#case-btn").addEventListener("click", () => openCaseModal(false));
+  $("#case-edit-btn").addEventListener("click", () => S.state.case && guarded(() => editCaseModal(S.state.case)));
   $("#model-btn").addEventListener("click", openModelPicker);
   $("#attest-btn").addEventListener("click", () => guarded(async () => {
     const r = await api("POST", "/api/attest");
