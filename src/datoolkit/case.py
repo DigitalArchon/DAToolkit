@@ -81,12 +81,20 @@ class Case:
         """Remove a case directory and everything in it."""
         shutil.rmtree(_case_dir(case_id, root))
 
-    def edit(self, name: str, notes: str) -> None:
-        """Rename the case and replace its notes. The directory keeps its original id."""
-        if (name, notes) == (self.name, self.notes):
+    def edit(self, name: str, notes: str, sensitivity: str | None = None) -> None:
+        """Rename the case, replace its notes and raise its sensitivity. Sensitivity only goes up:
+        what was sent under the old level has been sent, and a lower level would allow more models
+        to see the conversation so far. The directory keeps its original id."""
+        sensitivity = sensitivity or self.sensitivity
+        if sensitivity not in SENSITIVITIES:
+            raise ValueError(f"Unknown sensitivity {sensitivity}")
+        if SENSITIVITIES.index(sensitivity) < SENSITIVITIES.index(self.sensitivity):
+            raise ValueError(f"A case's sensitivity can only be raised, not lowered from {self.sensitivity}")
+        if (name, notes, sensitivity) == (self.name, self.notes, self.sensitivity):
             return
-        self.log("case_edited", name=name, notes=notes, old_name=self.name, old_notes=self.notes)
-        self.name, self.notes = name, notes
+        self.log("case_edited", name=name, notes=notes, sensitivity=sensitivity,
+                 old_name=self.name, old_notes=self.notes, old_sensitivity=self.sensitivity)
+        self.name, self.notes, self.sensitivity = name, notes, sensitivity
         self.write_meta()
 
     def write_meta(self) -> None:

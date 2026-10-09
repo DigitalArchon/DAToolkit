@@ -822,9 +822,9 @@ class Engine:
             self.emit("similar", cases=self.snapshot()["similar_cases"])
         return {"deleted": deleted, "errors": errors}
 
-    def edit_case(self, case_id: str, name: str, notes: str | None = None) -> dict:
-        """Rename a case, the open one or one on disk, and change its notes if given. The AI sees
-        the new name and notes from its next request."""
+    def edit_case(self, case_id: str, name: str, notes: str | None = None, sensitivity: str | None = None) -> dict:
+        """Rename a case, the open one or one on disk, change its notes and raise its sensitivity
+        (see Case.edit), each if given. The AI sees the new name and notes from its next request."""
         name = name.strip()
         if not name:
             raise UserError("A case needs a name.")
@@ -835,10 +835,24 @@ class Engine:
                 case = Case.load(case_id)
             except (OSError, ValueError) as e:
                 raise UserError(f"Could not edit case {case_id}: {e}") from e
+        old_sens = case.sensitivity
+        raising = bool(sensitivity) and sensitivity != old_sens
+        if raising and case is self.case:
+            if self.busy:
+                raise UserError("Wait for the AI to finish (or stop it) before changing the case's sensitivity.")
+            self.compact_cancel()        # a summary being written goes to a model the new level may not allow
         try:
-            case.edit(name, case.notes if notes is None else notes.strip())
+            case.edit(name, case.notes if notes is None else notes.strip(), sensitivity or None)
+        except ValueError as e:
+            raise UserError(str(e)) from e
         except OSError as e:
             raise UserError(f"Could not save case {case_id}: {e}") from e
+        if raising and case is self.case:
+            self.chat.append({"kind": "note", "text": f"Sensitivity raised from {old_sens.upper()} to {case.sensitivity.upper()} "
+                              f"{datetime.now():%Y-%m-%d %H:%M}. What was sent before stays with the models it was sent to."})
+            if self._drop_disallowed_model():
+                self.emit("toast", level="warn", text=f"{case.sensitivity.upper()} cases can't use the selected model: choose another.")
+            self._persist()
         if any(h["id"] == case.id for h in self._similar):
             for h in self._similar:
                 if h["id"] == case.id:
@@ -847,7 +861,7 @@ class Engine:
             self.emit("similar", cases=self.snapshot()["similar_cases"])
         if case is self.case:
             self._changed()
-        return {"id": case.id, "name": case.name, "notes": case.notes}
+        return {"id": case.id, "name": case.name, "notes": case.notes, "sensitivity": case.sensitivity}
 
     def open_case(self, case_id: str) -> None:
         """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
@@ -883,15 +897,21 @@ class Engine:
             self._img_desc = json.loads((self.case.dir / "image-descriptions.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             self._img_desc = {}
+        self._drop_disallowed_model()
+        for s in self.sessions.roster():
+            self.log("session_carried_over", **s)
+        self._changed()
+
+    def _drop_disallowed_model(self) -> bool:
+        """Unselect the chat model if the case's sensitivity doesn't allow it. True if it did."""
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov and self.cfg.active_model:
             try:
                 self._check_tier(prov, self.cfg.active_model)
             except UserError:
                 self.cfg.active_model = ""
-        for s in self.sessions.roster():
-            self.log("session_carried_over", **s)
-        self._changed()
+                return True
+        return False
 
     def _persist(self) -> None:
         """Write the resumable state after every change to the conversation or queue."""
@@ -1370,27 +1390,50 @@ class Engine:
         self.log("baseline_saved", host=key, path=str(path), sections=sorted(items))
         return {"host": key, "path": str(path), "sections": sorted(items)}
 
-    def list_baselines(self) -> list[dict]:
+    def list_baselines(self, sid: str = "") -> list[dict]:
+        """Saved baselines, newest first: every host's, or only those of the session's host."""
         out = []
         root = self._baseline_root()
-        if root.is_dir():
-            for d in sorted(root.iterdir()):
-                for f in sorted(d.glob("*.json")):
-                    try:
-                        data = json.loads(f.read_text(encoding="utf-8"))
-                    except (OSError, ValueError):
-                        continue
-                    out.append({"host": d.name, "taken": data.get("taken", f.stem), "path": str(f),
-                                "sections": sorted(data.get("sections", {}))})
+        dirs = [root / self._host_key(sid)] if sid else sorted(root.iterdir()) if root.is_dir() else []
+        names = {c["id"]: c["name"] for c in Case.list_all()}
+        for d in dirs:
+            for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                case_id = str(data.get("case", ""))
+                out.append({"host": d.name, "taken": data.get("taken", f.stem), "path": str(f),
+                            "case": case_id, "case_name": names.get(case_id, ""),
+                            "sections": sorted(data.get("sections", {}))})
+        out.sort(key=lambda b: Path(b["path"]).name, reverse=True)
         return out
+
+    def _baseline_file(self, baseline_path: str) -> Path:
+        """A saved baseline's file: <baselines>/<host>/<name>.json and nothing else."""
+        path = Path(baseline_path)
+        root = self._baseline_root().resolve()
+        if (path.suffix != ".json" or path.is_symlink() or not path.is_file()
+                or path.resolve().parent.parent != root or path.resolve().parent.is_symlink()):
+            raise UserError("That is not a saved baseline.")
+        return path
+
+    def delete_baseline(self, baseline_path: str) -> None:
+        path = self._baseline_file(baseline_path)
+        try:
+            path.unlink()
+            path.parent.rmdir()                    # the host's directory, once it holds no baseline
+        except OSError:
+            pass
+        if path.exists():
+            raise UserError(f"Could not delete {path.name}.")
+        self.log("baseline_deleted", host=path.parent.name, path=str(path))
 
     def diff_baseline(self, sid: str, baseline_path: str = "") -> dict:
         self._need_case()
         key = self._host_key(sid)
         if baseline_path:
-            path = Path(baseline_path)
-            if path.resolve().parent.parent != self._baseline_root().resolve():
-                raise UserError("Baseline path must be inside the baselines directory.")
+            path = self._baseline_file(baseline_path)
         else:
             files = sorted((self._baseline_root() / key).glob("*.json"))
             if not files:

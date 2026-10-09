@@ -340,7 +340,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.post("/api/case/edit")
     async def edit_case(body: dict, e: Engine = Depends(auth)):
         notes = body.get("notes")
-        return e.edit_case(str(body.get("id", "")), str(body.get("name", "")), None if notes is None else str(notes))
+        return e.edit_case(str(body.get("id", "")), str(body.get("name", "")), None if notes is None else str(notes),
+                           str(body.get("sensitivity") or "") or None)
 
     @app.post("/api/case/open")
     async def open_case(body: dict, e: Engine = Depends(auth)):
@@ -449,8 +450,13 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     # baselines
     @app.get("/api/baselines")
-    async def baselines(e: Engine = Depends(auth)):
-        return {"baselines": e.list_baselines()}
+    async def baselines(session_id: str = "", e: Engine = Depends(auth)):
+        return {"baselines": e.list_baselines(session_id)}
+
+    @app.post("/api/baselines/delete")
+    async def baseline_delete(body: dict, e: Engine = Depends(auth)):
+        e.delete_baseline(str(body.get("path", "")))
+        return {"ok": True}
 
     @app.post("/api/baselines/save")
     async def baseline_save(body: dict, e: Engine = Depends(auth)):

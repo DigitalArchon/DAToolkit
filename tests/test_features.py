@@ -222,6 +222,44 @@ async def test_baseline_save_and_diff(env, monkeypatch):  # noqa: F811
         engine.diff_baseline(sid, "/etc/passwd")
 
 
+
+async def test_baselines_are_listed_per_host_chosen_and_deleted(env, monkeypatch, tmp_path):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("b", "open")
+    engine.open_session("local")
+    sid = engine.sessions.roster()[0]["id"]
+    added = engine.queue_recipe("baseline-linux", sid)
+    outputs = {p.num: f"{p.command}\nline-{p.recipe_key}\n$ " for p in added}
+    monkeypatch.setattr(engine, "capture", lambda num: {"text": outputs[num], "source": "transcript"})
+    for p in added:
+        engine.update_item(p.num, status="ran")
+    good = Path(engine.save_baseline(sid)["path"])
+    good = good.rename(good.with_name("20200101-000000.json"))        # taken earlier, while healthy
+    svc = next(p for p in added if p.recipe_key == "services")
+    outputs[svc.num] = f"{svc.command}\nline-services\nnew-daemon.service\n$ "
+    broken = Path(engine.save_baseline(sid)["path"])                   # saved by mistake once broken
+    other = engine._baseline_root() / "otherhost"
+    other.mkdir()
+    (other / "20210101-000000.json").write_text(json.dumps({"taken": "x", "sections": {}}))
+    listed = engine.list_baselines(sid)
+    assert [Path(b["path"]) for b in listed] == [broken, good]       # this host only, newest first
+    assert listed[0]["case"] == engine.case.id and listed[0]["case_name"] == "b"
+    assert len(engine.list_baselines()) == 3
+    assert engine.diff_baseline(sid)["changed"] == []                # the default is the newest
+    assert engine.diff_baseline(sid, str(good))["changed"] == ["services"]
+    engine.delete_baseline(str(broken))
+    assert not broken.exists() and engine.diff_baseline(sid)["changed"] == ["services"]
+    (tmp_path / "x.json").write_text("{}")
+    link = good.with_name("link.json")
+    link.symlink_to(tmp_path / "x.json")
+    for bad in ("/etc/passwd", str(tmp_path / "x.json"), str(link), str(good.with_suffix(".txt")), str(good.parent)):
+        with pytest.raises(UserError):
+            engine.delete_baseline(bad)
+    link.unlink()
+    engine.delete_baseline(str(good))
+    assert not good.parent.exists() and engine.list_baselines(sid) == []   # the empty host directory goes too
+    assert other.exists()
+
 # ---------------------------------------------------------------- tool cache
 
 def test_tool_cache_add_verify_transfer(tmp_path):

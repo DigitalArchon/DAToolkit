@@ -286,7 +286,8 @@ function renderTop() {
   $("#case-edit-btn").classList.toggle("hidden", !st.case);
   const sb = $("#sens-badge");
   sb.textContent = st.case ? st.case.sensitivity : "";
-  sb.className = `badge ${st.case?.sensitivity || ""}`;
+  sb.className = `badge clickable ${st.case?.sensitivity || ""}`;
+  sb.title = st.case ? "Raise this case's sensitivity" : "";
   $("#model-name").textContent = st.config.active_model || "Choose model";
   const tb = $("#tier-badge");
   tb.textContent = st.active_tier || "";
@@ -1844,17 +1845,42 @@ async function baselineAction(act) {
     const r = await api("POST", "/api/baselines/save", { session_id: sess.id });
     return toast(`Baseline saved for ${r.host}: ${r.sections.join(", ")}`, "ok", 8000);
   }
-  if (act === "diff") {
-    const r = await api("POST", "/api/baselines/diff", { session_id: sess.id });
-    const ta = h("textarea", { class: "mono", rows: 18, spellcheck: "false", value: r.text });
-    const message = h("textarea", { rows: 2, placeholder: "Message for the AI (optional)", value: "Baseline diff for this host; changed sections are leads." });
-    modal({ title: `Baseline diff · ${r.host}`, wide: true,
-      body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
-        h("div", { class: "muted small" }, `Against the snapshot taken ${r.taken}. Changed: ${r.changed.join(", ") || "nothing"}. Unchanged: ${r.same.join(", ") || "nothing"}.`),
-        ta, message),
-      buttons: [{ label: "Close" }, { label: "Send to AI", kind: "primary",
-        onClick: () => api("POST", "/api/send", { message: message.value.trim(), snippets: [{ session_id: sess.id, text: ta.value }] }) }] });
-  }
+  if (act === "diff") return pickBaseline(sess);
+}
+
+// The saved baselines of the session's host, newest first: diff against one, or delete one.
+async function pickBaseline(sess) {
+  let list = (await api("GET", `/api/baselines?session_id=${encodeURIComponent(sess.id)}`)).baselines;
+  if (!list.length) return toast(`No saved baseline for ${sess.id}'s host. Queue the baseline snapshot on a healthy machine and save it first.`, "error", 8000);
+  const rows = h("div", { class: "case-list" });
+  const m = modal({ title: `Baselines · ${list[0].host}`, body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+    h("div", { class: "muted small" }, "Diff the items you ran in this session against a saved snapshot. Pick one taken while the machine was healthy."), rows),
+    buttons: [{ label: "Close" }] });
+  const draw = () => rows.replaceChildren(...list.map((b, i) => h("div", { class: "case-row" },
+    h("div", {}, h("b", {}, (b.taken || "").replace("T", " ")), i === 0 ? h("span", { class: "muted small" }, " · newest") : null,
+      h("div", { class: "muted small" }, `${b.sections.length} section(s) · ${b.case_name ? `case ${b.case_name}` : b.case ? `case ${b.case} (deleted)` : "no case"}`)),
+    h("div", { class: "row" },
+      h("button", { type: "button", class: "small primary", onclick: () => guarded(async () => { await showBaselineDiff(sess, b.path); m.close(); }) }, "Diff"),
+      h("button", { type: "button", class: "small ghost danger", title: "Delete this baseline from disk", onclick: () => guarded(async () => {
+        if (!(await confirmModal("Delete baseline", `Delete the baseline of ${b.host} taken ${(b.taken || "").replace("T", " ")}? This can't be undone.`, "Delete", "danger"))) return;
+        await api("POST", "/api/baselines/delete", { path: b.path });
+        list = list.filter((x) => x.path !== b.path);
+        if (!list.length) { m.close(); return toast(`Deleted the last baseline of ${b.host}.`, "ok"); }
+        draw();
+      }) }, "Delete")))));
+  draw();
+}
+
+async function showBaselineDiff(sess, path) {
+  const r = await api("POST", "/api/baselines/diff", { session_id: sess.id, baseline: path });
+  const ta = h("textarea", { class: "mono", rows: 18, spellcheck: "false", value: r.text });
+  const message = h("textarea", { rows: 2, placeholder: "Message for the AI (optional)", value: "Baseline diff for this host; changed sections are leads." });
+  modal({ title: `Baseline diff · ${r.host}`, wide: true,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, `Against the snapshot taken ${r.taken}. Changed: ${r.changed.join(", ") || "nothing"}. Unchanged: ${r.same.join(", ") || "nothing"}.`),
+      ta, message),
+    buttons: [{ label: "Close" }, { label: "Send to AI", kind: "primary",
+      onClick: () => api("POST", "/api/send", { message: message.value.trim(), snippets: [{ session_id: sess.id, text: ta.value }] }) }] });
 }
 
 // ------------------------------------------------------------------ context view & timeline
@@ -2228,23 +2254,50 @@ function showCredentialPrompt(p) {
 
 // ------------------------------------------------------------------ case
 
-// Rename a case and change its notes: the open case from the top bar, any other from the case list.
-// Resolves with the saved {id, name, notes}, or null when cancelled.
+const SENS_LEVELS = [
+  ["open", "Trial / non-confidential", "Any model, including Standard-tier cloud models (e.g. Claude Opus) and TEE models whose prompts pass the provider's gateway in the clear."],
+  ["confidential", "Client data involved", "Only end-to-end encrypted models (sealed to an attested enclave, e.g. private/glm-5-3) or local models."],
+  ["sovereign", "Data must not leave this network", "Only local models."],
+];
+let sensGroups = 0;
+
+// Radio cards for a case's sensitivity, starting at `current`. Levels below `floor` can't be
+// picked: a case's sensitivity only goes up. Each set is its own radio group, so a dialog
+// stacked on another doesn't share its choice.
+function sensitivityCards(current, floor = "open") {
+  const group = `sens-${++sensGroups}`;
+  const min = SENS_LEVELS.findIndex(([v]) => v === floor);
+  return SENS_LEVELS.map(([value, title, desc], i) => h("label", { class: `radio-card${i < min ? " disabled" : ""}`,
+    title: i < min ? "A case's sensitivity can only be raised" : null },
+    h("input", { type: "radio", name: group, value, checked: value === current, disabled: i < min }),
+    h("div", {}, h("div", {}, h("span", { class: `badge ${value}` }, value), " ", title), h("div", { class: "desc" }, desc))));
+}
+
+// Rename a case, change its notes or raise its sensitivity: the open case from the top bar, any
+// other from the case list. Resolves with the saved {id, name, notes, sensitivity}, or null when cancelled.
 function editCaseModal(c) {
   return new Promise((resolve) => {
     let saved = null;
+    const isOpen = c.id === S.state.case?.id;
     const name = h("input", { type: "text", value: c.name });
     const notes = h("textarea", { rows: 4, value: c.notes || "", placeholder: "Site/client notes for the AI (optional): environment, known quirks, what's been tried…" });
+    const cards = h("div", { class: "field" }, h("span", {}, "Sensitivity (can only be raised)"), sensitivityCards(c.sensitivity, c.sensitivity));
+    const raiseNote = h("div", { class: "warnbox hidden" },
+      "Raising the sensitivity can't be undone. It limits which models see this case from now on; what was already sent stays with the models it went to.",
+      isOpen ? " If the selected model isn't allowed at the new level, you'll need to choose another." : "");
+    const chosen = () => cards.querySelector("input:checked").value;
+    cards.addEventListener("change", () => raiseNote.classList.toggle("hidden", chosen() === c.sensitivity));
     const save = async () => {
       if (!name.value.trim()) throw new Error("A case needs a name.");
-      saved = await api("POST", "/api/case/edit", { id: c.id, name: name.value.trim(), notes: notes.value.trim() });
+      saved = await api("POST", "/api/case/edit", { id: c.id, name: name.value.trim(), notes: notes.value.trim(), sensitivity: chosen() });
     };
     const m = modal({
       title: "Edit case",
       body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
         h("label", { class: "field" }, h("span", {}, "Case name / ticket"), name),
         h("label", { class: "field" }, h("span", {}, "Notes"), notes),
-        c.id === S.state.case?.id ? h("div", { class: "muted small" }, "The AI sees the new name and notes from your next message.") : null),
+        cards, raiseNote,
+        isOpen ? h("div", { class: "muted small" }, "The AI sees the new name and notes from your next message.") : null),
       buttons: [{ label: "Cancel" }, { label: "Save", kind: "primary", onClick: save }],
       onClose: () => resolve(saved),
     });
@@ -2259,15 +2312,9 @@ function openCaseModal(first) {
   const st = S.state;
   const name = h("input", { type: "text", placeholder: "e.g. TKT-1042 Acme file server slow" });
   const notes = h("textarea", { rows: 3, placeholder: "Site/client notes for the AI (optional): environment, known quirks, what's been tried…" });
-  const opt = (value, title, desc, checked) => h("label", { class: "radio-card" },
-    h("input", { type: "radio", name: "sens", value, checked }),
-    h("div", {}, h("div", {}, h("span", { class: `badge ${value}` }, value), " ", title), h("div", { class: "desc" }, desc)));
   const body = h("div", { style: "display:flex;flex-direction:column;gap:10px", class: "case-modal" },
     h("label", { class: "field" }, h("span", {}, "Case name / ticket"), name),
-    h("div", { class: "field" }, h("span", {}, "Sensitivity"),
-      opt("open", "Trial / non-confidential", "Any model, including Standard-tier cloud models (e.g. Claude Opus) and TEE models whose prompts pass the provider's gateway in the clear.", true),
-      opt("confidential", "Client data involved", "Only end-to-end encrypted models (sealed to an attested enclave, e.g. private/glm-5-3) or local models.", false),
-      opt("sovereign", "Data must not leave this network", "Only local models.", false)),
+    h("div", { class: "field" }, h("span", {}, "Sensitivity"), sensitivityCards("open")),
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
     st.case && st.chat.length ? h("div", { class: "muted small" }, "The current case's log stays on disk and can be resumed later. Open sessions carry over; the conversation and queue start fresh.") : null);
   const resumeList = h("div", { class: "case-list" }, h("div", { class: "muted small" }, "Loading…"));
@@ -2319,7 +2366,7 @@ function openCaseModal(first) {
             m.close();
             toast(`Resumed ${c.name}.`, "ok");
           }) }, "Open"),
-          h("button", { type: "button", class: "small ghost", title: "Rename this case or change its notes", onclick: () => guarded(async () => {
+          h("button", { type: "button", class: "small ghost", title: "Rename this case, change its notes or raise its sensitivity", onclick: () => guarded(async () => {
             const r = await editCaseModal(c);
             if (r) { Object.assign(c, r); draw(); }
           }) }, "Edit"),
@@ -2348,7 +2395,7 @@ function openCaseModal(first) {
     body,
     buttons: [first ? null : { label: "Cancel" }, {
       label: "Start case", kind: "primary", onClick: async () => {
-        const sensitivity = body.querySelector("input[name=sens]:checked").value;
+        const sensitivity = body.querySelector("input[type=radio]:checked").value;
         await api("POST", "/api/case", { name: name.value.trim(), sensitivity, notes: notes.value.trim() });
       },
     }].filter(Boolean),
@@ -3098,7 +3145,9 @@ function init() {
   $("#tab-shot-btn").addEventListener("click", () => guarded(attachScreenshot));
   $("#stop-btn").addEventListener("click", () => guarded(() => api("POST", "/api/stop")));
   $("#case-btn").addEventListener("click", () => openCaseModal(false));
-  $("#case-edit-btn").addEventListener("click", () => S.state.case && guarded(() => editCaseModal(S.state.case)));
+  for (const sel of ["#case-edit-btn", "#sens-badge"]) {
+    $(sel).addEventListener("click", () => S.state.case && guarded(() => editCaseModal(S.state.case)));
+  }
   $("#model-btn").addEventListener("click", openModelPicker);
   $("#attest-btn").addEventListener("click", () => guarded(async () => {
     const r = await api("POST", "/api/attest");

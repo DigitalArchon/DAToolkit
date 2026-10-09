@@ -35,6 +35,10 @@ the system's own; in the browser they're the browser's.
    | Confidential   | E2EE, Local                | Client data is involved              |
    | Sovereign      | Local only                 | Data must not leave the network      |
 
+   If client data turns up in an Open case, raise it (click the sensitivity badge, or **✎**).
+   A case's sensitivity can only go up: what was already sent stays with the models it went
+   to, and a lower level would let more models see the conversation so far.
+
 2. **Settings → AI providers → Add NanoGPT.** Paste your API key (it goes to the keyring),
    then click **Save & test**. If Claude Opus 5.5 is available it becomes the default model.
    NanoGPT's end-to-end encrypted `private/…` models (e.g. `private/glm-5-3`) are listed too.
@@ -163,10 +167,12 @@ the system's own; in the browser they're the browser's.
   queue, audit log, transcripts, request log, images, runbook), or tick several and use
   **Delete selected**. The filter box narrows the list. The open case can't be deleted;
   exports saved elsewhere are left alone.
-- **Rename a case**: **✎** beside the case name in the top bar edits the open case's name
-  and notes; **Edit** in the case list does the same for an earlier case. The AI sees the
-  new name and notes from your next message. The case folder keeps its original name, and
-  the change is recorded in the audit log.
+- **Edit a case**: **✎** beside the case name in the top bar (or a click on the sensitivity
+  badge) edits the open case's name, notes and sensitivity; **Edit** in the case list does
+  the same for an earlier case. Sensitivity can only be raised, and not while the AI is
+  answering; if the selected model isn't allowed at the new level, choose another. The AI
+  sees the new name and notes from your next message. The case folder keeps its original
+  name, and every change is recorded in the audit log.
 - **Context ▾**, next to the model, shows `Context 23k / 200k`: the prompt size of the last
   request (kept with the case, so a resumed case shows it too), against the selected model's
   context window when that is known. It turns amber past the threshold in **Settings →
@@ -212,9 +218,13 @@ steps = [
 ### Baselines
 
 Queue the **Baseline snapshot** recipe on a healthy host, run the items, then **Recipes ▾ →
-Save baseline**. Later, run the same recipe and **Diff against saved baseline**: a unified
-diff per section (services, ports, routes, disks, packages, firewall, cron, users, …) that
-you can send to the AI. Baselines live under `~/.local/share/datoolkit/baselines/<host>/`.
+Save baseline**. Later, run the same recipe and open **Saved baselines: diff or delete**: it
+lists the host's baselines, newest first, with the case each was taken in. **Diff** gives a
+unified diff per section (services, ports, routes, disks, packages, firewall, cron, users, …)
+that you can send to the AI; pick one taken while the machine was healthy. **Delete** removes
+a baseline, for example one saved by mistake on a broken machine. Baselines belong to the
+host, not the case: deleting a case leaves them. They live under
+`~/.local/share/datoolkit/baselines/<host>/`.
 
 ### Safer changes
 

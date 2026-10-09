@@ -1,5 +1,6 @@
-"""Renaming cases and changing their notes."""
+"""Renaming cases, changing their notes and raising their sensitivity."""
 
+import asyncio
 import json
 
 import httpx
@@ -94,3 +95,63 @@ async def test_edit_route(env):  # noqa: F811
         r = await c.post("/api/case/edit", json={"id": engine.case.id, "name": ""}, headers=m)
         assert r.status_code == 400 and engine.case.name == "renamed"
         assert (await c.post("/api/case/edit", json={"id": engine.case.id, "name": "x"})).status_code == 403
+
+
+# ---------------------------------------------------------------- sensitivity: raised, never lowered
+
+def test_sensitivity_only_goes_up(tmp_path):
+    c = Case.create("job", "open", root=tmp_path)
+    c.edit("job", "", "confidential")
+    assert Case.load(c.id, root=tmp_path).sensitivity == "confidential"
+    last = json.loads((c.dir / "events.jsonl").read_text().splitlines()[-1])
+    assert (last["old_sensitivity"], last["sensitivity"]) == ("open", "confidential")
+    for lower in ("open", "nonsense"):
+        with pytest.raises(ValueError):
+            c.edit("job", "", lower)
+    c.edit("renamed", "", None)                          # no level given: unchanged
+    assert Case.load(c.id, root=tmp_path).sensitivity == "confidential"
+
+
+async def test_raising_the_open_case_drops_a_model_it_no_longer_allows(env):  # noqa: F811
+    engine, _, events = env
+    await engine.list_models("Fake")
+    engine.new_case("job", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    events.clear()
+    r = engine.edit_case(engine.case.id, "job", sensitivity="confidential")
+    assert r["sensitivity"] == "confidential" and Case.load(engine.case.id).sensitivity == "confidential"
+    assert engine.cfg.active_model == ""                 # Standard tier isn't allowed for Confidential
+    assert any(e["type"] == "toast" and "choose another" in e["text"] for e in events)
+    assert engine.chat[-1]["kind"] == "note" and "OPEN to CONFIDENTIAL" in engine.chat[-1]["text"]
+    assert engine.case.load_state()["chat"][-1] == engine.chat[-1]
+    assert not {m["id"]: m["allowed"] for m in await engine.list_models("Fake")}["anthropic/claude-opus-5.5"]
+    engine.select_model("Fake", "private/glm-5-3")
+    engine.edit_case(engine.case.id, "job", sensitivity="sovereign")
+    assert engine.cfg.active_model == ""                 # nor E2EE for Sovereign
+    with pytest.raises(UserError, match="only be raised"):
+        engine.edit_case(engine.case.id, "job", sensitivity="confidential")
+    assert engine.case.sensitivity == "sovereign"
+
+
+async def test_raising_waits_for_the_ai_but_a_rename_does_not(env):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("job", "open")
+    engine._turn = asyncio.get_running_loop().create_future()      # a turn in progress
+    try:
+        with pytest.raises(UserError, match="Wait for the AI"):
+            engine.edit_case(engine.case.id, "job", sensitivity="confidential")
+        engine.edit_case(engine.case.id, "renamed", sensitivity="open")
+        assert (engine.case.name, engine.case.sensitivity) == ("renamed", "open")
+    finally:
+        engine._turn.cancel()
+        engine._turn = None
+
+
+async def test_raising_a_case_on_disk(env):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("old", "open")
+    old = engine.case.id
+    engine.new_case("current", "open")
+    engine.edit_case(old, "old", sensitivity="sovereign")
+    assert {c["id"]: c["sensitivity"] for c in engine.list_cases()}[old] == "sovereign"
+    assert engine.case.sensitivity == "open"
