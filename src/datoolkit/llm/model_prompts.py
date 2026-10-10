@@ -27,6 +27,13 @@ BUILTIN: list[tuple[str, str]] = [
     (r"deepseek", _QUEUE_RULE + " Answer every question the technician asks directly in your message before "
                   "moving on, and keep applying ground rules they set earlier in the case (times, systems not to "
                   "touch) when they bear on the answer."),
+    # Kimi K2.7 Code: 9 turns in 6 runs announced checks or a fix with nothing queued; once it made the
+    # update_hypotheses call and stopped before propose_commands (Kimi K3 had none of this)
+    (r"kimi-k2", _QUEUE_RULE + " When a turn needs a hypothesis update and commands, make both calls in the "
+                 "same reply."),
+    # Qwen 3.7 Plus and Qwen 3.8 27B: "Let me start by checking..." and "The fix is to turn on X." with no
+    # call (Qwen 3.8 Max didn't need this)
+    (r"qwen(?!.*max)", _QUEUE_RULE),
 ]
 
 MAX_RULES = 30
