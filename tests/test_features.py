@@ -155,6 +155,21 @@ async def test_queue_recipe_and_watch_and_dry_run(env):  # noqa: F811
         engine.queue_recipe("nope", sid)
 
 
+async def test_update_item_returns_item_and_ignores_unchanged_command(env):  # noqa: F811
+    """Run saves the textarea first and types the item the reply carries; the same text again
+    is no edit, so it keeps the reviewer's verdict."""
+    engine, _, _ = env
+    engine.new_case("r", "open")
+    engine.open_session("local")
+    sid = engine.sessions.roster()[0]["id"]
+    (p,) = engine.queue.add("c", [{"session_id": sid, "command": "sudo chown -R a /srv", "risk": "modifying"}])
+    p.review = {"status": "done", "level": "ok"}
+    d = engine.update_item(p.num, command="sudo chown -R a /srv  ")
+    assert d["review"] == {"status": "done", "level": "ok"} and not d["edited"]
+    d = engine.update_item(p.num, command="sudo chown -R b /srv")
+    assert d["edited"] and d["command"] == "sudo chown -R b /srv" and d["review"] == {}
+
+
 # ---------------------------------------------------------------- hypotheses, rollback, blast radius through the model
 
 def multi_tool_stream(calls: list[tuple[str, dict]], text="ok"):

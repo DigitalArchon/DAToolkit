@@ -237,6 +237,7 @@ body.rdp-max .term-host { inset: 0; }
   width: min(760px, 100%); max-height: 88vh; display: flex; flex-direction: column;
   box-shadow: 0 20px 50px rgba(0,0,0,.5);
 }
+.modal:focus { outline: none; }
 .modal.wide { width: min(1000px, 100%); }
 .modal h2 { font-size: 16px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .modal .content { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }

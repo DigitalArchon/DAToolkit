@@ -252,7 +252,8 @@ host, not the case: deleting a case leaves them. They live under
 - **Dry run.** For commands with a rehearsal form (`rsync -n`, `apt -s`, `-WhatIf`,
   `terraform plan`, `kubectl --dry-run`, `ansible --check`, `ls` before `rm`, a firewall
   backup before a firewall change), the **Dry run** button queues the rehearsal before the
-  real item.
+  real item; its tooltip shows the rehearsal. Commands with no known rehearsal have no button,
+  and each item is rehearsed once at a time.
 - **Second opinion.** **2nd opinion** on any state-changing or sensitive item, or from the
   disruptive confirmation, asks a reviewer model what could go wrong, whether it exposes
   sensitive data, and for a verdict (proceed / proceed with care / do not run). Set a

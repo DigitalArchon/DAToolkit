@@ -117,7 +117,7 @@ async function clipRead() {
 
 function modal({ title, body, buttons = [], wide = false, onClose, dismissable = true }) {
   const root = $("#modal-root");
-  const box = h("div", { class: `modal${wide ? " wide" : ""}` });
+  const box = h("div", { class: `modal${wide ? " wide" : ""}`, tabindex: -1 });
   const overlay = h("div", { class: "overlay" }, box);
   const close = () => { overlay.remove(); onClose?.(); };
   const content = h("div", { class: "content" }, body);
@@ -144,7 +144,9 @@ function modal({ title, body, buttons = [], wide = false, onClose, dismissable =
     overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
   }
   root.append(overlay);
-  setTimeout(() => box.querySelector("input:not([type=checkbox]):not([type=radio]), textarea, select")?.focus(), 30);
+  // a dialog with no field takes the focus itself, so Escape reaches it (not its OK button: Enter
+  // must not confirm a deletion)
+  setTimeout(() => (box.querySelector("input:not([type=checkbox]):not([type=radio]), textarea, select") || box).focus(), 30);
   return { close, box };
 }
 
@@ -582,7 +584,7 @@ const RESEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval
 
 function researchCard(rec) {
   const page = rec.task === "page";
-  const cost = rec.cost ? ` · $${rec.cost.toFixed(3)}` : "";
+  const cost = typeof rec.cost === "number" ? ` · $${rec.cost.toFixed(3)}` : "";
   const state = rec.status === "done" ? (page ? `page fetched${cost}` : `${rec.searches} search${rec.searches === 1 ? "" : "es"}, ${rec.pages} page${rec.pages === 1 ? "" : "s"}${cost}`)
       + (rec.edited ? " · edited by you" : "")
     : rec.status === "failed" || rec.status === "unavailable" ? `not done: ${rec.error}` : RESEARCH_STATE[rec.status] || rec.status;
@@ -1307,6 +1309,7 @@ function rdpPasteText(r) {
     buttons: [{ label: "Cancel" },
       { label: "Type it", onClick: async () => { await rdpType(r, ta.value, false); } },
       { label: "Remote clipboard", kind: "primary", onClick: () => {
+        if (r.state !== 3) throw new Error("The remote desktop is not connected.");
         const writer = new Guacamole.StringWriter(r.client.createClipboardStream("text/plain"));
         writer.sendText(ta.value);
         writer.sendEnd();
@@ -1549,7 +1552,7 @@ function sensitiveTitle(item) {
 function buildRow(item) {
   const cmd = h("textarea", { class: "cmd", rows: 1, spellcheck: "false" });
   cmd.addEventListener("input", () => autosize(cmd));
-  cmd.addEventListener("change", () => saveCommand(item.num, cmd.value));
+  cmd.addEventListener("change", () => guarded(() => saveCommand(item.num, cmd.value)));
   const sel = h("select", { class: "sess", onchange: (e) => guarded(() => api("POST", `/api/queue/${item.num}`, { session_id: e.target.value })) });
   const row = h("div", { class: "qitem", "data-num": item.num },
     h("div", { class: "num" }, `#${item.num}`),
@@ -1561,10 +1564,13 @@ function buildRow(item) {
   return row;
 }
 
+// The queue event follows on the events socket, maybe after this returns: the reply updates the
+// item here at once, so Run right after an edit types (and confirms) the edited command.
 async function saveCommand(num, value) {
   const item = S.state.queue.find((i) => i.num === num);
   if (!item || item.command === value.trim()) return;
-  await guarded(() => api("POST", `/api/queue/${num}`, { command: value }));
+  const r = await api("POST", `/api/queue/${num}`, { command: value });   // throws: Run must not type the old one
+  if (r.item) Object.assign(item, r.item);
 }
 
 function elapsed(ts) {
@@ -1629,7 +1635,7 @@ function updateRow(row, item) {
     btns.push(run, ins);
     if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
     if (item.dry_run) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", `Queue the rehearsal first (${item.dry_run.description}): ${item.dry_run.command}`));
-    if (item.risk === "read_only" && !item.watch) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
+    if (item.risk === "read_only" && !item.watch && !item.dry_run_of) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
     if (item.risk !== "read_only" || item.sensitive?.length) btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what could go wrong"));
     btns.push(btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
       btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"),
@@ -1725,6 +1731,10 @@ async function runItem(num, mode) {
 async function runGroup(group) {
   const nums = (await api("GET", `/api/queue/group/${encodeURIComponent(group)}`)).nums;
   if (!nums.length) return toast("Nothing pending in that group.");
+  for (const n of nums) {
+    const cmdEl = S.rows.get(n) && $(".cmd", S.rows.get(n));
+    if (cmdEl) await saveCommand(n, cmdEl.value);
+  }
   const items = nums.map((n) => S.state.queue.find((i) => i.num === n));
   if (items.some((i) => i.risk !== "read_only")) {
     const ok = await confirmModal("Run paired probes", h("div", {}, h("p", {}, "This group contains non read-only commands:"),
@@ -1994,7 +2004,8 @@ async function openTimeline() {
   hideMenus();
   const tl = await api("GET", "/api/case/timeline");
   if (!tl.events.length) return toast("No events yet.");
-  const t0 = tl.events[0].ts, t1 = Math.max(tl.events[tl.events.length - 1].ts, ...Object.values(tl.sessions).flat().map((x) => x[0]));
+  // one [ts, offset] per terminal write, in order: a long session has far too many to spread
+  const t0 = tl.events[0].ts, t1 = Math.max(tl.events[tl.events.length - 1].ts, ...Object.values(tl.sessions).map((x) => x.at(-1)?.[0] ?? 0));
   const slider = h("input", { type: "range", min: 0, max: 1000, value: 1000, style: "width:100%" });
   const clock = h("span", { class: "mono" });
   const evList = h("div", { class: "timeline" });
@@ -2012,12 +2023,11 @@ async function openTimeline() {
     evList.scrollTop = evList.scrollHeight;
     const sid = sidSel.value;
     if (!sid) return;
-    if (!transcripts[sid]) transcripts[sid] = (await api("GET", `/api/case/transcript?sid=${encodeURIComponent(sid)}`)).text;
+    if (!transcripts[sid]) transcripts[sid] = new TextEncoder().encode((await api("GET", `/api/case/transcript?sid=${encodeURIComponent(sid)}`)).text);
     const times = tl.sessions[sid];
     let off = 0;
     for (const [ts, o] of times) { if (ts <= t) off = o; else break; }
-    const bytes = new TextEncoder().encode(transcripts[sid]).slice(0, off);
-    termPre.textContent = new TextDecoder().decode(bytes).slice(-6000);
+    termPre.textContent = new TextDecoder().decode(transcripts[sid].subarray(Math.max(0, off - 24000), off)).slice(-6000);
     termPre.scrollTop = termPre.scrollHeight;
   };
   slider.addEventListener("input", render);
@@ -2399,6 +2409,9 @@ function openCaseModal(first) {
         await api("POST", "/api/case", { name: name.value.trim(), sensitivity, notes: notes.value.trim() });
       },
     }].filter(Boolean),
+  });
+  name.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); m.box.querySelector(".buttons button.primary").click(); }
   });
 }
 

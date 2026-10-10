@@ -144,7 +144,7 @@ function render(st) {
     i.status === "pending" ? h("div", { class: "big" },
       h("button", { class: "primary", onclick: () => mark(i.num, "ran") }, "I ran it"),
       h("button", { onclick: () => mark(i.num, "skipped") }, "Skip")) :
-    (i.status === "ran" || i.status === "skipped") ? h("div", { class: "big" }, h("button", { class: "ghost", onclick: () => mark(i.num, "pending") }, "Undo")) : null))
+    ["ran", "inserted", "skipped"].includes(i.status) ? h("div", { class: "big" }, h("button", { class: "ghost", onclick: () => mark(i.num, "pending") }, "Undo")) : null))
     : [h("div", { class: "muted" }, "No pending commands.")]));
 }
 async function mark(num, status) {

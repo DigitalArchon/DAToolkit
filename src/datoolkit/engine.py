@@ -1211,7 +1211,7 @@ class Engine:
     def _session_kinds(self) -> dict[str, str]:
         return {s["id"]: s["kind"] for s in self.sessions.roster()}
 
-    def update_item(self, num: int, **fields) -> None:
+    def update_item(self, num: int, **fields) -> dict:
         was_pending = self.queue.get(num).status == "pending"
         p = self.queue.update(num, session_kinds=self._session_kinds(), **fields)
         if "command" in fields and p.edited:
@@ -1227,6 +1227,7 @@ class Engine:
                      note=p.note, risk=p.risk)
         self._queue_changed()
         self._persist()
+        return p.to_dict()
 
     def move_item(self, num: int, delta: int) -> None:
         self.queue.move(num, delta)

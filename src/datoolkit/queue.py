@@ -124,7 +124,9 @@ class Queue:
                session_kinds: dict[str, str] | None = None, watch: bool | None = None) -> Proposal:
         p = self.get(num)
         command, removed = hidden.clean(command) if command is not None else (None, [])
-        if command is not None and command.strip() and p.status == "pending":
+        # the same text again (Run saves the box first) is no edit: it would drop the review
+        changed = command is not None and command.strip() and (command.strip() != p.command or removed)
+        if changed and p.status == "pending":
             p.command = command.strip()
             if removed:              # otherwise keep the note about what the AI's text carried
                 p.hidden = removed

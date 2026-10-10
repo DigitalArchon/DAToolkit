@@ -372,8 +372,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.post("/api/queue/{num}")
     async def update_item(num: int, body: dict, e: Engine = Depends(auth)):
         fields = {k: body[k] for k in ("command", "session_id", "status", "note") if k in body}
-        e.update_item(num, **fields)
-        return {"ok": True}
+        return {"ok": True, "item": e.update_item(num, **fields)}
 
     @app.get("/api/queue/{num}/capture")
     async def capture(num: int, e: Engine = Depends(auth)):
