@@ -84,10 +84,10 @@ STALE_NUDGE = (
 _PROMISE = re.compile(
     r"\b(I need you to|please|could you|can you|now|next)\b[^.?!\n]{0,40}\b(run|execute|try|check|paste)\b[^.?!\n]{0,40}"
     r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
-    r"|\b(I'?ve|I have|I'?ll|I will|let me|I'?m going to|I'?d like to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
+    r"|\b(I['’]?ve|I have|I['’]?ll|I will|let me|I['’]?m going to|I['’]?d like to|I want to|we['’]?ll|we will|we need to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
     r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look|start by)\b"
-    r"|\blet'?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
-    r"check|queue|start)\b"
+    r"|\blet['’]?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
+    r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
     r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
     r"|\bthe (fix|next step|change) (is|would be|will be) to\b"
     r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b", re.I | re.M)
@@ -2558,7 +2558,7 @@ class Engine:
                 entry["tee_attested"] = tee[1]["summary"]
             reply_ids: list[str] = []
             turn: dict = {}
-            nudged = promise_nudged = text_only = False
+            nudged = promise_nudged = text_only = hyp_continued = False
             vision = self.vision_status()
             ttl = self._cache_ttl(prov, model, tier)
             for _ in range(MAX_TOOL_ROUNDS):
@@ -2611,6 +2611,14 @@ class Engine:
                 self._req_conv_len = len(self.conv)
                 in_flight = None
                 retry = await self._record_assistant(result, entry, turn)
+                said = entry["text"][round_text:].strip()
+                if (not retry and not hyp_continued and said and result.tool_calls
+                        and all(c.name == HYPOTHESES_TOOL for c in result.tool_calls)
+                        and (not re.search(r"[.!?:)\]`\"'’]$", said) or promises_commands(said))):
+                    # the board update is done at once, so the model carries on: live, Kimi K2.7 Code
+                    # planned "update_hypotheses and propose commands", made only the first call, and
+                    # its message stopped mid-sentence with nothing queued
+                    hyp_continued = retry = True
                 if not retry and result.tool_calls and not entry["text"].strip() and not nudged:
                     # Models that think before acting sometimes go straight from reasoning to tool
                     # calls; the technician would see commands with no word about them.

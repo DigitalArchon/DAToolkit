@@ -329,6 +329,9 @@ def test_snippets_are_cut_at_the_given_length():
     "The fix is to turn on `httpd_can_network_connect`. It applies immediately.",                  # Qwen 3.8 Max
     "That said, since you asked, I've queued two cheap read-only win01 checks.",                  # Qwen 3.8 27B
     "Let me start by checking the health of the domain controller and looking for recent events.",  # Qwen 3.7 Plus
+    "Let's look at the firewall filter and interface lists.",                                     # Kimi K2.7 Code
+    "Before we change it, I want to confirm the bridge port setup. Then we'll add the interface to the list.",
+    "I suspect the guest VLAN is missing from the LAN list. Let’s inspect the relevant config on",  # cut off, curly quote
 ])
 def test_promises_are_recognised(text):
     from datoolkit.engine import promises_commands
@@ -413,8 +416,7 @@ async def test_asking_for_items_no_longer_queued_gets_a_nudge(env):  # noqa: F81
     assert engine.chat[-1]["proposals"] == [2]
 
 
-async def test_promise_with_only_a_hypotheses_update_is_nudged(env):  # noqa: F811
-    from datoolkit.engine import PROMISE_NUDGE
+async def test_promise_with_only_a_hypotheses_update_gets_another_round(env):  # noqa: F811
     engine, fake, _ = env
     sid = setup(engine)
     fake.responses += [
@@ -425,5 +427,21 @@ async def test_promise_with_only_a_hypotheses_update_is_nudged(env):  # noqa: F8
     ]
     engine.send("users can't log on")
     await wait_turn(engine)
-    assert len(fake.requests) == 2 and PROMISE_NUDGE in str(fake.requests[1]["messages"][-2:])
+    assert len(fake.requests) == 2 and fake.requests[1]["messages"][-1]["role"] in ("tool", "user")
     assert engine.chat[-1]["proposals"] == [1]
+
+
+async def test_a_hypotheses_only_round_gets_another_round(env):  # noqa: F811
+    engine, fake, _ = env
+    sid = setup(engine)
+    fake.responses += [
+        multi_tool_stream([("update_hypotheses", {"items": [{"id": "list", "text": "not in LAN list", "confidence": 0.5}]})],
+                          text="I suspect the interface list. Let’s inspect the relevant config on"),
+        multi_tool_stream([("propose_commands", {"items": [
+            {"session_id": sid, "command": "/interface list member print", "purpose": "lists", "risk": "read_only"}]})],
+            text=" Run #1."),
+    ]
+    engine.send("guest vlan has no internet")
+    await wait_turn(engine)
+    assert len(fake.requests) == 2 and fake.requests[1]["messages"][-1]["role"] in ("tool", "user")
+    assert engine.chat[-1]["proposals"] == [1] and engine.chat[-1]["hyp_changes"]
