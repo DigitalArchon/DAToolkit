@@ -21,7 +21,8 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
   you review and edit the exact text before the AI sees it.
 - **Real terminals.** Local, SSH and WinRM sessions are real PTYs (`sudo`, Ctrl-C, pagers
   and device CLIs behave normally), and RDP opens in a tab through Apache Guacamole's guacd.
-- **Any OpenAI-compatible model**: NanoGPT, Ollama, LM Studio, vLLM and others.
+- **Any OpenAI-compatible model**: NanoGPT, Ollama, LM Studio, vLLM and others. See
+  [which models work well](docs/model-evaluation.md) for how nine popular models did.
 - **Privacy tiers per case.** Open, Confidential and Sovereign cases limit which models may
   see the data: anything, end-to-end encrypted or local, or local only. End-to-end encrypted
   and TEE models are attested before anything is sent.

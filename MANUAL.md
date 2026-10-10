@@ -458,9 +458,12 @@ doesn't throw the cached conversation away.
 **Model-specific instructions** (Settings → Model): text added to the end of the system prompt
 when the chat model's id contains a match you choose (case doesn't matter, so `glm` covers
 `z-ai/glm-5.3` and `private/glm-5-3`). DA Toolkit has built-in notes for models whose habits
-were measured in its model evaluation (`tools/model-eval`); the settings show them and can
+were measured in its [model evaluation](docs/model-evaluation.md) (`tools/model-eval`); the settings show them and can
 turn them off. Use your own to correct a model's habits, e.g. one that keeps describing
 commands instead of queueing them.
+
+[Which models work well](docs/model-evaluation.md) describes the evaluation: how nine models
+did, the habits that tripped them up, and why each nudge and note exists.
 
 ## Model tiers and end-to-end encryption
 
