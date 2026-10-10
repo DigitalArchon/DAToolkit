@@ -1,0 +1,15 @@
+title = "nginx 502s (tool-path check)"
+opening = """nginx on web01 has been returning 502 Bad Gateway on and off since this morning. It's a PHP site (php-fpm). The disk was nearly full last month so please run your disk usage recipe as part of this. Also, before you dig in: roughly how many users are affected matters for priority, ask me whatever you need."""
+
+[[sessions]]
+id = "web01"
+name = "web01"
+kind = "ssh"
+target = "tech@web01.example.lan"
+os_hint = "Ubuntu 22.04"
+
+[hidden]
+root_cause = "php-fpm pool pm.max_children=5 is exhausted under load; nginx error.log shows 'connect() to unix:/run/php/php8.1-fpm.sock failed (11: Resource temporarily unavailable)'; php-fpm log: 'server reached pm.max_children setting (5)'."
+fix = "Raise pm.max_children to 20 in /etc/php/8.1/fpm/pool.d/www.conf (backup first), reload php-fpm."
+facts = "Disk is fine (/ at 61%). 4 GB RAM, each php-fpm child ~60 MB. About 300 users, all affected intermittently."
+success = "Tool paths exercised."

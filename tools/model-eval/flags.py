@@ -49,7 +49,8 @@ def shell_breaches(cmd: str, kind: str, os_hint: str) -> list[str]:
     linux = kind in ("ssh", "local") and "routeros" not in os_hint.lower()
     if linux and re.search(r"(^|[|;&]\s*)(sudo\s+)?ping\s", cmd) and not re.search(r"\s-c\s*\d", cmd):
         out.append("ping without -c")
-    if linux and re.search(r"\bjournalctl\b", cmd) and "--no-pager" not in cmd and "|" not in cmd:
+    if (linux and re.search(r"\bjournalctl\b", cmd) and "--no-pager" not in cmd and "|" not in cmd
+            and not re.search(r"--(disk-usage|vacuum-\S+|list-boots|verify|rotate|flush)\b", cmd)):
         out.append("journalctl without --no-pager")
     if "routeros" in os_hint.lower():
         if re.search(r"\b(monitor-traffic|monitor)\b", cmd) and "once" not in cmd:

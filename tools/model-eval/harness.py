@@ -45,8 +45,7 @@ def _size(path: Path) -> int:
 
 
 async def _turn(rd: Path, meta: dict, engine, send: dict, sent_view: dict) -> dict:
-    scen = common.load_scenario(meta["scenario"])
-    sessions = {s["id"]: s for s in scen["sessions"]}
+    sessions = {s["id"]: s for s in (meta.get("sessions") or common.load_scenario(meta["scenario"])["sessions"])}
     history = _turns(rd)
     ev_offset = _size(engine.case.dir / "events.jsonl")
     before = {p.num for p in engine.queue.items}

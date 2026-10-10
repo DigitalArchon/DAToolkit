@@ -66,6 +66,11 @@ def add_sessions(engine, sessions: list[dict], log: bool) -> None:
             engine.log("session_opened", **stub.roster())
 
 
+def slug(model: str) -> str:
+    """anthropic/claude-opus-5.5 -> claude-opus-5.5"""
+    return model.split("/")[-1].replace(":", "-")
+
+
 def load_scenario(name: str) -> dict:
     return tomllib.loads((SCENARIOS / f"{name}.toml").read_text(encoding="utf-8"))
 
