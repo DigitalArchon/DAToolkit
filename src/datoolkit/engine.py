@@ -72,6 +72,10 @@ PROMISE_NUDGE = (
     "commands now with propose_commands (or run_recipe). Don't repeat your message; add at most one short "
     "line. If no commands are needed after all, say so in one sentence.")
 HYPOTHESES_TOOL = prompts.HYPOTHESES_TOOL["function"]["name"]
+# A value the model left for someone else to fill in: <NAS_IP>, <interface-name>, PATH/TO/file,
+# x.x.x.x, YOUR_SERVER.
+_PLACEHOLDER = re.compile(r"<[A-Z][A-Z0-9_]{2,}>|<[a-z][a-z0-9]*[-_](ip|name|path|file|host|hostname|interface|iface|"
+                          r"id|user|share|server|port)>|\bPATH/TO\b|\b[xX]\.[xX]\.[xX]\.[xX]\b|\bYOUR_[A-Z_]+\b")
 STALE_NUDGE = (
     "[DAToolkit] Your message asks the technician to run {items}, but those are not pending in their queue, "
     "so there is nothing to run. If you still want them, queue them again with propose_commands; otherwise "
@@ -86,7 +90,7 @@ _PROMISE = re.compile(
     r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
     r"|\b(I['’]?ve|I have|I['’]?ll|I will|let me|I['’]?m going to|I['’]?d like to|I want to|we['’]?ll|we will|we need to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
     r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look|start by)\b"
-    r"|\b(I['’]?ll|I will|let me|I['’]?m going to|I need to|now I need to)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
+    r"|\b(I['’]?ll|I will|let me|I['’]?m going to|I need to|now I need to|I want to)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
     r"fetch|see|ask for|check|confirm|verify|inspect|queue)\b"
     r"|\blet['’]?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
     r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
@@ -2792,6 +2796,13 @@ class Engine:
                         reply += (" Flagged as possibly exposing sensitive data: " + "; ".join(f"#{p.num} {', '.join(p.sensitive)}" for p in sens)
                                   + ". Where you can, prefer commands that show only what the diagnosis needs (names, "
                                   "presence or permissions rather than values), and never put a password in a command.")
+                    holes = [(p.num, m.group(0)) for p in added for m in [_PLACEHOLDER.search(p.command)] if m]
+                    if holes:
+                        # live: Kimi K2.7 Code queued `ping ... <NAS_IP>`, which bash read as a redirect
+                        reply += (" " + "; ".join(f"#{n} contains the placeholder {h}" for n, h in holes)
+                                  + ". Withdraw those with revise_queue and queue the real command, finding the value "
+                                  "with a command first or asking the technician.")
+                        self.log("placeholder_in_command", items=[n for n, _ in holes])
                     hid = [p for p in added if p.hidden]
                     if hid:
                         reply += (" Invisible or control characters were taken out of "

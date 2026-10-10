@@ -73,6 +73,9 @@ the system's own; in the browser they're the browser's.
   correct itself. A model that writes its tool call into the message as text (some smaller
   and local models print `<tool_call>…` markup) has it read back as a real call; the markup is
   taken out of the message and the commands go to the queue like any other.
+- A queued command with a placeholder in it (`<NAS_IP>`, `PATH/TO/file`, `x.x.x.x`) is sent back
+  to the AI with a request to withdraw it and queue the real command; check such items before
+  running them.
 - **Web search**: the AI can search the web through NanoGPT (Perplexity by default; Valyu,
   Tavily, Kagi, Linkup, Brave, Sofya, Firecrawl or Exa in Settings → General) for advisories,
   release notes and exact syntax. By default each query appears in the AI's message for you to

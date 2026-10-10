@@ -333,6 +333,7 @@ def test_snippets_are_cut_at_the_given_length():
     "Let's look at the firewall filter and interface lists.",                                     # Kimi K2.7 Code
     "Now I need to see how far off the clock is and the current NTP config.",                     # Qwen 3.8 27B
     "The fix: point the DC at a working NTP source and force a resync — the clock will jump forward.",  # GLM 5.3
+    "Before I have you reconfigure w32time, I want to confirm the actual clock offset. Then we'll fix the time source.",  # Kimi
     "I'm going to ask for the NAT rules, filter rules, IP addresses, and routing table.",          # Qwen 3.8 27B
     "Let me lay out my working hypotheses and pull the relevant config.",                          # Qwen 3.8 27B
     "Before we change it, I want to confirm the bridge port setup. Then we'll add the interface to the list.",
@@ -465,3 +466,29 @@ async def test_an_empty_words_only_round_is_asked_again_with_tools(env):  # noqa
     await wait_turn(engine)
     assert [r.get("tool_choice") for r in fake.requests] == ["auto", "none", "auto"]
     assert engine.chat[-1]["text"] == "Run #1 for the load." and engine.chat[-1]["proposals"] == [1]
+
+
+@pytest.mark.parametrize("cmd, hole", [
+    ("ping -c 20 -i 0.2 <NAS_IP>", "<NAS_IP>"), ("dd if=/mnt/nas/PATH/TO/file.mkv of=/dev/null", "PATH/TO"),
+    ("ethtool <interface-name>", "<interface-name>"), ("ping -c 3 x.x.x.x", "x.x.x.x"),
+])
+def test_placeholders_are_found(cmd, hole):
+    from datoolkit.engine import _PLACEHOLDER
+    assert _PLACEHOLDER.search(cmd).group(0) == hole
+
+
+@pytest.mark.parametrize("cmd", ["ip -br link | grep UP", "cat < /etc/hosts", "sort <(ls a) <(ls b)", "echo '<ok>'"])
+def test_ordinary_commands_have_no_placeholder(cmd):
+    from datoolkit.engine import _PLACEHOLDER
+    assert not _PLACEHOLDER.search(cmd)
+
+
+async def test_the_ai_is_told_about_a_placeholder(env):  # noqa: F811
+    engine, fake, _ = env
+    sid = setup(engine)
+    fake.responses.append(multi_tool_stream([("propose_commands", {"items": [
+        {"session_id": sid, "command": "ping -c 4 <NAS_IP>", "purpose": "latency", "risk": "read_only"}]})], text="Ping the NAS."))
+    engine.send("slow")
+    await wait_turn(engine)
+    reply = [m for m in engine.conv if m["role"] == "tool"][-1]["content"]
+    assert "#1 contains the placeholder <NAS_IP>" in reply and "revise_queue" in reply
