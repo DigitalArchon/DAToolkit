@@ -351,3 +351,43 @@ async def test_a_resumed_case_shows_its_last_request_size(env):  # noqa: F811
     assert engine.snapshot()["last_usage"] is None             # a new case starts empty
     engine.open_case(case_id)
     assert engine.snapshot()["last_usage"]["prompt_tokens"] == 23000
+
+
+# ---------------------------------------------------------------- model-specific instructions
+
+def test_model_notes_match_a_piece_of_the_model_id(monkeypatch):
+    from datoolkit.llm import model_prompts
+    monkeypatch.setattr(model_prompts, "BUILTIN", [(r"glm", "GLM note"), (r"qwen3\.8", "Qwen note")])
+    rules = [{"match": "GLM-5", "text": "mine for glm 5"}, {"match": "kimi", "text": "kimi only"}]
+    assert model_prompts.notes_for("z-ai/glm-5.3", rules) == "GLM note\n\nmine for glm 5"
+    assert model_prompts.notes_for("private/glm-5-3", rules, builtin=False) == "mine for glm 5"
+    assert model_prompts.notes_for("anthropic/claude-opus-5.5", rules) == ""
+    assert model_prompts.notes_for("", rules) == ""
+
+
+def test_model_notes_are_validated():
+    from datoolkit.llm import model_prompts
+    assert model_prompts.validate([{"match": " glm ", "text": " x "}, {"match": "", "text": ""}]) == [{"match": "glm", "text": "x"}]
+    for bad in ([{"match": "glm", "text": ""}], [{"match": "", "text": "x"}], "glm", [{"match": "g", "text": "x" * 5000}],
+                [{"match": "g", "text": "x"}] * 31):
+        with pytest.raises(ValueError):
+            model_prompts.validate(bad)
+
+
+async def test_model_notes_end_the_static_system_prompt(env, monkeypatch):  # noqa: F811
+    from datoolkit.llm import model_prompts
+    engine, fake, _ = env
+    monkeypatch.setattr(model_prompts, "BUILTIN", [(r"opus", "Built-in for Opus.")])
+    engine.new_case("c", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    engine.save_settings({"model_prompts": [{"match": "claude", "text": "Queue every command you mention."}]})
+    static, _ = engine._prompt_parts()
+    assert static.endswith("Built-in for Opus.\n\nQueue every command you mention.")
+    assert engine.snapshot()["model_notes"]["active"].startswith("Built-in for Opus.")
+    engine.save_settings({"builtin_model_prompts": False})
+    static, _ = engine._prompt_parts()
+    assert "Built-in for Opus." not in static and static.endswith("Queue every command you mention.")
+    with pytest.raises(UserError):
+        engine.save_settings({"model_prompts": [{"match": "claude", "text": ""}]})
+    engine.save_settings({"model_prompts": []})
+    assert "Additional instructions" not in engine._prompt_parts()[0]

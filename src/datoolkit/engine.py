@@ -31,7 +31,7 @@ from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
 from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, list_private_models,
                                offers_private_mode, relay_url)
-from .llm import capabilities, research, websearch
+from .llm import capabilities, model_prompts, research, websearch
 from .llm import tee as tee_mod
 from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
@@ -264,6 +264,9 @@ class Engine:
             "can_undo_compaction": self._undoable_compaction() is not None,
             "hypotheses": self.hypotheses,
             "similar_cases": [{k: v for k, v in c.items() if k != "runbook"} for c in self._similar],
+            "model_notes": {"builtin": [{"match": p, "text": t} for p, t in model_prompts.BUILTIN],
+                            "active": model_prompts.notes_for(self.cfg.active_model, self.cfg.settings.model_prompts,
+                                                              self.cfg.settings.builtin_model_prompts)},
         }
 
     def _config_view(self) -> dict:
@@ -778,6 +781,13 @@ class Engine:
                 s.generation = params_mod.validate(data["generation"] or {})
             except ValueError as e:
                 raise UserError(str(e)) from e
+        if "model_prompts" in data:
+            try:
+                s.model_prompts = model_prompts.validate(data["model_prompts"] or [])
+            except ValueError as e:
+                raise UserError(str(e)) from e
+        if "builtin_model_prompts" in data:
+            s.builtin_model_prompts = bool(data["builtin_model_prompts"])
         if "vision_model" in data:
             want = str(data["vision_model"] or "").strip()
             if want and ("|" not in want or not self.cfg.provider(want.split("|", 1)[0])):
@@ -2456,8 +2466,11 @@ class Engine:
         roster = [{**s, "outputs_seen": seen.get(s["id"], 0)} for s in self.sessions.roster()]
         # every recipe, whatever is open: each line names its OS, and a list that followed the open
         # sessions changed the system prompt (and lost the whole cached conversation) when one opened
+        st = self.cfg.settings
         static = prompts.build_static(self.case.name, self.case.notes, recipes=recipes.roster_text(recipes.load_all()),
-                                      runbooks=self._runbooks, search=self.search_status()["mode"])
+                                      runbooks=self._runbooks, search=self.search_status()["mode"],
+                                      model_notes=model_prompts.notes_for(self.cfg.active_model, st.model_prompts,
+                                                                          st.builtin_model_prompts))
         return static, prompts.build_state(roster, self.hypotheses, self.queue.to_list())
 
     def _system_prompt(self) -> str:

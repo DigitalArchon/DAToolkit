@@ -2798,6 +2798,8 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" }, h("span", { class: "spacer" }),
         h("button", { type: "button", onclick: () => { for (const [k, el] of Object.entries(f)) el.value = { temperature: 0.3, reasoning_effort: "low" }[k] ?? ""; } }, "Reset to defaults")),
       field("Prompt caching", promptCache, "For Claude models through NanoGPT (Open cases): each request reuses the conversation the previous one sent, at a tenth of the input price. Writing the cache costs extra (1.25× for 5 minutes, 2× for 1 hour), so 1 hour suits the minutes spent running commands between replies. Other models cache automatically where their provider does."),
+      h("h3", {}, "Model-specific instructions"),
+      modelNotes(),
       h("h3", {}, "Images"),
       h("div", { class: `vision-now ${v.mode}` }, v.mode === "native" ? `The current model (${v.model}) reads images directly.`
         : v.mode === "helper" ? `The current model (${v.model}) can't read images; ${v.helper} describes them for it.`
@@ -2821,6 +2823,39 @@ function openSettings(tab = "providers") {
           ? "Asked in the background as each command is queued; the verdict shows on the item. It only adds warnings: it never lowers a risk level or clears a flag. Each review is one request to the reviewer model."
           : "Choose a reviewer model first: automatic reviews never fall back to the chat model."),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(save) }, "Save generation settings")));
+  }
+
+  function modelNotes() {
+    const s = S.state.config.settings;
+    const notes = S.state.model_notes || { builtin: [], active: "" };
+    const rows = h("div", { style: "display:flex;flex-direction:column;gap:8px" });
+    const addRow = (r = { match: "", text: "" }) => {
+      const match = h("input", { type: "text", value: r.match, placeholder: "Part of the model id, e.g. glm or qwen3.8", style: "max-width:22em" });
+      const text = h("textarea", { rows: 3, placeholder: "Instructions added to the system prompt for matching models" }, r.text);
+      const row = h("div", { class: "model-note", style: "display:flex;flex-direction:column;gap:4px" },
+        h("div", { class: "row" }, match, h("span", { class: "spacer" }), h("button", { type: "button", class: "small", onclick: () => row.remove() }, "Remove")), text);
+      row._get = () => ({ match: match.value.trim(), text: text.value.trim() });
+      rows.append(row);
+    };
+    (s.model_prompts || []).forEach(addRow);
+    const builtin = h("input", { type: "checkbox", checked: s.builtin_model_prompts !== false });
+    const save = async () => {
+      await api("POST", "/api/settings", { builtin_model_prompts: builtin.checked,
+        model_prompts: [...rows.children].map((r) => r._get()).filter((r) => r.match || r.text) });
+      toast("Model instructions saved.", "ok");
+      setTimeout(() => show("model"), 300);
+    };
+    return h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, "Added to the end of the system prompt when the chat model's id contains the match (case doesn't matter). Use them to correct a model's habits, e.g. one that describes commands instead of queueing them."),
+      h("label", { class: "check" }, builtin, " Use DA Toolkit's built-in notes for models that need them"),
+      notes.builtin.length ? h("details", {}, h("summary", { class: "small" }, `Built-in notes (${notes.builtin.length})`),
+        ...notes.builtin.map((n) => h("div", { class: "small" }, h("b", {}, n.match), h("div", { class: "muted pre" }, n.text)))) : null,
+      rows,
+      h("div", { class: "row" }, h("button", { type: "button", onclick: () => addRow() }, "Add instruction"), h("span", { class: "spacer" }),
+        h("button", { type: "button", class: "primary", onclick: () => guarded(save) }, "Save instructions")),
+      h("div", { class: "muted small" }, S.state.config.active_model
+        ? (notes.active ? `In use for ${S.state.config.active_model}:` : `None apply to ${S.state.config.active_model}.`) : "No chat model chosen."),
+      notes.active ? h("div", { class: "muted small pre" }, notes.active) : null);
   }
 
   function generalPane() {

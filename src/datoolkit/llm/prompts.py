@@ -482,7 +482,7 @@ Copy hostnames, IP addresses, paths, error messages, IDs and version numbers exa
 
 
 def build_static(case_name: str, case_notes: str = "", recipes: str = "", runbooks: str = "",
-                 search: str = "") -> str:
+                 search: str = "", model_notes: str = "") -> str:
     """The part of the system prompt that stays the same from request to request (prompt caching
     reuses everything up to the first change)."""
     parts = [SYSTEM_PROMPT, f"Case: {case_name}"]
@@ -495,6 +495,8 @@ def build_static(case_name: str, case_notes: str = "", recipes: str = "", runboo
     if runbooks:
         parts.append("Runbooks from similar past cases (written by you after they were solved; use as "
                      "leads, not facts about this host):\n\n" + runbooks)
+    if model_notes:
+        parts.append("Additional instructions for you in particular (they take priority over habit):\n" + model_notes)
     return "\n\n".join(parts)
 
 
