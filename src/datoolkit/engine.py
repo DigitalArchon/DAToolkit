@@ -31,7 +31,7 @@ from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
 from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, list_private_models,
                                offers_private_mode, relay_url)
-from .llm import capabilities, model_prompts, research, websearch
+from .llm import capabilities, model_prompts, research, textcalls, websearch
 from .llm import tee as tee_mod
 from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
@@ -71,24 +71,54 @@ PROMISE_NUDGE = (
     "propose_commands call, so nothing new is in their queue and they can't run anything. Queue those "
     "commands now with propose_commands (or run_recipe). Don't repeat your message; add at most one short "
     "line. If no commands are needed after all, say so in one sentence.")
-# The end of a message that announces commands to come: "Now I need you to run a few more
-# commands to find out.", "I'll queue the next checks.", "Run these:". Items already queued
-# (#n, "in the queue", "pending") are not a promise.
+STALE_NUDGE = (
+    "[DAToolkit] Your message asks the technician to run {items}, but those are not pending in their queue, "
+    "so there is nothing to run. If you still want them, queue them again with propose_commands; otherwise "
+    "correct your message in one short line. Don't repeat your message.")
+# A sentence that announces commands, or a change, that should be in the queue: "Now I need you
+# to run a few more commands to find out." (GLM 5.3), "I'll also make it persistent." and
+# "Queue these win01 checks:" (Kimi K2.7 Code), "The fix is to turn on X." (Qwen 3.8), "I've
+# queued two checks" with nothing queued (Qwen 3.8 27B). A sentence about items already queued
+# (#n, "in the queue", "pending") is not a promise.
 _PROMISE = re.compile(
     r"\b(I need you to|please|could you|can you|now|next)\b[^.?!\n]{0,40}\b(run|execute|try|check|paste)\b[^.?!\n]{0,40}"
     r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
-    r"|\b(I'?ll|I will|let me|I'?m going to|I'?d like to)\s+(now\s+|just\s+)?(queue|propose|add|give you|send you|prepare|line up)\b"
-    r"|\b(here|below) (are|is)\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b"
-    r"|:\s*$", re.I)
+    r"|\b(I'?ve|I have|I'?ll|I will|let me|I'?m going to|I'?d like to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
+    r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look)\b"
+    r"|\blet'?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
+    r"check|queue|start)\b"
+    r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
+    r"|\bthe (fix|next step|change) (is|would be|will be) to\b"
+    r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b", re.I | re.M)
 _ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready queued\b|\bpending\b|\bqueued (above|earlier)\b",
                              re.I)
 
 
 def promises_commands(text: str) -> bool:
-    """True when the message's last lines announce commands that should have been queued."""
-    tail = "\n".join([line for line in text.strip().splitlines() if line.strip()][-2:])
-    tail = re.sub(r"[*_`]+", "", tail)
-    return bool(tail) and bool(_PROMISE.search(tail)) and not _ALREADY_QUEUED.search(tail)
+    """True when the end of the message announces commands or a change that should have been
+    queued. Each sentence of the last few lines is judged on its own."""
+    lines = [line for line in re.sub(r"[*_`]+", "", text).strip().splitlines() if line.strip()][-4:]
+    if lines and lines[-1].rstrip().endswith(":"):        # "Run these:" with nothing after it
+        return True
+    for line in lines:
+        for sentence in re.split(r"(?<=[.?!])\s+", line.strip()):
+            if _PROMISE.search(sentence) and not _ALREADY_QUEUED.search(sentence):
+                return True
+    return False
+
+
+_RUN_REF = re.compile(r"\b(run|re-?run|try|execute|send)\b[^.?!\n]{0,40}?((?:#\d+[\s,/&and–-]*)+)", re.I)
+
+
+def stale_run_refs(text: str, pending: set[int]) -> list[int]:
+    """Items the message asks the technician to run that are not pending: skipped, withdrawn
+    or already run (live: GLM 5.3 asked for #10 and #11 after they had been skipped)."""
+    out = []
+    for m in _RUN_REF.finditer(text):
+        for n in re.findall(r"#(\d+)", m.group(2)):
+            if int(n) not in pending and int(n) not in out:
+                out.append(int(n))
+    return out
 
 
 def _turn_summary(entry: dict) -> str:
@@ -1163,6 +1193,9 @@ class Engine:
             entry[0].set_result((answer, save))
 
     # ---------------------------------------------------------------- queue
+
+    def _queued(self, num: int) -> bool:
+        return any(p.num == num for p in self.queue.items)
 
     def _session_kinds(self) -> dict[str, str]:
         return {s["id"]: s["kind"] for s in self.sessions.roster()}
@@ -2556,6 +2589,12 @@ class Engine:
                         raise
                     in_flight = None
                     continue                     # the same round again, without that setting
+                if not result.tool_calls and result.content:
+                    clean, calls = textcalls.extract(result.content)
+                    if calls:          # tool calls written as text (seen from Qwen 3.8 27B): make them
+                        self.log("text_tool_calls", calls=[c.name for c in calls], text=result.content[-2000:])
+                        result.tool_calls, result.content = calls, clean
+                        entry["text"] = entry["text"][:round_text] + clean
                 usage = result.usage
                 if tee and result.id:
                     reply_ids.append(result.id)
@@ -2573,14 +2612,22 @@ class Engine:
                     self.conv[-1]["content"] += NO_MESSAGE_NUDGE.format(done=_turn_summary(entry))
                     self.log("no_message_nudge", done=_turn_summary(entry))
                     retry = True
-                if (not retry and not result.tool_calls and not promise_nudged and promises_commands(entry["text"])
-                        and not any(entry.get(k) for k in ("proposals", "questions", "withdrawn"))):
-                    # Some models (live: GLM 5.3) end with "Now I need you to run a few more commands"
-                    # and call no tool; the technician then has to ask what the commands are.
-                    promise_nudged = True
-                    self.conv.append({"role": "user", "content": PROMISE_NUDGE})
-                    self.log("promise_nudge", text=entry["text"][-300:])
-                    retry = True
+                if not retry and not result.tool_calls and not promise_nudged:
+                    said = entry["text"][round_text:]      # this round's words; earlier rounds made their calls
+                    stale = stale_run_refs(said, {p.num for p in self.queue.items if p.status == "pending"})
+                    if stale or (promises_commands(said)
+                                 and not any(entry.get(k) for k in ("proposals", "questions", "withdrawn"))):
+                        # Some models (live: GLM 5.3) end with "Now I need you to run a few more
+                        # commands" and call no tool, or ask for items that already left the queue;
+                        # the technician then has to ask what to run.
+                        promise_nudged = True
+                        note = PROMISE_NUDGE
+                        if stale:
+                            note = STALE_NUDGE.format(items=", ".join(
+                                f"#{n} ({self.queue.get(n).status if self._queued(n) else 'not in the queue'})" for n in stale))
+                        self.conv.append({"role": "user", "content": note})
+                        self.log("promise_nudge", text=entry["text"][-300:], stale=stale)
+                        retry = True
                 if not retry:
                     break
                 entry["text"] += "\n\n"

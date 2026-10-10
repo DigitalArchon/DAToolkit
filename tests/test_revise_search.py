@@ -321,6 +321,13 @@ def test_snippets_are_cut_at_the_given_length():
     "Let's confirm the NIC speed. Run these:",
     "Good. **Here are the commands** to confirm the fix.",
     "Could you run the following checks on DC01 and send me the output?",
+    # seen live in the model evaluation, each with no tool call
+    "Let's get a baseline first with some read-only checks on media01.",                          # GLM 5.3
+    "Let's redo the throughput test properly with a real movie file, and check the link.",        # GLM 5.3
+    "No service restart is required. I'll also make it persistent so it survives a reboot.",      # Kimi K2.7 Code
+    "Before rebooting app01 I'd check win01. Queue these win01 checks: SMB shares and disk latency.",  # Kimi K2.7 Code
+    "The fix is to turn on `httpd_can_network_connect`. It applies immediately.",                  # Qwen 3.8 Max
+    "That said, since you asked, I've queued two cheap read-only win01 checks.",                  # Qwen 3.8 27B
 ])
 def test_promises_are_recognised(text):
     from datoolkit.engine import promises_commands
@@ -332,6 +339,10 @@ def test_promises_are_recognised(text):
     "Please run the commands still in the queue.",
     "That's the root cause: the guest VLAN isn't in the LAN list. Fixed now; please confirm from a guest phone.",
     "Which of these is it: the cable, or the switch port?",
+    "So I'm not queueing anything on win01 right now; run #22, #23 and #24 on app01 instead.",
+    "Root cause: the patch cable. The fix was to replace it, and the link now runs at 1000 Mb/s.",
+    "Let's look.",
+    "Here's what I see:\n- the link is at 100 Mb/s\n- CRC errors are climbing\nThat points at the cable.",
     "",
 ])
 def test_ordinary_endings_are_not_promises(text):
@@ -371,3 +382,30 @@ async def test_promise_nudge_happens_once_and_not_after_a_call(env):  # noqa: F8
     engine.send("y")
     await wait_turn(engine)
     assert len(fake.requests) == 3                   # the call came with the promise: no nudge
+
+
+def test_stale_run_references():
+    from datoolkit.engine import stale_run_refs
+    text = "I'll hold off until you're back. When you're done, run #10 and #11 and send me the output."
+    assert stale_run_refs(text, pending={12}) == [10, 11]
+    assert stale_run_refs(text, pending={10, 11}) == []
+    assert stale_run_refs("Run #3-#5 next.", pending={3}) == [5]
+    assert stale_run_refs("#4 showed the link at 100 Mb/s.", pending=set()) == []
+
+
+async def test_asking_for_items_no_longer_queued_gets_a_nudge(env):  # noqa: F811
+    from datoolkit.engine import STALE_NUDGE
+    engine, fake, _ = env
+    sid = setup(engine)
+    engine.queue.add("c", [{"session_id": sid, "command": "ethtool eth0", "risk": "read_only"}])
+    engine.update_item(1, status="skipped", note="later")
+    fake.responses += [
+        sse(({"role": "assistant", "content": "When you're back, run #1 and send me the output."}, "stop")),
+        multi_tool_stream([("propose_commands", {"items": [
+            {"session_id": sid, "command": "ethtool eth0", "purpose": "link speed", "risk": "read_only"}]})], text="Queued again as #2."),
+    ]
+    engine.send("cable swapped")
+    await wait_turn(engine)
+    nudge = fake.requests[1]["messages"][-1]["content"]
+    assert nudge.startswith(STALE_NUDGE.split("{")[0]) and "#1 (skipped)" in nudge
+    assert engine.chat[-1]["proposals"] == [2]
