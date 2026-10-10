@@ -10,7 +10,24 @@ import re
 
 # (pattern on the model id, note). Matched case-insensitively anywhere in the id, so a note for
 # "glm" covers z-ai/glm-5.3, TEE/glm-5.3 and private/glm-5-3 alike.
-BUILTIN: list[tuple[str, str]] = []
+_QUEUE_RULE = (
+    "The technician can only run what is in their queue. Whenever your message says you will check something, "
+    "says what you want them to run, or describes a fix (\"I'll queue a few checks\", \"Let's get a baseline\", "
+    "\"The fix is to...\"), make the propose_commands call in that same turn with exactly those commands. Never "
+    "say you have queued something unless you made the call in this turn, and never end a turn with commands "
+    "described only in words. If there is nothing to queue yet, say what you are waiting for instead.")
+
+BUILTIN: list[tuple[str, str]] = [
+    # GLM 5.3 (evaluation 2026-10-10): "Let's get a baseline first with some read-only checks" with no call;
+    # asked for #10 and #11 after they had been skipped
+    (r"glm", _QUEUE_RULE + " Only ask the technician to run item numbers that are pending in the queue (see the "
+             "current state); anything skipped or already run must be queued again."),
+    # DeepSeek V4 Pro: an empty \"I'll queue a few checks\" in a third of its turns; queued a command with a
+    # placeholder path; sidestepped \"when can we reboot?\" and the ground rule that answered it
+    (r"deepseek", _QUEUE_RULE + " Answer every question the technician asks directly in your message before "
+                  "moving on, and keep applying ground rules they set earlier in the case (times, systems not to "
+                  "touch) when they bear on the answer."),
+]
 
 MAX_RULES = 30
 MAX_MATCH = 100

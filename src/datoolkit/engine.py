@@ -85,7 +85,7 @@ _PROMISE = re.compile(
     r"\b(I need you to|please|could you|can you|now|next)\b[^.?!\n]{0,40}\b(run|execute|try|check|paste)\b[^.?!\n]{0,40}"
     r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
     r"|\b(I'?ve|I have|I'?ll|I will|let me|I'?m going to|I'?d like to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
-    r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look)\b"
+    r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look|start by)\b"
     r"|\blet'?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
     r"check|queue|start)\b"
     r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
@@ -93,6 +93,11 @@ _PROMISE = re.compile(
     r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b", re.I | re.M)
 _ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready queued\b|\bpending\b|\bqueued (above|earlier)\b",
                              re.I)
+
+
+# an offer that waits on the technician is not a promise: "If you'd like that, I'll propose a drop
+# rule" (Qwen 3.8 Max), "Once you've swapped the cable, I'll queue the checks"
+_CONDITIONAL = re.compile(r"^\s*(if|once|when|after|as soon as)\b|\bif (you|that|this|it|they)\b", re.I)
 
 
 def promises_commands(text: str) -> bool:
@@ -103,7 +108,7 @@ def promises_commands(text: str) -> bool:
         return True
     for line in lines:
         for sentence in re.split(r"(?<=[.?!])\s+", line.strip()):
-            if _PROMISE.search(sentence) and not _ALREADY_QUEUED.search(sentence):
+            if _PROMISE.search(sentence) and not _ALREADY_QUEUED.search(sentence) and not _CONDITIONAL.search(sentence):
                 return True
     return False
 

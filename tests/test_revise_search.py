@@ -328,6 +328,7 @@ def test_snippets_are_cut_at_the_given_length():
     "Before rebooting app01 I'd check win01. Queue these win01 checks: SMB shares and disk latency.",  # Kimi K2.7 Code
     "The fix is to turn on `httpd_can_network_connect`. It applies immediately.",                  # Qwen 3.8 Max
     "That said, since you asked, I've queued two cheap read-only win01 checks.",                  # Qwen 3.8 27B
+    "Let me start by checking the health of the domain controller and looking for recent events.",  # Qwen 3.7 Plus
 ])
 def test_promises_are_recognised(text):
     from datoolkit.engine import promises_commands
@@ -342,6 +343,7 @@ def test_promises_are_recognised(text):
     "So I'm not queueing anything on win01 right now; run #22, #23 and #24 on app01 instead.",
     "Root cause: the patch cable. The fix was to replace it, and the link now runs at 1000 Mb/s.",
     "Let's look.",
+    "Guests can reach the staff LAN now. If you'd like that locked down, I'll propose a drop rule before rule 10.",  # Qwen 3.8 Max
     "Here's what I see:\n- the link is at 100 Mb/s\n- CRC errors are climbing\nThat points at the cable.",
     "",
 ])
