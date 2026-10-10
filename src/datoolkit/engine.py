@@ -90,8 +90,8 @@ _PROMISE = re.compile(
     r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
     r"|\b(I['’]?ve|I have|I['’]?ll|I will|let me|I['’]?m going to|I['’]?d like to|I want to|we['’]?ll|we will|we need to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
     r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look|start by)\b"
-    r"|\b(I['’]?ll|I will|let me|I['’]?m going to|I need to|now I need to|I want to)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
-    r"fetch|see|ask for|check|confirm|verify|inspect|queue)\b"
+    r"|\b(I['’]?ll|I will|let me|I['’]?m going to|I need to|now I need to|I want to|we['’]?ll|we will)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
+    r"fetch|see|ask for|check|confirm|verify|inspect|queue|fix)\b"
     r"|\blet['’]?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
     r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
     r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
@@ -103,7 +103,7 @@ _ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready que
 
 # an offer that waits on the technician is not a promise: "If you'd like that, I'll propose a drop
 # rule" (Qwen 3.8 Max), "Once you've swapped the cable, I'll queue the checks"
-_CONDITIONAL = re.compile(r"^\s*(if|once|when|after|as soon as)\b|\bif (you|that|this|it|they)\b", re.I)
+_CONDITIONAL = re.compile(r"^\s*(if|once|when|after|as soon as)\b|\bif you(['’]d| would)? (like|want|prefer)\b", re.I)
 
 
 def promises_commands(text: str) -> bool:

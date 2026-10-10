@@ -334,6 +334,8 @@ def test_snippets_are_cut_at_the_given_length():
     "Now I need to see how far off the clock is and the current NTP config.",                     # Qwen 3.8 27B
     "The fix: point the DC at a working NTP source and force a resync — the clock will jump forward.",  # GLM 5.3
     "Before I have you reconfigure w32time, I want to confirm the actual clock offset. Then we'll fix the time source.",  # Kimi
+    "Let me check the cable and see if this was previously at gigabit.",                           # DeepSeek V4 Pro
+    "Let me update the board and then we'll fix the time.",                                        # DeepSeek V4 Pro
     "I'm going to ask for the NAT rules, filter rules, IP addresses, and routing table.",          # Qwen 3.8 27B
     "Let me lay out my working hypotheses and pull the relevant config.",                          # Qwen 3.8 27B
     "Before we change it, I want to confirm the bridge port setup. Then we'll add the interface to the list.",
