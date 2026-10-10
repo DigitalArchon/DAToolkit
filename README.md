@@ -50,9 +50,23 @@ so that it gets your distribution's security updates:
 
 | Distribution | For the app window | For RDP sessions (optional) |
 |---|---|---|
-| Ubuntu, Mint, Debian | `sudo apt install gir1.2-webkit2-4.1` | `sudo apt install guacd` |
-| Fedora | `sudo dnf install webkit2gtk4.1` | `sudo dnf install guacd` |
-| Arch, CachyOS | `sudo pacman -S webkit2gtk-4.1` | `guacamole-server` (AUR) |
+| Ubuntu, Mint | `sudo apt install gir1.2-webkit2-4.1` | `sudo apt install guacd` |
+| Debian | `sudo apt install gir1.2-webkit2-4.1` | not packaged: guacd container (below) |
+| Fedora | `sudo dnf install webkit2gtk4.1` | `sudo dnf install guacd libguac-client-rdp`, then `sudo systemctl enable --now guacd` |
+| Arch, CachyOS | `sudo pacman -S webkit2gtk-4.1` | not in the repositories: guacd container (below) |
+
+Where guacd isn't packaged, run Apache Guacamole's own image, published on this machine only
+(guacd's link is unencrypted), and let podman restart it after a reboot:
+
+```bash
+podman run -d --name guacd --restart unless-stopped -p 127.0.0.1:4822:4822 docker.io/guacamole/guacd:1.6.0
+systemctl --user enable podman-restart.service
+```
+
+(`docker run ...` works the same, without the second line.) Arch's AUR has `guacamole-server`,
+but it doesn't build as is: current glibc trips its `-Werror`, and its RDP plugin doesn't
+compile against Arch's FreeRDP 3, so it also needs `freerdp2` from the AUR. If guacd isn't running when you open an RDP host, DA Toolkit
+shows the commands for your distribution in a dialog you can copy them from.
 
 Without WebKitGTK, DA Toolkit opens in your default web browser instead and says what to install.
 You can also choose the browser yourself (Settings → General, or `--browser`); the browser

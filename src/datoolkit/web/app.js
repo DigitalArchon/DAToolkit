@@ -70,7 +70,11 @@ async function api(method, path, body) {
   });
   let data = {};
   try { data = await res.json(); } catch { /* empty */ }
-  if (!res.ok) throw new Error(data.error || data.detail || `${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const err = new Error(data.error || data.detail || `${res.status} ${res.statusText}`);
+    err.commands = Array.isArray(data.commands) ? data.commands : [];
+    throw err;
+  }
   return data;
 }
 
@@ -80,8 +84,14 @@ function toast(text, kind = "info", ms = 6000) {
   setTimeout(() => el.remove(), ms);
 }
 
+// An error that comes with commands to fix it stays up, so they can be copied.
+function showError(e) {
+  if (e.commands?.length) fixModal(e.message, e.commands);
+  else toast(e.message, "error");
+}
+
 async function guarded(fn) {
-  try { return await fn(); } catch (e) { toast(e.message, "error"); }
+  try { return await fn(); } catch (e) { showError(e); }
 }
 
 // AI output is untrusted (it can be steered by prompt injection in command output), so it
@@ -130,7 +140,7 @@ function modal({ title, body, buttons = [], wide = false, onClose, dismissable =
         const keep = await b.onClick?.();
         if (keep !== true) close();
       } catch (e) {
-        toast(e.message, "error");
+        showError(e);
       } finally {
         btn.disabled = false;
       }
@@ -148,6 +158,16 @@ function modal({ title, body, buttons = [], wide = false, onClose, dismissable =
   // must not confirm a deletion)
   setTimeout(() => (box.querySelector("input:not([type=checkbox]):not([type=radio]), textarea, select") || box).focus(), 30);
   return { close, box };
+}
+
+function fixModal(message, commands) {
+  modal({
+    title: "Needs setting up", wide: true,
+    body: [h("div", {}, message), ...commands.map((c) => h("div", { class: "fix-cmd" },
+      h("code", {}, c),
+      h("button", { class: "small", type: "button", onclick: async () => { await clipWrite(c); toast("Command copied.", "ok", 2000); } }, "Copy")))],
+    buttons: [{ label: "Close", kind: "primary" }],
+  });
 }
 
 function confirmModal(title, message, okLabel = "OK", kind = "primary") {
@@ -2648,7 +2668,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" },
         h("button", { class: "primary", onclick: () => pane.replaceChildren(hostForm({ kind: "ssh", auth: "agent", _new: true })) }, "Add SSH host"),
         h("button", { onclick: () => pane.replaceChildren(hostForm({ kind: "winrm", auth: "ntlm", winrm_ssl: true, winrm_cert_validation: true, _new: true })) }, "Add WinRM host"),
-        h("button", { title: "Remote desktop through guacd (sudo apt install guacd)",
+        h("button", { title: "Remote desktop through Apache Guacamole's guacd on this machine; if it's missing, opening the host says how to install it",
           onclick: () => pane.replaceChildren(hostForm({ kind: "rdp", auth: "password", rdp_security: "any", rdp_layout: "en-us-qwerty", _new: true })) }, "Add RDP host")));
   }
 

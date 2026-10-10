@@ -149,7 +149,12 @@ def _turn_summary(entry: dict) -> str:
 
 
 class UserError(Exception):
-    """An error to show the technician as-is."""
+    """An error to show the technician as-is, with any commands that fix it (shown so they can
+    be copied, not as a passing notice)."""
+
+    def __init__(self, message: str, commands: list[str] | None = None):
+        super().__init__(message)
+        self.commands = list(commands or [])
 
 
 def _local_os() -> str:
@@ -1053,9 +1058,7 @@ class Engine:
         if not host or host.kind != "rdp":
             raise UserError(f"Unknown RDP host {host_name}")
         if not await self._guacd_reachable():
-            host, port = guac.GUACD
-            raise UserError(f"guacd is not running on {host}:{port}. Install it with "
-                            "'sudo apt install guacd' (it starts as a service).")
+            raise UserError(*guac.install_help())
         sid = self.sessions.unique_id(host.name)
         port = host.port or 3389
         try:

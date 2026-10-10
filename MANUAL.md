@@ -566,9 +566,11 @@ collateral and NVIDIA's keys are cached for an hour.
     not supported.
   - Variables persist between commands.
 - **RDP** opens the remote desktop in a tab, through Apache Guacamole's `guacd`
-  (`sudo apt install guacd`; it runs as a local service on 127.0.0.1:4822). DA Toolkit only
-  connects to guacd on this machine, since that link isn't encrypted, and does the connection
-  handshake itself, so the password never reaches the page. Add RDP hosts under Settings → Hosts with the security mode and keyboard layout.
+  (it runs as a local service on 127.0.0.1:4822; see the install table in the README: it's
+  `sudo apt install guacd` on Ubuntu and Mint, and upstream's container on Debian, Arch and
+  CachyOS). If it isn't running, opening an RDP host shows the commands for your distribution
+  in a dialog you can copy them from. DA Toolkit only connects to guacd on this machine, since
+  that link isn't encrypted, and does the connection handshake itself, so the password never reaches the page. Add RDP hosts under Settings → Hosts with the security mode and keyboard layout.
   - **Certificates are trusted on first use and pinned.** Before every connection DA Toolkit
     reads the server's TLS certificate itself. The first time it shows you the subject,
     issuer and SHA-256 fingerprint to verify (on Windows: the Remote Desktop certificate in

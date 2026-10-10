@@ -247,8 +247,81 @@ async def test_legacy_rdp_asks_every_time_and_guacd_missing(rdp_env, monkeypatch
     async def down():
         return False
     monkeypatch.setattr(engine, "_guacd_reachable", down)
-    with pytest.raises(UserError, match="apt install guacd"):
+    monkeypatch.setattr(guac, "install_help", lambda: ("guacd isn't installed.", ["sudo apt install guacd"]))
+    with pytest.raises(UserError, match="isn't installed") as err:
         await engine.open_rdp("old")
+    assert err.value.commands == ["sudo apt install guacd"]
+
+
+def test_guacd_install_help_per_distribution():
+    def which_of(*present):
+        return lambda name: f"/usr/bin/{name}" if name in present else None
+
+    def help_for(release, *present, container=None):
+        return guac.install_help(release, which_of(*present), installed=False, container=lambda w: container)
+    podman_run = f"podman run -d --name guacd --restart unless-stopped -p 127.0.0.1:4822:4822 {guac.GUACD_IMAGE}"
+    mint = {"ID": "linuxmint", "ID_LIKE": "ubuntu debian", "NAME": "Linux Mint"}
+    assert help_for(mint)[1] == ["sudo apt install guacd"]
+    text, cmds = help_for({"ID": "fedora", "NAME": "Fedora Linux"})
+    assert cmds == ["sudo dnf install guacd libguac-client-rdp", "sudo systemctl enable --now guacd"]
+    assert "EPEL" not in text
+    assert "EPEL" in help_for({"ID": "rocky", "ID_LIKE": "rhel centos fedora"})[0]
+    # Arch and its derivatives: no apt, and the AUR package doesn't build as is, so the container
+    cachy = {"ID": "cachyos", "ID_LIKE": "arch", "NAME": "CachyOS Linux"}
+    text, cmds = help_for(cachy)
+    assert "AUR" in text and "only from this machine" in text
+    assert cmds == ["sudo pacman -S --needed podman", podman_run, "systemctl --user enable podman-restart.service"]
+    assert help_for(cachy, "podman")[1] == [podman_run, "systemctl --user enable podman-restart.service"]
+    assert help_for(cachy, "docker")[1] == [podman_run.replace("podman", "docker", 1)]
+    # Debian 13 ships no guacd either
+    text, cmds = help_for({"ID": "debian", "NAME": "Debian GNU/Linux"})
+    assert "Debian GNU/Linux doesn't package it" in text and cmds[0] == "sudo apt install podman"
+    assert help_for({"ID": "gentoo"})[1] == [podman_run, "systemctl --user enable podman-restart.service"]
+    # installed but stopped: start it, whatever the distribution
+    assert guac.install_help(cachy, which_of(), installed=True)[1] == ["sudo systemctl enable --now guacd"]
+    assert help_for(cachy, "podman", container="podman")[1] == ["podman start guacd"]
+
+
+def test_stopped_container_detection(monkeypatch):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return type("R", (), {"returncode": 0 if argv[0] == "docker" else 125})()
+    monkeypatch.setattr(guac.subprocess, "run", run)
+    assert guac._stopped_container(lambda n: f"/usr/bin/{n}") == "docker"
+    assert calls == [["podman", "container", "inspect", "guacd"], ["docker", "container", "inspect", "guacd"]]
+    assert guac._stopped_container(lambda n: None) is None
+
+
+def test_os_release_parsing(tmp_path):
+    f = tmp_path / "os-release"
+    f.write_text('NAME="CachyOS Linux"\nID=cachyos\nID_LIKE=arch\n# comment\n')
+    assert guac.os_release(str(f)) == {"NAME": "CachyOS Linux", "ID": "cachyos", "ID_LIKE": "arch"}
+    assert guac.os_release(str(tmp_path / "missing")) == {}
+
+
+def test_user_error_commands_reach_the_page(tmp_path, monkeypatch):
+    holder = {}
+
+    def make(emit):
+        from datoolkit.config import Config
+        from datoolkit.engine import Engine
+        holder["e"] = Engine(Config(), emit, tmp_path / "rt", save_config=lambda c: None)
+        return holder["e"]
+
+    async def down():
+        return False
+    monkeypatch.setattr(guac, "install_help", lambda: ("guacd isn't installed.", ["a", "b"]))
+    with TestClient(create_app("tok", make)) as client:
+        e = holder["e"]
+        e.new_case("guacd", "open")
+        e.cfg.hosts.append(Host(name="ts9", kind="rdp", host="ts9.lan", user="bob"))
+        monkeypatch.setattr(e, "_guacd_reachable", down)
+        r = client.post("/api/sessions", json={"kind": "rdp", "host": "ts9"}, headers={"X-Token": "tok"})
+        assert r.status_code == 400 and r.json() == {"error": "guacd isn't installed.", "commands": ["a", "b"]}
+        r = client.post("/api/sessions", json={"kind": "rdp", "host": "nope"}, headers={"X-Token": "tok"})
+        assert r.json() == {"error": "Unknown RDP host nope"}
 
 
 def test_host_validation_for_rdp(env):  # noqa: F811

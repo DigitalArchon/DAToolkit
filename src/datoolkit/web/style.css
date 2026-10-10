@@ -274,6 +274,8 @@ body.rdp-max .term-host { inset: 0; }
 .toast { background: var(--panel-2); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 8px 12px; max-width: 460px; box-shadow: 0 6px 20px rgba(0,0,0,.4); font-size: 13px; overflow-wrap: anywhere; }
 .toast.error { border-left-color: var(--danger); }
 .toast.ok { border-left-color: var(--ok); }
+.fix-cmd { display: flex; align-items: center; gap: 8px; }
+.fix-cmd code { flex: 1; font-family: var(--mono); font-size: 12.5px; background: var(--bg); padding: 6px 8px; border-radius: 6px; user-select: all; overflow-wrap: anywhere; }
 
 /* context usage indicator (top bar) */
 #usage.warn { color: var(--warn); }

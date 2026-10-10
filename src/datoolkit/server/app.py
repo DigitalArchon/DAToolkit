@@ -119,7 +119,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                                                                for s in snap["sessions"]]}
 
     async def user_error(_: Request, exc: UserError):
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"error": str(exc), **({"commands": exc.commands} if exc.commands else {})},
+                            status_code=400)
 
     async def key_error(_: Request, exc: KeyError):
         # an unknown queue number, session id or prompt id is a stale client, not a crash
