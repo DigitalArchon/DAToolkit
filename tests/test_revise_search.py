@@ -87,6 +87,23 @@ async def test_tool_calls_without_a_message_get_one_nudge(env):  # noqa: F811
     nudge = fake.requests[1]["messages"][-1]["content"]
     assert NO_MESSAGE_NUDGE.strip()[:20] in nudge and "(queued #1)" in nudge
     assert engine.chat[-1]["text"] == "Run #1 to identify the OS." and engine.chat[-1]["proposals"] == [1]
+    # the nudge asks for words, so that round offers no tool calls (live, Opus made more instead)
+    assert fake.requests[0]["tool_choice"] == "auto" and fake.requests[1]["tool_choice"] == "none"
+
+
+async def test_nudge_round_without_tool_choice_when_the_route_refuses_it(env):  # noqa: F811
+    engine, fake, _ = env
+    sid = setup(engine)
+    silent = sse(({"tool_calls": [{"index": 0, "id": "c0", "type": "function", "function": {
+        "name": "propose_commands", "arguments": json.dumps({"items": [
+            {"session_id": sid, "command": "uname -a", "purpose": "os", "risk": "read_only"}]})}}]}, None),
+        ({}, "tool_calls"))
+    fake.refuse["anthropic/claude-opus-5.5"] = "tool_choice=none"
+    fake.responses += [silent, sse(({"role": "assistant", "content": "Run #1."}, "stop"))]
+    engine.send("router")
+    await wait_turn(engine)
+    assert engine.chat[-1]["text"] == "Run #1."
+    assert [r.get("tool_choice") for r in fake.requests] == ["auto", "none", "auto"]   # refused once, then left out
 
 
 async def test_nudge_happens_only_once(env):  # noqa: F811

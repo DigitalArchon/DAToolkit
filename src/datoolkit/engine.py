@@ -2506,7 +2506,7 @@ class Engine:
                 entry["tee_attested"] = tee[1]["summary"]
             reply_ids: list[str] = []
             turn: dict = {}
-            nudged = promise_nudged = False
+            nudged = promise_nudged = text_only = False
             vision = self.vision_status()
             ttl = self._cache_ttl(prov, model, tier)
             for _ in range(MAX_TOOL_ROUNDS):
@@ -2521,6 +2521,10 @@ class Engine:
                 result = None
                 refused = self._unsupported.get((prov.name, model), set())
                 params = {**self._params(prov, model), **{k: v for k, v in extra.items() if k not in refused}}
+                if text_only and "tool_choice" not in refused:
+                    # the no-message nudge asks for words only; live, Opus answered it with more tool
+                    # calls and still no text
+                    params["tool_choice"] = "none"
                 try:
                     async for kind, val in client.stream(model, messages, tools, params):
                         if kind == "text":
@@ -2552,7 +2556,7 @@ class Engine:
                 if not retry and result.tool_calls and not entry["text"].strip() and not nudged:
                     # Models that think before acting sometimes go straight from reasoning to tool
                     # calls; the technician would see commands with no word about them.
-                    nudged = True
+                    nudged = text_only = True
                     self.conv[-1]["content"] += NO_MESSAGE_NUDGE.format(done=_turn_summary(entry))
                     self.log("no_message_nudge", done=_turn_summary(entry))
                     retry = True

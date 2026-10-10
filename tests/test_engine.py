@@ -54,8 +54,8 @@ class FakeAPI:
         body = json.loads(request.content)
         self.requests.append(body)
         assert request.headers["authorization"] == "Bearer sk-test"
-        setting = self.refuse.get(body["model"])
-        if setting and setting in body:
+        setting, _, value = self.refuse.get(body["model"], "").partition("=")   # "key" or "key=value"
+        if setting and setting in body and (not value or str(body[setting]) == value):
             return httpx.Response(400, json={"error": {"message": f"{body['model']} does not support {setting} on the "
                                                                   "selected route. Omit it or select another model."}})
         if self.overflow:
