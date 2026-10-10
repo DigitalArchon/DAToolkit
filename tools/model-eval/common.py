@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-RUNS = HERE / "runs"
+RUNS = Path(os.environ.get("EVAL_RUNS") or HERE / "runs")    # one runs folder (and spend ledger) for every checkout
 SCENARIOS = HERE / "scenarios"
 LEDGER = RUNS / "ledger.jsonl"
 PRICES = RUNS / "prices.json"
