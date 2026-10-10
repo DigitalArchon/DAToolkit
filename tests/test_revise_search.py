@@ -294,3 +294,63 @@ def test_snippets_are_cut_at_the_given_length():
     long = [{"title": "T", "url": "https://x", "snippet": "a" * 3000, "date": ""}]
     assert 2000 <= websearch.format_for_model("q", "p", long).count("a") < 2100
     assert websearch.format_for_model("q", "p", long, snippet_chars=2500).count("a") >= 2500
+
+
+# ---------------------------------------------------------------- promise nudge
+
+@pytest.mark.parametrize("text", [
+    "The clock looks fine. Now I need you to just run a few more commands to find out.",
+    "That narrows it down. I'll queue the next checks.",
+    "Let's confirm the NIC speed. Run these:",
+    "Good. **Here are the commands** to confirm the fix.",
+    "Could you run the following checks on DC01 and send me the output?",
+])
+def test_promises_are_recognised(text):
+    from datoolkit.engine import promises_commands
+    assert promises_commands(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Run #3 and #4 next and send me the output.",
+    "Please run the commands still in the queue.",
+    "That's the root cause: the guest VLAN isn't in the LAN list. Fixed now; please confirm from a guest phone.",
+    "Which of these is it: the cable, or the switch port?",
+    "",
+])
+def test_ordinary_endings_are_not_promises(text):
+    from datoolkit.engine import promises_commands
+    assert not promises_commands(text)
+
+
+async def test_promised_commands_without_a_call_get_one_nudge(env):  # noqa: F811
+    from datoolkit.engine import PROMISE_NUDGE
+    engine, fake, _ = env
+    sid = setup(engine)
+    fake.responses += [
+        sse(({"role": "assistant", "content": "Time is off. Now I need you to run a few more commands to find out."}, "stop")),
+        multi_tool_stream([("propose_commands", {"items": [
+            {"session_id": sid, "command": "w32tm /query /status", "purpose": "sync state", "risk": "read_only"}]})],
+            text="Here they are."),
+    ]
+    engine.send("results")
+    await wait_turn(engine)
+    assert len(fake.requests) == 2
+    assert fake.requests[1]["messages"][-1] == {"role": "user", "content": PROMISE_NUDGE}
+    entry = engine.chat[-1]
+    assert entry["proposals"] == [1] and entry["text"].endswith("Here they are.")
+    assert "promise_nudge" in (engine.case.dir / "events.jsonl").read_text()
+
+
+async def test_promise_nudge_happens_once_and_not_after_a_call(env):  # noqa: F811
+    engine, fake, _ = env
+    sid = setup(engine)
+    promise = lambda: sse(({"role": "assistant", "content": "I'll queue the next checks."}, "stop"))  # noqa: E731
+    fake.responses += [promise(), promise()]
+    engine.send("x")
+    await wait_turn(engine)
+    assert len(fake.requests) == 2                   # asked once, then the turn ends
+    fake.responses.append(multi_tool_stream([("propose_commands", {"items": [
+        {"session_id": sid, "command": "uptime", "purpose": "load", "risk": "read_only"}]})], text="I'll queue the next checks."))
+    engine.send("y")
+    await wait_turn(engine)
+    assert len(fake.requests) == 3                   # the call came with the promise: no nudge

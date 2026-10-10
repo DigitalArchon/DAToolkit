@@ -66,6 +66,30 @@ NO_MESSAGE_NUDGE = (
     "sees neither your reasoning nor your tool calls. Write your message to them now: what you concluded "
     "and what they should do next. Everything above is already done; do not call the tools again for it.")
 
+PROMISE_NUDGE = (
+    "[DAToolkit] Your message says there are commands for the technician to run, but you made no "
+    "propose_commands call, so nothing new is in their queue and they can't run anything. Queue those "
+    "commands now with propose_commands (or run_recipe). Don't repeat your message; add at most one short "
+    "line. If no commands are needed after all, say so in one sentence.")
+# The end of a message that announces commands to come: "Now I need you to run a few more
+# commands to find out.", "I'll queue the next checks.", "Run these:". Items already queued
+# (#n, "in the queue", "pending") are not a promise.
+_PROMISE = re.compile(
+    r"\b(I need you to|please|could you|can you|now|next)\b[^.?!\n]{0,40}\b(run|execute|try|check|paste)\b[^.?!\n]{0,40}"
+    r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
+    r"|\b(I'?ll|I will|let me|I'?m going to|I'?d like to)\s+(now\s+|just\s+)?(queue|propose|add|give you|send you|prepare|line up)\b"
+    r"|\b(here|below) (are|is)\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b"
+    r"|:\s*$", re.I)
+_ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready queued\b|\bpending\b|\bqueued (above|earlier)\b",
+                             re.I)
+
+
+def promises_commands(text: str) -> bool:
+    """True when the message's last lines announce commands that should have been queued."""
+    tail = "\n".join([line for line in text.strip().splitlines() if line.strip()][-2:])
+    tail = re.sub(r"[*_`]+", "", tail)
+    return bool(tail) and bool(_PROMISE.search(tail)) and not _ALREADY_QUEUED.search(tail)
+
 
 def _turn_summary(entry: dict) -> str:
     """What the model did this turn, in the words the nudge uses."""
@@ -2482,7 +2506,7 @@ class Engine:
                 entry["tee_attested"] = tee[1]["summary"]
             reply_ids: list[str] = []
             turn: dict = {}
-            nudged = False
+            nudged = promise_nudged = False
             vision = self.vision_status()
             ttl = self._cache_ttl(prov, model, tier)
             for _ in range(MAX_TOOL_ROUNDS):
@@ -2531,6 +2555,14 @@ class Engine:
                     nudged = True
                     self.conv[-1]["content"] += NO_MESSAGE_NUDGE.format(done=_turn_summary(entry))
                     self.log("no_message_nudge", done=_turn_summary(entry))
+                    retry = True
+                if (not retry and not result.tool_calls and not promise_nudged and promises_commands(entry["text"])
+                        and not any(entry.get(k) for k in ("proposals", "questions", "withdrawn"))):
+                    # Some models (live: GLM 5.3) end with "Now I need you to run a few more commands"
+                    # and call no tool; the technician then has to ask what the commands are.
+                    promise_nudged = True
+                    self.conv.append({"role": "user", "content": PROMISE_NUDGE})
+                    self.log("promise_nudge", text=entry["text"][-300:])
                     retry = True
                 if not retry:
                     break
