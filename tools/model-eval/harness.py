@@ -141,6 +141,9 @@ async def reply(args) -> None:
     results = []
     for r in data.get("results", []):
         engine.update_item(int(r["num"]), status="ran")
+        # the host invents the output's times; this machine's clock in the result header only
+        # contradicts them (GLM rightly pointed out a 2.5-hour gap that was the harness's doing)
+        engine.queue.get(int(r["num"])).ran_at = None
         results.append({"num": int(r["num"]), "text": str(r.get("text", ""))})
     for s in data.get("skipped", []):
         engine.update_item(int(s["num"]), status="skipped", note=str(s.get("note", "")))
