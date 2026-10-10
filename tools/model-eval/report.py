@@ -18,7 +18,7 @@ import common  # noqa: E402
 RESULTS = common.HERE / "results"
 TURN_FLAGS = ["no_message", "no_message_nudge", "promise_without_call", "promise_nudge", "commands_in_prose_only",
               "bad_tool_calls", "risk_under_labelled", "missing_rollback", "shell_rule_breaches", "unknown_session",
-              "reproposed_pending", "repeated_question", "error_or_empty"]
+              "reproposed_pending", "repeated_question", "error_or_empty", "tool_markup_in_text"]
 
 
 def _variant(run_id: str) -> str:

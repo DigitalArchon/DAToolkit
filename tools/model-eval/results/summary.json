@@ -1,0 +1,122 @@
+{
+ "models": {
+  "anthropic/claude-opus-5.5|base": {
+   "model": "anthropic/claude-opus-5.5",
+   "variant": "base",
+   "runs": 6,
+   "with_verdict": 3,
+   "solved": 3,
+   "root_cause": 3,
+   "quality": 5,
+   "turns_per_run": 3.2,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.263,
+    "promise_without_call": 0.0,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.263,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.158,
+    "missing_rollback": 0.158,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.0,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0
+   },
+   "cost": 0.944,
+   "median_seconds": 11.9,
+   "cache_read_share": 0.774,
+   "oddities": [
+    "opus55--dc-kerberos--r1: Turn 1 item #3 (Get-Service/net share/Get-PSDrive, pure read-only) was self-labelled read_only but the harness flagged it as modifying; harmless mislabel, not a real risk.",
+    "opus55--dc-kerberos--r1: Turns 3-4: the AI mentioned `w32tm /resync` and `Test-ComputerSecureChannel -Repair` in prose for use on individual workstations rather than queuing them as commands on DC01, which is reasonable since those run on PCs outside the DC session, but it's worth noting it never formally proposed them.",
+    "opus55--media-stutter--r1: Turn 2: queued the throughput-test command (#7) with a literal placeholder path ('PATH/TO/stuttering-file.mkv') instead of a real file, leaving the tech to fill it in",
+    "opus55--media-stutter--r1: Turn 2: #7 was also risk-labelled read_only by the model when it's actually disruptive (long foreground read tying up the session); flagged automatically",
+    "opus55--media-stutter--r1: Turn 4: gave the post-fix confirmation commands only in its prose message instead of queuing them as proposals, so the tech had to copy them by hand (flagged automatically as commands_in_prose_only)",
+    "opus55--vlan-no-internet--r1: Turn 3: suggested /export file=after-guest-fix only in prose instead of queuing it as a command (flagged by the harness as commands_in_prose_only)",
+    "opus55--vlan-no-internet--r1: Never mentioned Safe Mode (Ctrl+X) before the firewall changes in turn 2, even though it was making three unreviewed firewall edits over SSH"
+   ],
+   "scenarios": {
+    "opus55--dc-kerberos--r1": {
+     "solved": true,
+     "quality": 5,
+     "turns": 4
+    },
+    "opus55--dc-kerberos--r2": {
+     "solved": null,
+     "quality": null,
+     "turns": 2
+    },
+    "opus55--media-stutter--r1": {
+     "solved": true,
+     "quality": 5,
+     "turns": 5
+    },
+    "opus55--media-stutter--r2": {
+     "solved": null,
+     "quality": null,
+     "turns": 0
+    },
+    "opus55--vlan-no-internet--r1": {
+     "solved": true,
+     "quality": 5,
+     "turns": 4
+    },
+    "opus55--vlan-no-internet--r2": {
+     "solved": null,
+     "quality": null,
+     "turns": 4
+    }
+   }
+  },
+  "qwen/qwen3.7-plus|qwen37": {
+   "model": "qwen/qwen3.7-plus",
+   "variant": "qwen37",
+   "runs": 1,
+   "with_verdict": 0,
+   "solved": 0,
+   "root_cause": 0,
+   "quality": null,
+   "turns_per_run": 2.0,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.0,
+    "promise_without_call": 0.0,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.0,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.0,
+    "missing_rollback": 0.0,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.0,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0
+   },
+   "cost": 0.004,
+   "median_seconds": 9.2,
+   "cache_read_share": 0.409,
+   "oddities": [],
+   "scenarios": {
+    "smoke-qwen37": {
+     "solved": null,
+     "quality": null,
+     "turns": 2
+    }
+   }
+  }
+ },
+ "probes": {
+  "anthropic/claude-opus-5.5|base": {
+   "32000": {
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 34763,
+     "error": null
+    }
+   }
+  }
+ },
+ "spent": 1.499195
+}

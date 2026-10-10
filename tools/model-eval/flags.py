@@ -25,6 +25,11 @@ CMD_WORDS = re.compile(
     r"iperf3?|dmesg|lsblk|smartctl|top|free|uptime|nload|ifstat|sar|iostat|docker|tail|head|find|w32tm|Get-\w+|"
     r"Set-\w+|Test-\w+|Restart-\w+|nltest|klist|dcdiag|repadmin|net|Resolve-DnsName|/[a-z]+)\b", re.I)
 
+# a model's native tool-call syntax leaking into the visible message (DeepSeek's DSML, Kimi's
+# sections, Qwen/Hermes <tool_call>, Mistral [TOOL_CALLS], <function=...>)
+TOOL_MARKUP = re.compile(r"<｜DSML｜|<\|tool_calls?_section_begin\|>|<\|tool_call_begin\|>|</?tool_call>|\[TOOL_CALLS\]|"
+                         r"<function=|<\|?(begin|end)_of_tool|<invoke name=", re.I)
+
 PAGERS = re.compile(r"(^|[|;&]\s*)(less|more|vi|vim|nano|htop)\b|(^|[|;&]\s*)top(?!\s+-b)\b|\btail\s+(-\S+\s+)*-f\b|"
                     r"\bwatch\s", re.M)
 
@@ -75,6 +80,8 @@ def turn_flags(entry: dict, rounds: list[dict], proposals: list[dict], sessions:
         f["error_or_empty"] = entry.get("error") or "empty turn"
     if not text.strip():
         f["no_message"] = True
+    if TOOL_MARKUP.search(text):
+        f["tool_markup_in_text"] = TOOL_MARKUP.search(text).group(0)
     if not proposals and not questions and not entry.get("withdrawn"):
         last = text.strip().splitlines()[-3:] if text.strip() else []
         if any(PROMISE.search(line) for line in last):
