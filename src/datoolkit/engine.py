@@ -91,7 +91,7 @@ _PROMISE = re.compile(
     r"|\blet['’]?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
     r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
     r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
-    r"|\bthe (fix|next step|change) (is|would be|will be) (to|one|a single|simple|this)\b"
+    r"|\bthe (fix|next step|change) (is|would be|will be) (to|one|a single|simple|this)\b|\bthe (fix|next step)\s*[:—–]"
     r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b", re.I | re.M)
 _ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready queued\b|\bpending\b|\bqueued (above|earlier)\b",
                              re.I)
