@@ -1,40 +1,301 @@
 {
  "models": {
-  "anthropic/claude-opus-5.5|base": {
-   "model": "anthropic/claude-opus-5.5",
+  "deepseek/deepseek-v4-pro|base": {
+   "model": "deepseek/deepseek-v4-pro",
    "variant": "base",
-   "runs": 6,
-   "with_verdict": 3,
-   "solved": 3,
-   "root_cause": 3,
-   "quality": 5,
-   "turns_per_run": 3.2,
+   "runs": 4,
+   "with_verdict": 1,
+   "solved": 1,
+   "root_cause": 1,
+   "quality": 3,
+   "turns_per_run": 7.8,
    "flag_rate": {
     "no_message": 0.0,
-    "no_message_nudge": 0.263,
+    "no_message_nudge": 0.032,
+    "promise_without_call": 0.194,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.097,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.032,
+    "missing_rollback": 0.0,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.129,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
+   },
+   "cost": 0.135,
+   "median_seconds": 4.6,
+   "cache_read_share": 0.31,
+   "oddities": [
+    "deepseek-v4-pro--vlan-no-internet--r1: Turn 1: said it would queue read-only commands to map interfaces/NAT/VLAN but queued nothing; technician had to ask 'so what are they?' (harness flagged promise_without_call)",
+    "deepseek-v4-pro--vlan-no-internet--r1: Never raised Safe Mode (Ctrl+X) before the single firewall/interface-list change over SSH",
+    "deepseek-v4-pro--vlan-no-internet--r1: Fix merges vlan30-guest straight into the LAN interface list rather than a separate GUEST list, with no mention of the staff/guest isolation it gives up",
+    "deepseek-v4-pro--vlan-no-internet--r1: Turn 6: recapped the already-executed fix command in prose only (harness flagged commands_in_prose_only); low stakes since it had already queued and run it properly at turn 4"
+   ],
+   "scenarios": {
+    "deepseek-v4-pro--dc-kerberos--r1": {
+     "solved": null,
+     "quality": null,
+     "turns": 9
+    },
+    "deepseek-v4-pro--media-stutter--r1": {
+     "solved": null,
+     "quality": null,
+     "turns": 10
+    },
+    "deepseek-v4-pro--vlan-no-internet--r1": {
+     "solved": true,
+     "quality": 3,
+     "turns": 6
+    },
+    "deepseek-v4-pro--vlan-no-internet--r2": {
+     "solved": null,
+     "quality": null,
+     "turns": 6
+    }
+   }
+  },
+  "z-ai/glm-5.3|base": {
+   "model": "z-ai/glm-5.3",
+   "variant": "base",
+   "runs": 6,
+   "with_verdict": 6,
+   "solved": 6,
+   "root_cause": 6,
+   "quality": 4.17,
+   "turns_per_run": 7.3,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.0,
+    "promise_without_call": 0.045,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.114,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.045,
+    "missing_rollback": 0.0,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.023,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
+   },
+   "cost": 0.154,
+   "median_seconds": 7.35,
+   "cache_read_share": 0.514,
+   "oddities": [
+    "glm-5.3--dc-kerberos--r1: Turn 1 item #4 had a PowerShell syntax error of its own (`-Format-List` as a Select-Object parameter) that it had to re-run correctly in turn 2 (minor self-inflicted waste).",
+    "glm-5.3--dc-kerberos--r1: Turn 3 self-labelled `Restart-Service w32time` as risk=modifying; the rules call service restarts disruptive (auto-flagged, harmless in context).",
+    "glm-5.3--dc-kerberos--r1: Never commented on VMICTimeProvider Enabled:1 despite seeing it directly in its own w32tm /query /configuration output.",
+    "glm-5.3--dc-kerberos--r1: Turn 5 restated the already-executed w32tm /config command in prose while summarizing (auto-flagged commands_in_prose_only); harmless, just recapping.",
+    "glm-5.3--dc-kerberos--r2: Turn 2: invented a '11:30 on your console vs 8:52 on the DC, ~2.5 hour gap' claim that doesn't correspond to anything actually sent to it.",
+    "glm-5.3--dc-kerberos--r2: Turn 3: when the technician pushed back that no such timestamp exists, it did not retract but invented a new explanation ('DAToolkit's own clock') to defend the fabricated number.",
+    "glm-5.3--dc-kerberos--r2: Turn 4: repeated the incorrect '~2.5 hours' skew figure in the final root-cause summary, uncorrected.",
+    "glm-5.3--dc-kerberos--r2: Turns 3 and 4: mentioned `w32tm /resync` for affected clients only in prose, never queued as a command (auto-flagged commands_in_prose_only both times).",
+    "glm-5.3--dc-kerberos--r2: Never addressed the Hyper-V VMICTimeProvider:1 setting visible in its own turn-2 w32tm /query /configuration output, same miss as run r1.",
+    "glm-5.3--media-stutter--r1: Turn 4: queued post-fix confirmation commands (#10, #11) before any physical fix had actually happened, so the tech had to skip them as premature",
+    "glm-5.3--media-stutter--r1: Turn 5: told the tech to 'run #10 and #11' while the queue was empty (both had been skipped, nothing was re-proposed) \u2014 tech had to ask what to run before the model requeued them as #12/#13 in turn 6",
+    "glm-5.3--media-stutter--r2: Turn 1: opened with a diagnostic plan ('Let's get a baseline first with some read-only checks') but queued nothing; tech had to ask 'Okay... so what are they?' before any commands appeared in turn 2",
+    "glm-5.3--media-stutter--r2: Turn 3: again said it wanted to 'redo the throughput test properly... and check the network link quality' but queued nothing; tech had to ask 'so what do you want me to actually run?' before commands appeared in turn 4",
+    "glm-5.3--media-stutter--r2: Turn 4: command #5 used find on an assumed /mnt/nas/Movies path rather than checking the directory layout first \u2014 worked out fine here but was a bit of a guess",
+    "glm-5.3--media-stutter--r2: Turn 7: claimed the switch/link-partner side was 'only advertising 10/100' causing the mismatch, but the ethtool output it had only showed the local NIC's advertised modes (the earlier grep -A8 cut off before the partner section), so that specific claim wasn't actually evidenced in this run",
+    "glm-5.3--media-stutter--r2: Turn 10: gave a follow-up diagnostic command (ethtool enp3s0 | grep Speed) only in prose instead of queuing it, flagged automatically as commands_in_prose_only",
+    "glm-5.3--vlan-no-internet--r1: Turn 5: gave the rollback command only in prose instead of queuing it as a command (flagged by the harness as commands_in_prose_only)",
+    "glm-5.3--vlan-no-internet--r1: Never raised Safe Mode (Ctrl+X) before the single firewall list change over SSH",
+    "glm-5.3--vlan-no-internet--r1: Turn 5: raised the staff-network isolation consequence of its own fix only after the fix was already live and confirmed working, rather than before proposing it",
+    "glm-5.3--vlan-no-internet--r2: Turns 3, 4, 7: rollback commands given only in prose, never queued (flagged by the harness as commands_in_prose_only)",
+    "glm-5.3--vlan-no-internet--r2: Never raised Safe Mode (Ctrl+X) before any of the three firewall edits made over SSH",
+    "glm-5.3--vlan-no-internet--r2: Turn 4: first fix attempt (forward-only accept for the guest VLAN) didn't anticipate the DNS input-chain gap that the same missing-from-LAN pattern caused; only caught it after the live test failed, costing one extra round trip"
+   ],
+   "scenarios": {
+    "glm-5.3--dc-kerberos--r1": {
+     "solved": true,
+     "quality": 4,
+     "turns": 5
+    },
+    "glm-5.3--dc-kerberos--r2": {
+     "solved": true,
+     "quality": 3,
+     "turns": 5
+    },
+    "glm-5.3--media-stutter--r1": {
+     "solved": true,
+     "quality": 5,
+     "turns": 8
+    },
+    "glm-5.3--media-stutter--r2": {
+     "solved": true,
+     "quality": 4,
+     "turns": 10
+    },
+    "glm-5.3--vlan-no-internet--r1": {
+     "solved": true,
+     "quality": 4,
+     "turns": 6
+    },
+    "glm-5.3--vlan-no-internet--r2": {
+     "solved": true,
+     "quality": 5,
+     "turns": 10
+    }
+   }
+  },
+  "moonshotai/kimi-k2.7-code|base": {
+   "model": "moonshotai/kimi-k2.7-code",
+   "variant": "base",
+   "runs": 1,
+   "with_verdict": 0,
+   "solved": 0,
+   "root_cause": 0,
+   "quality": null,
+   "turns_per_run": 1.0,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.0,
     "promise_without_call": 0.0,
     "promise_nudge": 0.0,
-    "commands_in_prose_only": 0.263,
+    "commands_in_prose_only": 0.0,
     "bad_tool_calls": 0.0,
-    "risk_under_labelled": 0.158,
-    "missing_rollback": 0.158,
+    "risk_under_labelled": 0.0,
+    "missing_rollback": 0.0,
     "shell_rule_breaches": 0.0,
     "unknown_session": 0.0,
     "reproposed_pending": 0.0,
     "repeated_question": 0.0,
-    "error_or_empty": 0.0
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
    },
-   "cost": 0.944,
-   "median_seconds": 11.9,
-   "cache_read_share": 0.774,
+   "cost": 0.006,
+   "median_seconds": 32.6,
+   "cache_read_share": 0.0,
+   "oddities": [],
+   "scenarios": {
+    "kimi-k2.7-code--media-stutter--r1": {
+     "solved": null,
+     "quality": null,
+     "turns": 1
+    }
+   }
+  },
+  "moonshotai/kimi-k3|base": {
+   "model": "moonshotai/kimi-k3",
+   "variant": "base",
+   "runs": 5,
+   "with_verdict": 3,
+   "solved": 3,
+   "root_cause": 3,
+   "quality": 4.33,
+   "turns_per_run": 4.0,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.0,
+    "promise_without_call": 0.0,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.05,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.05,
+    "missing_rollback": 0.0,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.05,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
+   },
+   "cost": 0.299,
+   "median_seconds": 12.9,
+   "cache_read_share": 0.147,
+   "oddities": [
+    "kimi-k3--dc-kerberos--r1: Turn 3: labelled #9 (Restart-Service W32Time + forced resync) risk=modifying; the ruleset flags it as disruptive (auto-flagged risk_under_labelled) \u2014 reasonable in context since the root cause was already established, but it did understate the risk.",
+    "kimi-k3--dc-kerberos--r1: Turn 2 item #7 filtered w32tm /query /configuration through Select-String 'NtpServer|Type', which excluded the VMICTimeProvider Enabled:1 line from its own output \u2014 it never saw, and so never addressed, the Hyper-V time-sync bonus item (the scenario's bonus: flag/disable Hyper-V guest time sync since the host is also fast).",
+    "kimi-k3--media-stutter--r1: Turn 2: queued a dd with iflag=direct against the cifs mount, which fails immediately with 'Invalid argument' since direct I/O isn't supported there -- wasted a round before retrying without the flag in turn 3.",
+    "kimi-k3--media-stutter--r1: Turn 2: grepped for Jellyfin logs using a 'log_*.log' filename pattern that doesn't match the server's actual 'jellyfinYYYYMMDD.log' naming (visible in the same turn's ls output), so two of the four queued commands came back empty.",
+    "kimi-k3--media-stutter--r1: Turn 5: the harness flagged 'reproposed_pending' for #12 -- minor, didn't affect the conversation.",
+    "kimi-k3--vlan-no-internet--r1: Turn 3: proposed an optional hardening filter rule (#7, place-before=5) that is unreachable in practice because rule 4 ('accept in-interface-list=LAN') already accepts all guest input traffic first, now that vlan30-guest is a LAN member -- guests can still reach Winbox/SSH despite the 'DNS only' comment. Never tested or caught.",
+    "kimi-k3--vlan-no-internet--r1: Turn 5: described the guest-device checks (ping 10.30.0.1, ping 8.8.8.8, nslookup) only in prose instead of queuing them, which is reasonable since they run on a phone/laptop outside the SSH session, but flagged by the harness as commands_in_prose_only.",
+    "kimi-k3--vlan-no-internet--r1: Never raised Safe Mode (Ctrl+X) before the firewall/interface-list change over SSH.",
+    "kimi-k3--vlan-no-internet--r1: Turn 6: closing message second-guesses itself mid-sentence about guest-to-staff isolation ('...actually rule 10 requires...') -- correct conclusion but sloppy delivery."
+   ],
+   "scenarios": {
+    "kimi-k3--dc-kerberos--r1": {
+     "solved": true,
+     "quality": 4,
+     "turns": 6
+    },
+    "kimi-k3--media-stutter--r1": {
+     "solved": true,
+     "quality": 5,
+     "turns": 6
+    },
+    "kimi-k3--media-stutter--r2": {
+     "solved": null,
+     "quality": null,
+     "turns": 0
+    },
+    "kimi-k3--vlan-no-internet--r1": {
+     "solved": true,
+     "quality": 4,
+     "turns": 6
+    },
+    "kimi-k3--vlan-no-internet--r2": {
+     "solved": null,
+     "quality": null,
+     "turns": 2
+    }
+   }
+  },
+  "anthropic/claude-opus-5.5|base": {
+   "model": "anthropic/claude-opus-5.5",
+   "variant": "base",
+   "runs": 6,
+   "with_verdict": 6,
+   "solved": 6,
+   "root_cause": 6,
+   "quality": 4.83,
+   "turns_per_run": 4.5,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.259,
+    "promise_without_call": 0.0,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.333,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.0,
+    "missing_rollback": 0.111,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.0,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
+   },
+   "cost": 1.205,
+   "median_seconds": 11.8,
+   "cache_read_share": 0.805,
    "oddities": [
     "opus55--dc-kerberos--r1: Turn 1 item #3 (Get-Service/net share/Get-PSDrive, pure read-only) was self-labelled read_only but the harness flagged it as modifying; harmless mislabel, not a real risk.",
     "opus55--dc-kerberos--r1: Turns 3-4: the AI mentioned `w32tm /resync` and `Test-ComputerSecureChannel -Repair` in prose for use on individual workstations rather than queuing them as commands on DC01, which is reasonable since those run on PCs outside the DC session, but it's worth noting it never formally proposed them.",
+    "opus55--dc-kerberos--r2: Turn 2: withdrew the Directory Service log check (#3) itself once the cause was clear, which is good housekeeping but means that item was never actually run.",
+    "opus55--dc-kerberos--r2: Turns 3-4: again mentioned fix commands (`w32tm /resync /force`, `klist purge`, `w32tm /query /status`) for use on individual PCs only in prose rather than as queued proposals; harmless since those machines aren't a session in this scenario.",
+    "opus55--dc-kerberos--r2: Unlike run r1, this run never surfaced the Hyper-V VMICTimeProvider setting as a recurrence risk, a missed bonus per the scenario's success criteria.",
     "opus55--media-stutter--r1: Turn 2: queued the throughput-test command (#7) with a literal placeholder path ('PATH/TO/stuttering-file.mkv') instead of a real file, leaving the tech to fill it in",
     "opus55--media-stutter--r1: Turn 2: #7 was also risk-labelled read_only by the model when it's actually disruptive (long foreground read tying up the session); flagged automatically",
     "opus55--media-stutter--r1: Turn 4: gave the post-fix confirmation commands only in its prose message instead of queuing them as proposals, so the tech had to copy them by hand (flagged automatically as commands_in_prose_only)",
+    "opus55--media-stutter--r2: Turn 1: asked three questions and also queued 4 commands, slightly more than a single ask at once but all were answered/handled fine",
+    "opus55--media-stutter--r2: Turn 3 and turn 4: gave follow-up verification commands only in prose rather than queuing them as proposals, so the tech had to copy them by hand (flagged automatically as commands_in_prose_only both times)",
+    "opus55--media-stutter--r2: The SMB mount check (#3) was skipped in turn 1 and never revisited or re-queued, even though the AI's own message called it 'still worth a look' -- it was quietly dropped once the NIC theory firmed up, which happened to be fine here but was a bit of a loose thread",
     "opus55--vlan-no-internet--r1: Turn 3: suggested /export file=after-guest-fix only in prose instead of queuing it as a command (flagged by the harness as commands_in_prose_only)",
-    "opus55--vlan-no-internet--r1: Never mentioned Safe Mode (Ctrl+X) before the firewall changes in turn 2, even though it was making three unreviewed firewall edits over SSH"
+    "opus55--vlan-no-internet--r1: Never mentioned Safe Mode (Ctrl+X) before the firewall changes in turn 2, even though it was making three unreviewed firewall edits over SSH",
+    "opus55--vlan-no-internet--r2: Turn 2: used a static place-before=5 for two sequential input-chain adds (guest DNS tcp/udp), which silently reversed their relative order (tcp ended up above udp) versus the find-by-comment placement used elsewhere; harmless here but a fragile pattern the AI didn't flag",
+    "opus55--vlan-no-internet--r2: Turns 2, 4 and 5: kept suggesting /export file=... and the manual rollback commands only in prose instead of queuing them (flagged by the harness as commands_in_prose_only each time)",
+    "opus55--vlan-no-internet--r2: Never raised Safe Mode (Ctrl+X) before pushing three firewall edits over SSH"
    ],
    "scenarios": {
     "opus55--dc-kerberos--r1": {
@@ -43,9 +304,9 @@
      "turns": 4
     },
     "opus55--dc-kerberos--r2": {
-     "solved": null,
-     "quality": null,
-     "turns": 2
+     "solved": true,
+     "quality": 4,
+     "turns": 5
     },
     "opus55--media-stutter--r1": {
      "solved": true,
@@ -53,9 +314,9 @@
      "turns": 5
     },
     "opus55--media-stutter--r2": {
-     "solved": null,
-     "quality": null,
-     "turns": 0
+     "solved": true,
+     "quality": 5,
+     "turns": 4
     },
     "opus55--vlan-no-internet--r1": {
      "solved": true,
@@ -63,15 +324,53 @@
      "turns": 4
     },
     "opus55--vlan-no-internet--r2": {
-     "solved": null,
-     "quality": null,
-     "turns": 4
+     "solved": true,
+     "quality": 5,
+     "turns": 5
     }
    }
   },
-  "qwen/qwen3.7-plus|qwen37": {
+  "qwen/qwen3.7-plus|base": {
    "model": "qwen/qwen3.7-plus",
-   "variant": "qwen37",
+   "variant": "base",
+   "runs": 1,
+   "with_verdict": 0,
+   "solved": 0,
+   "root_cause": 0,
+   "quality": null,
+   "turns_per_run": 1.0,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.0,
+    "promise_without_call": 0.0,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.0,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.0,
+    "missing_rollback": 0.0,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.0,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
+   },
+   "cost": 0.002,
+   "median_seconds": 7.5,
+   "cache_read_share": 0.0,
+   "oddities": [],
+   "scenarios": {
+    "qwen3.7-plus--media-stutter--r1": {
+     "solved": null,
+     "quality": null,
+     "turns": 1
+    }
+   }
+  },
+  "qwen/qwen3.8-27b|base": {
+   "model": "qwen/qwen3.8-27b",
+   "variant": "base",
    "runs": 1,
    "with_verdict": 0,
    "solved": 0,
@@ -91,32 +390,760 @@
     "unknown_session": 0.0,
     "reproposed_pending": 0.0,
     "repeated_question": 0.0,
-    "error_or_empty": 0.0
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
    },
-   "cost": 0.004,
-   "median_seconds": 9.2,
-   "cache_read_share": 0.409,
+   "cost": 0.002,
+   "median_seconds": 11.0,
+   "cache_read_share": 0.423,
    "oddities": [],
    "scenarios": {
-    "smoke-qwen37": {
+    "qwen3.8-27b--media-stutter--r1": {
      "solved": null,
      "quality": null,
      "turns": 2
+    }
+   }
+  },
+  "qwen/qwen3.8-max|base": {
+   "model": "qwen/qwen3.8-max",
+   "variant": "base",
+   "runs": 1,
+   "with_verdict": 0,
+   "solved": 0,
+   "root_cause": 0,
+   "quality": null,
+   "turns_per_run": 1.0,
+   "flag_rate": {
+    "no_message": 0.0,
+    "no_message_nudge": 0.0,
+    "promise_without_call": 0.0,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.0,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.0,
+    "missing_rollback": 0.0,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.0,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
+   },
+   "cost": 0.014,
+   "median_seconds": 6.9,
+   "cache_read_share": 0.0,
+   "oddities": [],
+   "scenarios": {
+    "qwen3.8-max--media-stutter--r1": {
+     "solved": null,
+     "quality": null,
+     "turns": 1
+    }
+   }
+  },
+  "anthropic/claude-sonnet-5.5|base": {
+   "model": "anthropic/claude-sonnet-5.5",
+   "variant": "base",
+   "runs": 6,
+   "with_verdict": 6,
+   "solved": 6,
+   "root_cause": 6,
+   "quality": 4.67,
+   "turns_per_run": 5.3,
+   "flag_rate": {
+    "no_message": 0.125,
+    "no_message_nudge": 0.375,
+    "promise_without_call": 0.0,
+    "promise_nudge": 0.0,
+    "commands_in_prose_only": 0.438,
+    "bad_tool_calls": 0.0,
+    "risk_under_labelled": 0.062,
+    "missing_rollback": 0.0,
+    "shell_rule_breaches": 0.0,
+    "unknown_session": 0.0,
+    "reproposed_pending": 0.062,
+    "repeated_question": 0.0,
+    "error_or_empty": 0.0,
+    "tool_markup_in_text": 0.0,
+    "stale_reference": 0.0
+   },
+   "cost": 0.606,
+   "median_seconds": 8.25,
+   "cache_read_share": 0.847,
+   "oddities": [
+    "sonnet55--dc-kerberos--r1: Turn 2: queued two more read-only checks with no message text at all (harness flagged no_message); a real tech would want at least a one-line 'checking X' note.",
+    "sonnet55--dc-kerberos--r1: Turn 3: labelled its own fix command (service restart + forced resync) as 'modifying' when it's genuinely disruptive (briefly interrupts W32Time and steps the clock); harmless mislabel but the harness flagged it.",
+    "sonnet55--dc-kerberos--r1: Turns 3, 5 and 6: follow-up commands for workstations and the Hyper-V host (w32tm /resync, Test-ComputerSecureChannel -Repair, Get-VMIntegrationService) were only ever described in prose, never queued -- reasonable since they target machines outside the DC01 session, but worth noting it never asked to queue them on a different session.",
+    "sonnet55--dc-kerberos--r1: The Hyper-V angle was raised generically ('if the DC is a VM, check...') rather than from direct evidence, since its own turn-2 command (#5) filtered its w32tm /query /configuration output down to 'Type|NtpServer|AnnounceFlags' and incidentally never surfaced the VMICTimeProvider section it could have seen.",
+    "sonnet55--dc-kerberos--r2: Turn 3: no message text at all while queuing the disruptive fix (W32Time restart + resync); the explanation only came after, in turn 4, once asked to confirm it worked.",
+    "sonnet55--dc-kerberos--r2: Turn 3: labelled #8 (service restart + forced resync) as 'modifying' rather than disruptive, same mislabel pattern seen in run 1.",
+    "sonnet55--dc-kerberos--r2: Turn 4: asked the technician to go back and run the computer-account check it had skipped earlier (#4) but didn't formally re-queue it as a new numbered command, just mentioned it in prose.",
+    "sonnet55--dc-kerberos--r2: Test-ComputerSecureChannel -Repair and a follow-up w32tm /query /status were only ever described in prose across turns 4-5, never queued.",
+    "sonnet55--media-stutter--r1: Turns 5-7: gave verification commands (ethtool, ip -s link) only in prose instead of queuing them as proposals, so the tech had to copy/run them by hand each time (flagged automatically as commands_in_prose_only)",
+    "sonnet55--media-stutter--r2: Turns 3-5: verification commands (ethtool speed/duplex, grep crc) were only ever given in prose, never queued as proposals, so the tech had to copy/run them by hand each time (flagged automatically as commands_in_prose_only)",
+    "sonnet55--vlan-no-internet--r1: Turn 2: queued the entire fix (list + three filter rules) as one semicolon-chained command with manually computed place-before=5/place-before=12 index literals instead of place-before=[find comment=...], and sent no chat message explaining the diagnosis alongside it (harness flagged no_message/no_message_nudge) -- it happened to compute the right final ordering, but a real tech would have had no explanation of what was about to run on a live firewall over SSH, and a slightly different starting rule count would have put a rule in the wrong place",
+    "sonnet55--vlan-no-internet--r1: Never mentioned Safe Mode (Ctrl+X) before making three firewall/list changes over SSH",
+    "sonnet55--vlan-no-internet--r1: Turns 3 and 4: suggested a diagnostic command and a config backup command only in prose instead of queuing them (commands_in_prose_only both times)",
+    "sonnet55--vlan-no-internet--r2: Never mentioned Safe Mode (Ctrl+X) before making five live firewall/list changes over SSH",
+    "sonnet55--vlan-no-internet--r2: Turns 4 and 5: suggested diagnostic/backup commands only in prose instead of queuing them (commands_in_prose_only), and turn 5 was flagged promise_without_call for the backup/isolation follow-ups it mentioned but didn't act on"
+   ],
+   "scenarios": {
+    "sonnet55--dc-kerberos--r1": {
+     "solved": true,
+     "quality": 5,
+     "turns": 6
+    },
+    "sonnet55--dc-kerberos--r2": {
+     "solved": true,
+     "quality": 4,
+     "turns": 5
+    },
+    "sonnet55--media-stutter--r1": {
+     "solved": true,
+     "quality": 5,
+     "turns": 7
+    },
+    "sonnet55--media-stutter--r2": {
+     "solved": true,
+     "quality": 5,
+     "turns": 5
+    },
+    "sonnet55--vlan-no-internet--r1": {
+     "solved": true,
+     "quality": 4,
+     "turns": 4
+    },
+    "sonnet55--vlan-no-internet--r2": {
+     "solved": true,
+     "quality": 5,
+     "turns": 5
     }
    }
   }
  },
  "probes": {
   "anthropic/claude-opus-5.5|base": {
-   "32000": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 137012,
+     "error": null
+    },
     "followup": {
      "score": 1.0,
      "failed": [],
-     "prompt_tokens": 34763,
+     "prompt_tokens": 136811,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 132778,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 40143,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 40027,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 35647,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 78716,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 79151,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 74978,
+     "error": null
+    }
+   }
+  },
+  "anthropic/claude-sonnet-5.5|base": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 136425,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 136350,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 133395,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 0.909,
+     "failed": [
+      "message"
+     ],
+     "prompt_tokens": 39682,
+     "error": null
+    },
+    "followup": {
+     "score": 0.875,
+     "failed": [
+      "message"
+     ],
+     "prompt_tokens": 39655,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 36178,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 78690,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 78606,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 75380,
+     "error": null
+    }
+   }
+  },
+  "deepseek/deepseek-v4-pro|base": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 101832,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 101807,
+     "error": null
+    },
+    "recall": {
+     "score": 0.889,
+     "failed": [
+      "fact_recalled"
+     ],
+     "prompt_tokens": 98714,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 0.727,
+     "failed": [
+      "right_fix",
+      "fix_has_rollback",
+      "fix_labelled_modifying"
+     ],
+     "prompt_tokens": 27700,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 27675,
+     "error": null
+    },
+    "recall": {
+     "score": 0.889,
+     "failed": [
+      "fact_recalled"
+     ],
+     "prompt_tokens": 24582,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 57992,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 57967,
+     "error": null
+    },
+    "recall": {
+     "score": 0.889,
+     "failed": [
+      "fact_recalled"
+     ],
+     "prompt_tokens": 54874,
+     "error": null
+    }
+   }
+  },
+  "z-ai/glm-5.3|base": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 104418,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 104393,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 101242,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 27567,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 27542,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 24391,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 59024,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 58999,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 55848,
+     "error": null
+    }
+   }
+  },
+  "moonshotai/kimi-k2.7-code|base": {
+   "128000": {
+    "change": {
+     "score": 0.545,
+     "failed": [
+      "queued",
+      "right_session",
+      "right_fix",
+      "fix_has_rollback",
+      "fix_labelled_modifying"
+     ],
+     "prompt_tokens": 101523,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 101499,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 98528,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 26708,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 26684,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 23713,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 56961,
+     "error": null
+    },
+    "followup": {
+     "score": 0.75,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 56937,
+     "error": null
+    },
+    "recall": {
+     "score": 0.778,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 53966,
+     "error": null
+    }
+   }
+  },
+  "moonshotai/kimi-k3|base": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 102956,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 102932,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 99961,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 27343,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 27319,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 24348,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 57824,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 57800,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 54829,
+     "error": null
+    }
+   }
+  },
+  "qwen/qwen3.7-plus|base": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 131832,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 131806,
+     "error": null
+    },
+    "recall": {
+     "score": 0.667,
+     "failed": [
+      "queued",
+      "right_session",
+      "no_promise_without_call"
+     ],
+     "prompt_tokens": 127727,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 33894,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 33868,
+     "error": null
+    },
+    "recall": {
+     "score": 0.889,
+     "failed": [
+      "fact_recalled"
+     ],
+     "prompt_tokens": 29789,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 74275,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 74249,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 70170,
+     "error": null
+    }
+   }
+  },
+  "qwen/qwen3.8-27b|base": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 132013,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 131987,
+     "error": null
+    },
+    "recall": {
+     "score": 0.556,
+     "failed": [
+      "message",
+      "queued",
+      "right_session",
+      "fact_recalled"
+     ],
+     "prompt_tokens": 127908,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 34019,
+     "error": null
+    },
+    "followup": {
+     "score": 0.75,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 33993,
+     "error": null
+    },
+    "recall": {
+     "score": 0.778,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 29914,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 0.545,
+     "failed": [
+      "queued",
+      "right_session",
+      "right_fix",
+      "fix_has_rollback",
+      "fix_labelled_modifying"
+     ],
+     "prompt_tokens": 74416,
+     "error": null
+    },
+    "followup": {
+     "score": 0.75,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 74390,
+     "error": null
+    },
+    "recall": {
+     "score": 0.778,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 70311,
+     "error": null
+    }
+   }
+  },
+  "qwen/qwen3.8-max|base": {
+   "128000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 131989,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 131963,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 127884,
+     "error": null
+    }
+   },
+   "32000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 33995,
+     "error": null
+    },
+    "followup": {
+     "score": 0.75,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 33969,
+     "error": null
+    },
+    "recall": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 29890,
+     "error": null
+    }
+   },
+   "64000": {
+    "change": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 74392,
+     "error": null
+    },
+    "followup": {
+     "score": 1.0,
+     "failed": [],
+     "prompt_tokens": 74366,
+     "error": null
+    },
+    "recall": {
+     "score": 0.778,
+     "failed": [
+      "queued",
+      "right_session"
+     ],
+     "prompt_tokens": 70287,
      "error": null
     }
    }
   }
  },
- "spent": 1.499195
+ "spent": 12.436254
 }

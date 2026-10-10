@@ -14,17 +14,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
+import flags as flags_mod  # noqa: E402
 
 RESULTS = common.HERE / "results"
 TURN_FLAGS = ["no_message", "no_message_nudge", "promise_without_call", "promise_nudge", "commands_in_prose_only",
               "bad_tool_calls", "risk_under_labelled", "missing_rollback", "shell_rule_breaches", "unknown_session",
-              "reproposed_pending", "repeated_question", "error_or_empty", "tool_markup_in_text"]
+              "reproposed_pending", "repeated_question", "error_or_empty", "tool_markup_in_text", "stale_reference"]
 
 
 def _variant(run_id: str) -> str:
     """'glm-5.3--media-stutter--r1' -> 'base'; '...--r1-prompt' -> 'prompt'."""
     last = run_id.rsplit("--", 1)[-1]
     return last.split("-", 1)[1] if "-" in last else "base"
+
+
+def _sessions(meta: dict) -> dict:
+    return {s["id"]: s for s in (meta.get("sessions") or common.load_scenario(meta["scenario"])["sessions"])}
 
 
 def collect():
@@ -38,6 +43,13 @@ def collect():
                 probes.append(json.loads((rd / "probe.json").read_text()))
             continue
         turns = [json.loads(p.read_text()) for p in sorted(rd.glob("turn-*.json"), key=lambda p: int(p.stem.split("-")[1]))]
+        for i, t in enumerate(turns):      # flag again with today's checks, so every run is measured alike
+            kept = {k: v for k, v in t["flags"].items() if k in ("no_message_nudge", "promise_nudge", "rounds", "bad_tool_calls",
+                                                                   "search_requests", "research_requests")}
+            entry = {"text": t["message"], "questions": [{"question": q} for q in t["questions"]], "withdrawn": t["withdrawn"],
+                     "error": t["error"]}
+            fresh = flags_mod.turn_flags(entry, [], t["proposals"], _sessions(meta), turns[:i], [])
+            t["flags"] = {**fresh, **kept}
         verdict = json.loads((rd / "verdict.json").read_text()) if (rd / "verdict.json").exists() else None
         runs.append({"run_id": rd.name, "model": meta["model"], "scenario": meta["scenario"], "variant": _variant(rd.name),
                      "turns": turns, "verdict": verdict})

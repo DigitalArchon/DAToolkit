@@ -11,13 +11,48 @@ from datoolkit.safety.risk import LEVELS, classify
 TOOL_NAMES = {"propose_commands", "update_hypotheses", "run_recipe", "ask_technician", "revise_queue", "web_search",
               "research"}
 
-# a message that announces commands, checks or steps to come
-PROMISE = re.compile(
-    r"(\b(run|try|execute|check|send me|paste)\b[^.\n]{0,60}\b(following|these|this|few|more|next|some)\b[^.\n]{0,30}"
-    r"\b(commands?|checks?|steps?|diagnostics?)\b"
-    r"|\b(I'?ll|I will|let me|I'?m going to|I need you to|now I need)\b[^.\n]{0,40}\b(queue|propose|give|send|add|run)\b"
-    r"|\bhere (are|is) (the|a few|some)\b[^.\n]{0,30}\b(commands?|checks?)\b"
-    r"|:\s*$)", re.I)
+# The engine's promise and stale-reference checks (model-prompts branch), copied so every run,
+# before and after that branch, is flagged the same way.
+_PROMISE = re.compile(
+    r"\b(I need you to|please|could you|can you|now|next)\b[^.?!\n]{0,40}\b(run|execute|try|check|paste)\b[^.?!\n]{0,40}"
+    r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
+    r"|\b(I'?ve|I have|I'?ll|I will|let me|I'?m going to|I'?d like to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
+    r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look)\b"
+    r"|\blet'?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
+    r"check|queue|start)\b"
+    r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
+    r"|\bthe (fix|next step|change) (is|would be|will be) to\b"
+    r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b", re.I | re.M)
+_ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready queued\b|\bpending\b|\bqueued (above|earlier)\b",
+                             re.I)
+
+
+def promises_commands(text: str) -> bool:
+    """True when the end of the message announces commands or a change that should have been
+    queued. Each sentence of the last few lines is judged on its own."""
+    lines = [line for line in re.sub(r"[*_`]+", "", text).strip().splitlines() if line.strip()][-4:]
+    if lines and lines[-1].rstrip().endswith(":"):        # "Run these:" with nothing after it
+        return True
+    for line in lines:
+        for sentence in re.split(r"(?<=[.?!])\s+", line.strip()):
+            if _PROMISE.search(sentence) and not _ALREADY_QUEUED.search(sentence):
+                return True
+    return False
+
+
+_RUN_REF = re.compile(r"\b(run|re-?run|try|execute|send)\b[^.?!\n]{0,40}?((?:#\d+[\s,/&and–-]*)+)", re.I)
+
+
+def stale_run_refs(text: str, pending: set[int]) -> list[int]:
+    """Items the message asks the technician to run that are not pending: skipped, withdrawn
+    or already run (live: GLM 5.3 asked for #10 and #11 after they had been skipped)."""
+    out = []
+    for m in _RUN_REF.finditer(text):
+        for n in re.findall(r"#(\d+)", m.group(2)):
+            if int(n) not in pending and int(n) not in out:
+                out.append(int(n))
+    return out
+
 
 # words that start a shell/CLI command, to tell a command written in prose from a mere name
 CMD_WORDS = re.compile(
@@ -83,9 +118,8 @@ def turn_flags(entry: dict, rounds: list[dict], proposals: list[dict], sessions:
     if TOOL_MARKUP.search(text):
         f["tool_markup_in_text"] = TOOL_MARKUP.search(text).group(0)
     if not proposals and not questions and not entry.get("withdrawn"):
-        last = text.strip().splitlines()[-3:] if text.strip() else []
-        if any(PROMISE.search(line) for line in last):
-            f["promise_without_call"] = " / ".join(last)[-200:]
+        if promises_commands(text):
+            f["promise_without_call"] = " / ".join(text.strip().splitlines()[-2:])[-200:]
         prose = _prose_commands(text)
         if prose:
             f["commands_in_prose_only"] = prose[:4]
@@ -99,6 +133,10 @@ def turn_flags(entry: dict, rounds: list[dict], proposals: list[dict], sessions:
                 json.loads(c.get("arguments") or "{}")
             except ValueError:
                 bad_calls.append(f"invalid JSON for {c.get('name')}")
+    pending = {p["num"] for t in history[-1:] for p in t.get("pending_after", [])} | {p["num"] for p in proposals}
+    stale = stale_run_refs(text, pending) if history else []
+    if stale and not proposals:
+        f["stale_reference"] = stale
     if bad_calls:
         f["bad_tool_calls"] = bad_calls
     if any(e.get("event") == "no_message_nudge" for e in events):
