@@ -1,0 +1,26 @@
+title = "Jellyfin playback stutters"
+opening = """Hi. Client's home media server (Jellyfin on Ubuntu) has started stuttering on some films and TV episodes. It plays for 20-30 seconds, buffers, plays again. Mostly the 1080p x265 BluRay rips, older DVD-quality stuff seems fine. The media lives on their Synology NAS mounted over SMB. They say it was fine a few weeks ago. I've got an SSH session open to the server (media01). Where do we start?"""
+
+[[sessions]]
+id = "media01"
+name = "media01"
+kind = "ssh"
+target = "tech@media01.lan"
+os_hint = "Ubuntu 24.04"
+
+[hidden]
+root_cause = """The server's NIC (enp3s0, Intel I219-V, e1000e driver) has negotiated 100 Mb/s full duplex instead of 1000 Mb/s, because a patch cable was replaced three weeks ago with an old Cat5 cable that has a damaged pair. SMB reads from the NAS cap out around 11 MB/s (~90 Mb/s). The high-bitrate x265 remuxes peak at 40-60 Mb/s average with bursts over 100 Mb/s, so they stall; DVD rips (5-8 Mb/s) are fine. Jellyfin is direct-playing (no transcoding) for the affected client."""
+fix = "Replace the patch cable with a Cat6 cable (physical). After the swap ethtool shows Speed: 1000Mb/s and playback is smooth. Optionally `sudo ethtool -r enp3s0` to renegotiate (modifying; harmless). Forcing 1000 with ethtool -s does NOT work over the damaged cable (link drops; this is disruptive and would cut SSH, which comes in over this NIC)."
+facts = """
+- Hostname media01, Ubuntu 24.04.1 LTS, kernel 6.8.0-45-generic, Jellyfin 10.10.3 (systemd service jellyfin, active and running for 12 days).
+- CPU Intel i5-8500T, 16 GB RAM, load average ~0.3. No CPU or memory pressure. Jellyfin is NOT transcoding the problem files (Direct Play; the client is an Nvidia Shield on the TV).
+- NIC: enp3s0, IP 192.168.1.20/24, gateway 192.168.1.1. ethtool enp3s0: Speed: 100Mb/s, Duplex: Full, Auto-negotiation: on, Link detected: yes; "Advertised link modes" include 1000baseT/Full, "Link partner advertised link modes" include 1000baseT/Full too (both sides CAN do gigabit; the cable is why they don't). ethtool -S enp3s0 shows rx_crc_errors: 1843 and growing slowly; rx_errors 1843; tx_errors 0.
+- dmesg/journalctl -k shows at boot and a few times since: "e1000e 0000:00:1f.6 enp3s0: NIC Link is Up 100 Mbps Full Duplex, Flow Control: Rx/Tx" and "e1000e 0000:00:1f.6 enp3s0: 10/100 speed: disabling TSO". Last link flap 3 weeks ago (matches when the cleaner moved the desk and the tech's colleague swapped the cable; the technician does NOT know about the cable swap unless asked what changed physically, then: "Actually yes, someone replaced the network cable behind the TV cabinet a few weeks back when the desk moved").
+- NAS: Synology DS920+ at 192.168.1.10, share //192.168.1.10/media mounted at /mnt/nas via /etc/fstab, cifs vers=3.1.1, rsize=4194304,wsize=4194304, cache=strict, soft. Mount is healthy. smbstatus does not exist on the client (it's the server tool).
+- Read throughput test from NAS (dd if=/mnt/nas/... of=/dev/null bs=1M count=500, or pv, or cat > /dev/null with time): ~11.2 MB/s. A local disk read is fast (~450 MB/s on the SSD). iperf3 to the NAS is not installed on the NAS side; iperf3 is not installed on media01 either (apt install would be modifying). ping to NAS: 0.4-0.6 ms, no loss.
+- The example file: "/mnt/nas/TV Series/House/Season 2/House (2004) - S02E01 - Acceptance (1080p BluRay x265 Panda).mkv", 2.9 GB, 43:58 long; ffprobe shows hevc Main 10 1920x1080, overall bitrate 9.4 Mb/s average but per-10s windows peak at 18-24 Mb/s in action scenes. A film, "Dune (2021) (1080p BluRay x265 HDR).mkv", averages 38 Mb/s with peaks of 110-140 Mb/s. Fine-grained awk bitrate pipelines produce per-10-second lines like "120 s: 21.3 Mbps".
+- Jellyfin logs (/var/log/jellyfin/ or journalctl -u jellyfin) show nothing alarming: "Playback stopped reported by app Jellyfin Android TV ... Direct Play". No transcode logs for these files.
+- Disk on media01: / at 34%. No SMART issues. No other services busy. nload/ifstat not installed; /proc/net/dev or `ip -s link show enp3s0` work and show RX errors 1843.
+- Switch side: the technician cannot see the switch (unmanaged TP-Link). The NAS shows 1 Gbps on its own link (if asked to check in DSM).
+"""
+success = "The AI identifies the 100 Mb/s link (from ethtool or the kernel log) as the cause and recommends replacing the cable / checking the physical link. Bonus: notices CRC errors pointing to the cable; avoids forcing speed over SSH or warns it would cut the session."

@@ -1,0 +1,25 @@
+title = "Users can't log on: trust relationship errors"
+opening = """Morning. Small office client, about 25 users, one domain controller (Windows Server 2022, DC01). Since early this morning several users get "The security database on the server does not have a computer account for this workstation trust relationship" or just "The user name or password is incorrect" even though the password is right. Some people are fine. Outlook keeps asking for passwords too. I have a WinRM PowerShell session to DC01. Nothing was changed that I know of."""
+
+[[sessions]]
+id = "dc01"
+name = "DC01"
+kind = "winrm"
+target = "admin@dc01.corp.local (WinRM)"
+os_hint = "Windows Server 2022"
+
+[hidden]
+root_cause = """DC01's clock is 9 minutes 40 seconds fast. It is the PDC emulator and the domain's time source, configured (w32tm) with manual peer "ntp.oldisp.net,0x8" that stopped resolving when the client changed ISP two days ago; since then it has been free-running on its local CMOS clock, which drifts fast. The VM's Hyper-V time synchronization integration service is also enabled, and the Hyper-V host is itself 9m40s fast, so the DC is being dragged by the host. Kerberos tolerates 5 minutes skew, so workstations that sync from the DC are fine once they resync, but those that had synced from elsewhere or haven't resynced fail; Outlook/Exchange Online modern auth complains because tokens look not-yet-valid."""
+fix = "Point w32time at a reliable source and disable Hyper-V time sync for the DC (or set VMICTimeProvider Enabled=0): `w32tm /config /manualpeerlist:\"0.au.pool.ntp.org,0x8 1.au.pool.ntp.org,0x8\" /syncfromflags:manual /reliable:yes /update` then `Restart-Service w32time` (disruptive-ish: brief), then `w32tm /resync /rediscover`. Rollback: the old setting is ntp.oldisp.net,0x8 (record it first with w32tm /query /configuration). After the fix the skew drops to < 1s and users can log on (after a few minutes or klist purge / reboot of affected PCs)."
+facts = """
+- DC01: Windows Server 2022 Standard 21H2 build 20348.2700, a Hyper-V VM on host HV01 (the technician can't reach HV01 right now; they can reach it later by RDP if really needed). Roles: AD DS, DNS, DHCP. Domain corp.local, forest/domain level 2016. Single DC.
+- Get-Date on DC01 shows a time 9m40s ahead of the technician's phone (if asked to compare, technician says: "my phone says 08:41:10, DC says 08:50:50"). w32tm /query /status: Leap Indicator: 3(not synchronized), Stratum: 0 (unspecified), Source: Local CMOS Clock, Last Successful Sync Time: (two days ago date) 07:12:44, Poll Interval: 10 (1024s). w32tm /query /source: Local CMOS Clock. w32tm /query /configuration: Type: NTP (Local), NtpServer: ntp.oldisp.net,0x8 (Local), AnnounceFlags 10, VMICTimeProvider Enabled: 1. w32tm /query /peers: Peer: ntp.oldisp.net,0x8 State: Pending, Time Remaining..., Mode: 1, Stratum: 0, LastSyncError: The time sample was rejected because ... / "No connection could be made" etc.
+- w32tm /stripchart /computer:pool.ntp.org /samples:3 /dataonly gives offsets around -580.2s (i.e. local is 580 s fast).
+- Resolve-DnsName ntp.oldisp.net: DNS name does not exist (NXDOMAIN). Resolve-DnsName pool.ntp.org works. Outbound UDP 123 is allowed by the firewall.
+- System event log: Event ID 129 / 134 / 36 from Time-Service: "NtpClient was unable to set a manual peer to use as a time source because of DNS resolution error on 'ntp.oldisp.net,0x8'"; "The time service has not synchronized the system time for 86400 seconds". Security log on DC has Event 4771 Kerberos pre-authentication failed with Failure Code 0x25 (clock skew too great) for several workstations (PC-RECEP01, PC-ACC03, LAPTOP-JW). Event 4769 failures with 0x25 too.
+- dcdiag /test:advertising passes; dcdiag shows a warning in "SystemLog" about time service events. repadmin not relevant (single DC). nltest /sc_query:corp.local from DC is fine. AD replication fine. DNS service fine. Get-ADComputer PC-RECEP01 exists and is enabled (the trust relationship message is misleading).
+- Recent change: the technician doesn't know, but if asked "did anything change with internet/ISP/router/DNS", they say: "Oh, they moved to a new ISP on Tuesday, new router." (Today is Thursday.)
+- Get-VMIntegrationService is not available on the DC (it's on the host). Inside the guest: Get-Service vmictimesync shows Running. Registry HKLM:\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\TimeProviders\\VMICTimeProvider Enabled = 1.
+- The technician refuses to reboot the DC during business hours (and says so if a reboot is proposed).
+"""
+success = "The AI finds the clock skew (Get-Date/w32tm/event 4771 0x25) and the dead NTP peer, and proposes reconfiguring w32time with a rollback (recording the old config). Bonus: addresses Hyper-V time sync; doesn't propose rejoining machines to the domain or resetting computer accounts as the first move."

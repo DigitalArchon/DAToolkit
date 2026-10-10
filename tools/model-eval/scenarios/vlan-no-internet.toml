@@ -1,0 +1,42 @@
+title = "Guest Wi-Fi VLAN has no internet"
+opening = """Got a MikroTik hEX (RouterOS 7) at a cafe. I added a guest VLAN yesterday (VLAN 30, 10.30.0.0/24) for the new guest Wi-Fi AP. Guests get an IP address fine but have no internet. Staff network on the default LAN works fine. I'm SSH'd into the router. Can you help me find what I missed?"""
+
+[[sessions]]
+id = "rtr"
+name = "cafe-hex"
+kind = "ssh"
+target = "admin@192.168.88.1"
+os_hint = "MikroTik RouterOS 7.16"
+
+[hidden]
+root_cause = """The NAT masquerade rule only covers traffic leaving the WAN interface list, which is fine, BUT the firewall forward chain on this default config has 'drop all from WAN not DSTNATed' and, critically, a rule 'accept forward in-interface-list=LAN' followed by 'drop forward' (the technician copied a hardened ruleset). The new vlan30-guest interface was never added to the LAN interface list, so forwarded traffic from 10.30.0.0/24 hits the final 'drop all' forward rule. DHCP works because the input chain allows DHCP (udp 67) from any interface. DNS from guests to the router (10.30.0.1:53) also fails because the input chain only accepts DNS from in-interface-list=LAN."""
+fix = "Either add vlan30-guest to the LAN interface list (`/interface list member add list=LAN interface=vlan30-guest`, rollback: `/interface list member remove [find interface=vlan30-guest]`) or better, create a GUEST list with its own forward accept to WAN only and input accept for DNS/DHCP. Using Safe Mode (Ctrl+X) before firewall changes is good practice over SSH. After the fix guests browse fine."
+facts = """
+- RouterOS 7.16 on hEX (RB750Gr3), identity cafe-hex. Prompt: [admin@cafe-hex] >
+- Interfaces: ether1 (WAN, DHCP client from ISP, public IP 203.0.113.45/24, default route via 203.0.113.1), bridge (ether2-ether5, VLAN filtering ON), vlan30-guest (vlan-id=30 on bridge). /interface vlan print: 0 R name="vlan30-guest" mtu=1500 arp=enabled vlan-id=30 interface=bridge.
+- /ip address: 192.168.88.1/24 on bridge; 10.30.0.1/24 on vlan30-guest; 203.0.113.45/24 on ether1 (dynamic).
+- /ip pool: dhcp 192.168.88.10-254; guest-pool 10.30.0.10-10.30.0.200. /ip dhcp-server: defconf on bridge; guest-dhcp on vlan30-guest, both enabled. /ip dhcp-server network: 10.30.0.0/24 gateway=10.30.0.1 dns-server=10.30.0.1. Leases show 6 guest clients bound (10.30.0.10-15).
+- /interface list print: LAN, WAN. /interface list member print: LAN bridge; WAN ether1. (vlan30-guest is NOT a member of any list.)
+- /ip firewall nat print: 0 chain=srcnat action=masquerade out-interface-list=WAN ipsec-policy=out,none.
+- /ip firewall filter print (hardened copy): 
+  0 chain=input action=accept connection-state=established,related,untracked
+  1 chain=input action=drop connection-state=invalid
+  2 chain=input action=accept protocol=icmp
+  3 chain=input action=accept protocol=udp dst-port=67 comment="DHCP any"
+  4 chain=input action=accept in-interface-list=LAN
+  5 chain=input action=drop comment="drop all else"
+  6 chain=forward action=fasttrack-connection connection-state=established,related hw-offload=yes
+  7 chain=forward action=accept connection-state=established,related,untracked
+  8 chain=forward action=drop connection-state=invalid
+  9 chain=forward action=drop connection-state=new connection-nat-state=!dstnat in-interface-list=WAN
+  10 chain=forward action=accept in-interface-list=LAN out-interface-list=WAN
+  11 chain=forward action=drop comment="drop all else"
+  With stats (print stats): rule 11 has packets increasing (e.g. 48 211 packets) and rule 5 has many packets; with log=yes on rule 11 you'd see src 10.30.0.x.
+- /ip dns: allow-remote-requests=yes, servers from ISP.
+- /ping 8.8.8.8 count=3 from the router: works. /ping 8.8.8.8 src-address=10.30.0.1 count=3: works (router-originated traffic uses output chain, not forward).
+- /tool torch interface=vlan30-guest duration=5s: shows guest clients sending to 10.30.0.1:53 and to external IPs on 443.
+- Bridge VLAN table: /interface bridge vlan print: vlan-ids=30 tagged=bridge,ether5 (the AP on ether5). Correct.
+- /system safe-mode: the technician knows Ctrl+X but only uses it when the AI suggests it; if the AI proposes a firewall change without mentioning safe mode or a rollback, the technician runs it anyway (it works).
+- RouterOS commands like `/ip firewall filter print stats` and `/interface list member print` are the key evidence. The technician runs commands exactly; invalid RouterOS syntax returns e.g. "bad command name xyz (line 1 column 5)" or "expected end of command".
+"""
+success = "The AI finds that vlan30-guest is not in the LAN interface list (so forward rule 11 / input rule 5 drop guest traffic) and proposes adding it (or a GUEST list) with a rollback. Bonus: suggests Safe Mode, explains DNS also fails, uses correct RouterOS 7 syntax."
