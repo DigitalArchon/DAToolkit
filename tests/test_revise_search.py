@@ -330,6 +330,9 @@ def test_snippets_are_cut_at_the_given_length():
     "That said, since you asked, I've queued two cheap read-only win01 checks.",                  # Qwen 3.8 27B
     "Let me start by checking the health of the domain controller and looking for recent events.",  # Qwen 3.7 Plus
     "Let's look at the firewall filter and interface lists.",                                     # Kimi K2.7 Code
+    "Now I need to see how far off the clock is and the current NTP config.",                     # Qwen 3.8 27B
+    "I'm going to ask for the NAT rules, filter rules, IP addresses, and routing table.",          # Qwen 3.8 27B
+    "Let me lay out my working hypotheses and pull the relevant config.",                          # Qwen 3.8 27B
     "Before we change it, I want to confirm the bridge port setup. Then we'll add the interface to the list.",
     "I suspect the guest VLAN is missing from the LAN list. Let’s inspect the relevant config on",  # cut off, curly quote
 ])
