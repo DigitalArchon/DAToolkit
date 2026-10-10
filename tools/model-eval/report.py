@@ -100,12 +100,12 @@ def summarise(runs, probes, tag):
 def markdown(models, probes, total) -> str:
     lines = ["# DAToolkit model evaluation", "", f"Spend recorded in the ledger: US${total:.2f}", "",
              "## Scenario runs", "",
-             "| Model | Variant | Runs | Solved | Root cause | Quality | Turns/run | No msg | Nudged | Promise w/o call | Prose cmds | Bad tool | Under-label | No rollback | Shell rule | Cost | Med s |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| Model | Variant | Runs | Solved | Root cause | Quality | Turns/run | No msg | No-msg nudge | Promise nudge | Promise w/o call | Prose cmds | Bad tool | Under-label | No rollback | Shell rule | Cost | Med s |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for k, m in sorted(models.items()):
         f = m["flag_rate"]
         lines.append(f"| {m['model']} | {m['variant']} | {m['runs']} | {m['solved']}/{m['with_verdict']} | {m['root_cause']}/{m['with_verdict']} "
-                     f"| {m['quality']} | {m['turns_per_run']} | {f['no_message']:.0%} | {f['no_message_nudge']:.0%} | "
+                     f"| {m['quality']} | {m['turns_per_run']} | {f['no_message']:.0%} | {f['no_message_nudge']:.0%} | {f['promise_nudge']:.0%} | "
                      f"{f['promise_without_call']:.0%} | {f['commands_in_prose_only']:.0%} | {f['bad_tool_calls']:.0%} | "
                      f"{f['risk_under_labelled']:.0%} | {f['missing_rollback']:.0%} | {f['shell_rule_breaches']:.0%} | "
                      f"${m['cost']:.2f} | {m['median_seconds']} |")
