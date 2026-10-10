@@ -247,3 +247,16 @@ def test_model_is_told_to_paste_and_read_screenshots():
     grouped = prompts.session_roster([win, ssh])
     assert "send commands to `pc1-ssh`" in grouped and "`pc1` is what the technician sees" in grouped
     assert "[PowerShell, as admin]" in prompts.SYSTEM_PROMPT and "| clip" in prompts.SYSTEM_PROMPT
+
+
+def test_short_names_and_remote_tool_labels():
+    def win(title, cls):
+        return xwindow.WindowInfo(1, title, cls, cls.lower(), 0, 800, 600, True)
+    assert win("ScreenConnect - BT-PM-BENCH - Connected", "com-screenconnect-client-Program").short_name == "BT-PM-BENCH"
+    assert win("DESKTOP-ABC - AnyDesk", "anydesk").short_name == "DESKTOP-ABC"
+    assert win("ConnectWise Control - SRV01", "x").short_name == "SRV01"
+    assert win("ScreenConnect - BT-PM-BENCH - Connected", "com-screenconnect-client-Program").remote_tool
+    # the tool's website in a browser isn't a session; a console in a browser is
+    assert not win("ScreenConnect Remote Support Software - Brave Origin", "Brave-origin").remote_tool
+    assert win("iDRAC-SRV01, PowerEdge R650 - Mozilla Firefox", "firefox").remote_tool
+    assert not win("Notes", "gnome-text-editor").remote_tool

@@ -35,6 +35,10 @@ REMOTE_TOOLS = ("screenconnect", "connectwise", "teamviewer", "anydesk", "splash
                 "ilo", "kvm", "parsec", "nomachine", "nxplayer", "dwservice", "zoho", "bomgar",
                 "beyondtrust", "logmein", "rescue")
 
+BROWSERS = ("firefox", "chrome", "chromium", "brave", "vivaldi", "opera", "msedge", "microsoft-edge",
+            "librewolf", "waterfox", "floorp", "zen", "epiphany", "falkon", "qutebrowser", "mullvad")
+BROWSER_CONSOLES = ("idrac", "ilo ", "integrated lights-out", "kvm", "novnc", "console")
+
 
 class WindowError(Exception):
     pass
@@ -54,6 +58,10 @@ class WindowInfo:
     @property
     def remote_tool(self) -> bool:
         text = f"{self.title} {self.wm_class} {self.instance}".lower()
+        if any(b in f"{self.wm_class} {self.instance}".lower() for b in BROWSERS):
+            # a tab named after a tool is usually its website, not a session; a browser
+            # console (iDRAC, iLO, noVNC) is one
+            return any(t in self.title.lower() for t in BROWSER_CONSOLES)
         return any(t in text for t in REMOTE_TOOLS)
 
     @property

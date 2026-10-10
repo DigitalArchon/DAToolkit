@@ -1361,6 +1361,7 @@ function rdpPasteText(r) {
 
 async function sendRdpClipboard(r) {
   if (!r.clipboard.trim()) return toast("Copy some text in the remote desktop first.");
+  if (waitingResults(r.id).length) return openSendResults({ sid: r.id, text: r.clipboard });
   await sendExcerpt(r.id, r.clipboard, `Send copied text from ${r.id}`);
 }
 
@@ -1409,11 +1410,12 @@ function ensureWin(sess) {
   w.empty = h("div", { class: "win-help muted" },
     h("p", {}, h("b", {}, "Copy to run"), " on a command for this session puts it on your clipboard. Paste it into the window, in PowerShell or cmd as the AI says, and run it there."),
     h("p", {}, "Then send the result: ", h("b", {}, "Screenshot → chat"), ", or copy the output in the window and use ",
-      h("b", {}, "Paste result → AI"), ". Commands ending in ", h("code", {}, "| clip"), " put their output on the clipboard for you."),
+      h("b", {}, "Paste result → AI"), ". Commands ending in ", h("code", {}, "| clip"), " put their output on the clipboard for you. ",
+      "While a command waits for its result, both open Send results with it filled in, for you to check and send."),
     h("p", {}, "This preview is only for you: nothing reaches the AI until you send it."));
   w.bar = h("div", { class: "rdp-bar" },
-    needsVision(btn("Screenshot → chat", "Attach a screenshot of the window to your next message", attachScreenshot)),
-    btn("Paste result → AI", "Send the text on your clipboard (output copied in the window) to the AI", () => sendWinClipboard(w)),
+    needsVision(btn("Screenshot → chat", "Attach a screenshot of the window: to the waiting result in Send results, or else to your next message", attachScreenshot)),
+    btn("Paste result → AI", "Send the text on your clipboard (output copied in the window): into the waiting result in Send results, or else on its own", () => sendWinClipboard(w)),
     btn("Refresh preview", "Show what the window looks like now (the preview stays here)", () => winPreview(w)),
     h("span", { class: "spacer" }), w.status);
   w.host = h("div", { class: "term-host rdp-host" }, w.bar, h("div", { class: "win-view" }, w.preview, w.empty));
@@ -1447,6 +1449,7 @@ async function winPreview(w, quiet = false) {
 async function sendWinClipboard(w) {
   const text = await clipRead().catch(() => "");
   if (!text.trim()) return toast("Your clipboard is empty: copy the output in the window first.");
+  if (waitingResults(w.id).length) return openSendResults({ sid: w.id, text });
   await sendExcerpt(w.id, text, `Send copied text from ${w.id}`);
 }
 
@@ -1565,8 +1568,8 @@ async function attachScreenshot() {
   needVision();
   const sess = activeSession();
   if (!sess) return toast("Open and select a session first.");
-  if (pendingImages.length >= 4) return toast("Up to four images per message.");
   const r = S.rdps[sess.id], w = S.wins[sess.id];
+  if (pendingImages.length >= 4 && !((r || w) && waitingResults(sess.id).length)) return toast("Up to four images per message.");
   let shot;
   if (r) {
     if (r.state !== 3) return toast("The remote desktop is not connected.");
@@ -1580,6 +1583,7 @@ async function attachScreenshot() {
   }
   const redacted = await redactImage(shot, `Screenshot of ${sess.id}: black out anything sensitive`);
   if (!redacted) return;
+  if ((r || w) && waitingResults(sess.id).length) return openSendResults({ sid: sess.id, image: await shrinkImage(redacted) });
   pendingImages.push(await shrinkImage(redacted));
   renderAttachments();
   const input = $("#chat-input");
@@ -2291,14 +2295,37 @@ async function previewCapture(item) {
 
 // Whatever is in the chat box (message and photos) goes into this dialog and is sent with the
 // results; Cancel puts it back, with any edits, so answers are never lost or sent half.
-async function openSendResults() {
+// Results of a remote desktop or window session that ran but haven't been sent: the quick
+// buttons (pasted text, screenshot) fill these in the Send results dialog rather than going
+// around it, so the item is sent with its answer instead of waiting on with no output.
+function waitingResults(sid) {
+  return readyItems().filter((i) => i.session_id === sid && i.status !== "skipped")
+    .sort((a, b) => (a.ran_at || 0) - (b.ran_at || 0) || a.num - b.num);
+}
+
+const SHOT_NOTE = "(result in the attached screenshot)";
+
+// fill: {sid, text?, image?}: put this in the newest waiting result of that session (text
+// through the same redaction preview as captured output; image already blacked out by the
+// technician) and point it out.
+async function openSendResults(fill = null) {
   const items = readyItems();
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
-  const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" } : captureFor(i))));
+  const target = fill ? waitingResults(fill.sid).pop() : null;
+  const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" }
+    : captureFor(i).then((c) => (i === target && fill.text ? { ...c, text: fill.text } : c)))));
   const prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text), nums: items.map((i) => i.num) })).items;
   const images = pendingImages.slice();
+  if (target && fill.image) {
+    if (images.length >= 4) toast("Up to four images per message: the screenshot wasn't added.");
+    else {
+      images.push(fill.image);
+      const at = items.indexOf(target);
+      if (!prev[at].text.trim()) prev[at].text = SHOT_NOTE;
+    }
+  }
   const thumbs = h("div", { class: "thumbs" }, images.map((d) => h("img", { src: d, class: "thumb" })));
-  const addShot = (sid) => guarded(async () => {
+  const addShot = (sid, ta) => guarded(async () => {
     needVision();
     if (images.length >= 4) throw new Error("Up to four images per message.");
     let raw;
@@ -2312,6 +2339,7 @@ async function openSendResults() {
     if (!shot) return;
     images.push(await shrinkImage(shot));
     thumbs.replaceChildren(...images.map((d) => h("img", { src: d, class: "thumb" })));
+    if (ta && !ta.value.trim()) ta.value = SHOT_NOTE;
   });
   const blocks = items.map((item, idx) => {
     const include = h("input", { type: "checkbox", checked: true });
@@ -2329,7 +2357,7 @@ async function openSendResults() {
       autosize(ta);
     });
     const rdpTools = rdp && !skipped ? h("div", { class: "row" },
-      h("button", { type: "button", class: "small", "data-needs-vision": true, onclick: () => addShot(item.session_id) },
+      h("button", { type: "button", class: "small", "data-needs-vision": true, onclick: () => addShot(item.session_id, ta) },
         win ? "📸 Screenshot of the window" : "📸 Screenshot of the desktop"),
       h("button", { type: "button", class: "small", title: win ? "The text on your clipboard (copied in the window)" : "Text last copied in the remote desktop",
         onclick: pasteCopied }, "Copied text")) : null;
@@ -2346,6 +2374,10 @@ async function openSendResults() {
       ta, rdpTools, info.length ? h("div", { class: "muted small" }, info.join(" · ")) : null, note);
     include.addEventListener("change", () => block.classList.toggle("excluded", !include.checked));
     if (ta) setTimeout(() => autosize(ta), 30);
+    if (item === target) {
+      block.classList.add("filled");
+      setTimeout(() => block.scrollIntoView({ block: "nearest" }), 60);
+    }
     return { item, include, ta, note };
   });
   const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)", value: $("#chat-input").value });

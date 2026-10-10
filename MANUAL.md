@@ -601,7 +601,9 @@ collateral and NVIDIA's keys are cached for an hour.
   same way. Nothing needs setting up on the remote side, and DA Toolkit needs no login or API
   for the tool.
   - **+ Session → Window on this screen…** lists the open windows, remote-support tools
-    first. Pick one and give it a name (suggested from the title, e.g. the computer's name).
+    first (a browser tab counts only when it's a console, such as iDRAC or iLO, not the
+    tool's website). Pick one and give it a name (suggested from the title, e.g. the
+    computer's name).
     The window is followed by its X window id, so moving or resizing it doesn't matter.
   - The AI can't see the window. **Screenshot → chat** captures just that window (not the
     rest of your screen), you black out anything sensitive, and it's attached to your next
@@ -614,6 +616,12 @@ collateral and NVIDIA's keys are cached for an hour.
     **Paste result → AI**, or **Copied text** in the Send results dialog. Text is exact
     where a screenshot may be misread, so for IDs, paths and long lists the AI ends the
     command with `| clip`, which puts its output on the clipboard.
+  - While a command of the session waits for its result, **Paste result → AI** and
+    **Screenshot → chat** open **Send results** with it filled in (the text redacted as
+    usual, or the screenshot attached and noted), for you to check and send. That way the
+    command is answered and leaves the queue. With nothing waiting, they send the text on
+    its own or attach the screenshot to your next message. RDP's **Clipboard → AI** and
+    screenshot work the same way.
   - Commands that would cut the session are flagged: stopping or uninstalling the
     remote-support agent (ScreenConnect, TeamViewer, AnyDesk, ...), logging off, and the
     usual network changes.
