@@ -154,3 +154,35 @@ def test_saved_pending_commands_are_cleaned_on_resume():
     q2 = Queue.from_list(saved)
     assert q2.items[0].command == "uptime" and q2.items[0].hidden
     assert q2.items[1].command == "df -h‮"
+
+
+FFPROBE_AWK = (
+    'ffprobe -v error -select_streams v:0 -show_entries frame_tags=pts_time -show_entries packet=pts_time,size '
+    '-of csv "/mnt/nas/TV Series/House/Season 2/House (2004) - S02E01 - Acceptance (1080p BluRay x265 Panda).mkv" '
+    "| awk -F, 'NR>1{t=$2+0; s=$3+0; b=int(t/10); bytes[b]+=s} END{for(i=0;i<=b;i++) "
+    "printf \"%d s: %.1f Mbps\\n\", i*10, bytes[i]*8/10/1000000}'")
+
+
+@pytest.mark.parametrize("cmd", [
+    FFPROBE_AWK, "awk '$2 > max {max=$2} END{print max}' sizes.txt", "awk 'NR>=2' f.csv",
+    "ps aux | awk '$3 > 50.0 {print $2; touch=1}'", "grep -E 'a>b|c; reboot' notes.txt",
+    "echo 'x > y'", 'jq ".items[] | select(.size > 10)" data.json',
+])
+def test_quoted_shell_characters_are_data(cmd):
+    assert classify(cmd) == ("read_only", [])
+
+
+@pytest.mark.parametrize("cmd", [
+    "awk '{print > \"out.txt\"}' f", "awk '{print $1 >> \"/tmp/x\"}' f", "awk 'BEGIN{system(\"rm x\")}'",
+    "awk '{print | \"sort > /tmp/s\"}' f", "awk 'BEGIN{\"date\" | getline d}'",
+    "bash -c 'echo hi > /etc/x'", "sudo sh -c \"echo 1 > /proc/sys/net/ipv4/ip_forward\"", "ssh h 'cat a > b'",
+    "echo x > f", "grep 'a' f > out", "echo \"$(touch /tmp/x)\" > /dev/null; ls 'a' > b",
+    "find / -name x -exec sh -c 'cat {} > /tmp/y' \\;", "awk 'NR>1' f > out.txt", "echo 'unterminated > x",
+])
+def test_writes_still_modifying(cmd):
+    assert classify(cmd)[0] == "modifying"
+
+
+def test_quoted_command_still_disruptive_when_a_shell_runs_it():
+    assert classify("ssh host 'sudo reboot'")[0] == "disruptive"
+    assert classify("bash -c 'ls; shutdown -h now'")[0] == "disruptive"

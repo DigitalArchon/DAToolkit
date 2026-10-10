@@ -186,12 +186,69 @@ def session_impact(command: str, session_kind: str) -> str | None:
     return None
 
 
+# Rules about shell syntax (redirects, where a command starts). Inside quotes these characters
+# are data, e.g. `awk 'NR>1{...}'`, so they are matched against the command with quoted text blanked.
+_SHELL_SYNTAX = {r[0] for r in DISRUPTIVE + MODIFYING if r[0].pattern.startswith(CMD)} | {
+    r[0] for r in MODIFYING if r[1] == "output redirect to file"}
+
+# Commands that hand quoted text to a shell again: their quotes hide nothing.
+_REPARSES = re.compile(
+    r"\b((ba|z|k|da|)sh|su|runuser|script|env)\s+(\S+\s+)*-c\b|\b(ssh|eval|xargs|watch|nohup|timeout|chroot|parallel)\b"
+    r"|\bfind\b.*\s-exec(dir)?\b|\b(powershell|pwsh)(\.exe)?\b|\bcmd(\.exe)?\s+/[ck]\b", _I)
+
+# awk can write files and run commands from inside its program text.
+_AWK = re.compile(r"\b[gmn]?awk\b")
+_AWK_WRITES = re.compile(r"\bprintf?\b[^;}]*?(>|\|)|\bsystem\s*\(|\|\s*getline\b|\bfflush\s*\(\s*\"")
+
+
+def _quoted(command: str) -> tuple[str, list[str]] | None:
+    """(command with the contents of '...' and "..." blanked, the quoted texts), or None when
+    the quoting can't be read with confidence (unterminated, or $(...)/backticks inside "...",
+    which the shell does run)."""
+    out, texts, i, n = [], [], 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+        elif c in "'\"":
+            j, k = i + 1, None
+            while j < n:
+                if command[j] == "\\" and c == '"':
+                    j += 2
+                    continue
+                if command[j] == c:
+                    k = j
+                    break
+                j += 1
+            if k is None:
+                return None
+            text = command[i + 1:k]
+            if c == '"' and ("$(" in text or "`" in text):
+                return None
+            texts.append(text)
+            out.append(c + " " * len(text) + c)
+            i = k + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), texts
+
+
 def classify(command: str) -> tuple[str, list[str]]:
     """Return (level, reasons) for the command according to local rules."""
-    reasons = [why for pat, why in DISRUPTIVE if pat.search(command)]
+    q = None if _REPARSES.search(command) else _quoted(command)
+    shell = q[0] if q else command
+
+    def hits(rules):
+        return [why for pat, why in rules if pat.search(shell if pat in _SHELL_SYNTAX else command)]
+
+    reasons = hits(DISRUPTIVE)
     if reasons:
         return "disruptive", reasons
-    reasons = [why for pat, why in MODIFYING if pat.search(command)]
+    reasons = hits(MODIFYING)
+    if _AWK.search(command) and any(_AWK_WRITES.search(t) for t in (q[1] if q else [command])):
+        reasons.append("awk writes a file or runs a command")
     if reasons:
         return "modifying", reasons
     return "read_only", []

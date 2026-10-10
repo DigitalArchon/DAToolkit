@@ -131,7 +131,10 @@ the system's own; in the browser they're the browser's.
   *✓ AI finished. Your turn*, with what is waiting for you.
 - Proposed commands appear in the queue with a risk badge (read only / modifying /
   disruptive). Local rules can raise the AI's own risk label but never lower it. Disruptive
-  commands need a second confirmation.
+  commands need a second confirmation. A `>` or `;` inside quotes (an awk or jq program, a
+  grep pattern) is not read as a redirect or a new command, unless the quoted text is handed
+  to a shell again (`sh -c`, `ssh`, `xargs`, `find -exec` and the like). An awk program that
+  writes a file or runs a command (`print > "file"`, `system()`) still counts as modifying.
 - A separate **sensitive** badge marks commands that may expose secrets or private data,
   whatever their risk level: reading key files, `/etc/shadow`, `.env` and credential files,
   dumping the environment, shell history, secret stores, databases or a device
