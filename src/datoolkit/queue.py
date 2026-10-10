@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 
 from .safety import hidden, risk
+from .safety.dryrun import dry_run
 from .safety.sensitive import sensitive
 
 # pending -> ran | inserted | skipped -> sent; pending -> withdrawn (the AI took it back)
@@ -55,10 +56,12 @@ class Queue:
 
     def add(self, call_id: str, raw_items: list[dict], known_sessions: set[str] | None = None,
             fallback_session: str = "", session_kinds: dict[str, str] | None = None,
-            insert_before: int | None = None) -> list[Proposal]:
+            insert_before: int | None = None, dry_run_of: int | None = None) -> list[Proposal]:
         """Queue proposals. An unknown or missing session id falls back to `fallback_session`
         (the only open session, when there is exactly one). `session_kinds` (id -> kind) lets
-        the blast-radius rule see which session a command would cut."""
+        the blast-radius rule see which session a command would cut. `dry_run_of` marks the
+        items as rehearsals of that item; it is never read from `raw_items`, which may come
+        from the model, because a rehearsal is classed read-only."""
         added = []
         for raw in raw_items:
             command, removed = hidden.clean(str(raw.get("command", "")))
@@ -82,7 +85,7 @@ class Queue:
                 group=str(raw.get("group", "") or ""),
                 recipe=str(raw.get("recipe", "") or ""),
                 recipe_key=str(raw.get("recipe_key", "") or ""),
-                dry_run_of=raw.get("dry_run_of"),
+                dry_run_of=dry_run_of,
                 hidden=removed,
             )
             self._classify(p, session_kinds)
@@ -164,8 +167,32 @@ class Queue:
         j = max(0, min(len(self.items) - 1, i + delta))
         self.items.insert(j, self.items.pop(i))
 
+    def rehearsal(self, p: Proposal) -> tuple[str, str]:
+        """(command, description) the Dry run button would queue before `p`. Raises ValueError
+        saying why none is offered."""
+        if p.status != "pending":
+            raise ValueError("Only pending items can be rehearsed.")
+        if p.dry_run_of is not None:
+            raise ValueError("This item is already a dry run.")
+        if p.risk == "read_only":
+            raise ValueError("This command is read-only already.")
+        if any(q.dry_run_of == p.num and q.status == "pending" for q in self.items):
+            raise ValueError(f"A dry run of #{p.num} is already queued.")
+        dr = dry_run(p.command)
+        if not dr:
+            raise ValueError("No dry-run form is known for this command.")
+        return dr
+
+    def _offer(self, p: Proposal) -> dict | None:
+        try:
+            cmd, desc = self.rehearsal(p)
+        except ValueError:
+            return None
+        return {"command": cmd, "description": desc}
+
     def to_list(self) -> list[dict]:
-        return [p.to_dict() for p in self.items]
+        """Every item, with `dry_run` set to the rehearsal on offer for it (or None)."""
+        return [p.to_dict() | {"dry_run": self._offer(p)} for p in self.items]
 
     @classmethod
     def from_list(cls, items: list[dict]) -> "Queue":

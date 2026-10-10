@@ -53,6 +53,21 @@ def test_dry_run_forms():
     assert dry_run("rm -rf /tmp/x")[0] == "ls -ld /tmp/x"
     assert dry_run("df -h") is None
     assert dry_run("Remove-Item C:\\x -WhatIf") is None
+    assert dry_run("Get-ChildItem *.tmp | Remove-Item")[0].endswith("Remove-Item -WhatIf")
+    assert dry_run("Remove-Item x | Out-Null") is None          # -WhatIf would land on Out-Null
+    assert dry_run("Stop-Service a; Start-Service a") is None
+    assert dry_run("sudo service nginx restart")[0] == "systemctl list-dependencies --reverse nginx --no-pager"
+    assert dry_run("systemctl --user restart foo")[0] == "systemctl --user list-dependencies --reverse foo --no-pager"
+    assert dry_run("sudo systemctl daemon-reload") is None
+    assert dry_run("cp -a /a /b")[0] == "ls -ld /a /b"
+
+
+def test_model_cannot_mark_a_rehearsal():
+    """A rehearsal is classed read-only, so only the Dry run button may mark one."""
+    from datoolkit.queue import Queue
+    q = Queue()
+    (p,) = q.add("c", [{"command": "sudo chown -R nobody /srv", "risk": "read_only", "dry_run_of": 1}])
+    assert p.dry_run_of is None and p.risk != "read_only"
 
 
 def test_watch_wrap_and_collapse():
@@ -121,10 +136,18 @@ async def test_queue_recipe_and_watch_and_dry_run(env):  # noqa: F811
         engine.watch_item(n_ro, 3, 5)
     with pytest.raises(UserError):
         engine.watch_item(added[0].num, 3, 5)      # not read-only
+    offer = {d["num"]: d["dry_run"] for d in engine.queue.to_list()}
+    assert offer[added[0].num] and offer[n_ro] is None
     d = engine.dry_run_item(added[0].num)
     assert d["dry_run_of"] == added[0].num and d["risk"] == "read_only"
     nums = [p.num for p in engine.queue.items]
     assert nums.index(d["num"]) == nums.index(added[0].num) - 1
+    offer = {d["num"]: d["dry_run"] for d in engine.queue.to_list()}
+    assert offer[added[0].num] is None and offer[d["num"]] is None     # queued once; no rehearsal of a rehearsal
+    with pytest.raises(UserError, match="already queued"):
+        engine.dry_run_item(added[0].num)
+    with pytest.raises(UserError, match="already a dry run"):
+        engine.dry_run_item(d["num"])
     # a collapsed watch preview
     prev = engine.preview(["=== WATCH 1/2 a ===\nx\n=== WATCH 2/2 b ===\nx"], [n_ro])
     assert prev[0]["collapsed"] == 1

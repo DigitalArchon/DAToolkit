@@ -38,7 +38,6 @@ from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
 from .safety import images as images_mod
 from .safety import watch as watch_mod
-from .safety.dryrun import dry_run
 from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
@@ -1322,13 +1321,13 @@ class Engine:
     def dry_run_item(self, num: int) -> dict:
         """Insert the rehearsal variant of a pending item before it."""
         p = self.queue.get(num)
-        dr = dry_run(p.command)
-        if not dr:
-            raise UserError("No dry-run form is known for this command.")
-        cmd, desc = dr
+        try:
+            cmd, desc = self.queue.rehearsal(p)
+        except ValueError as e:
+            raise UserError(str(e)) from None
         added = self.queue.add("dryrun", [{"session_id": p.session_id, "command": cmd, "purpose": f"Dry run of #{num}: {desc}",
-                                           "risk": "read_only", "dry_run_of": num}],
-                               session_kinds=self._session_kinds(), insert_before=num)
+                                           "risk": "read_only"}],
+                               session_kinds=self._session_kinds(), insert_before=num, dry_run_of=num)
         self.log("dry_run_queued", of=num, num=added[0].num, command=cmd)
         self._queue_changed()
         self._persist()

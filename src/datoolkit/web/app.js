@@ -1628,7 +1628,7 @@ function updateRow(row, item) {
     run.disabled = ins.disabled = !sessOpen;
     btns.push(run, ins);
     if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
-    if (item.risk !== "read_only" && !item.dry_run_of) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", "Queue the rehearsal form of this command first"));
+    if (item.dry_run) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", `Queue the rehearsal first (${item.dry_run.description}): ${item.dry_run.command}`));
     if (item.risk === "read_only" && !item.watch) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
     if (item.risk !== "read_only" || item.sensitive?.length) btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what could go wrong"));
     btns.push(btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),

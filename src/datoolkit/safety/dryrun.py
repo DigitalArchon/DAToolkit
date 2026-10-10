@@ -25,8 +25,8 @@ _RULES: list[tuple[re.Pattern, object, str]] = [
     (re.compile(r"^(\s*(?:sudo\s+)?rm\s+(-\S+\s+)*)(\S.*)$"), lambda m, c: "ls -ld " + m.group(3), "list what would be deleted"),
     (re.compile(r"^(\s*(?:sudo\s+)?find\b.*)(\s-delete\b|\s-exec\s+rm\b.*)$"), lambda m, c: m.group(1), "find without -delete"),
     (re.compile(r"^(\s*(?:sudo\s+)?(iptables|ip6tables|nft|ufw|firewall-cmd)\b)"), lambda m, c: _fw_backup(m.group(2)), "save the current firewall first"),
-    (re.compile(r"^(\s*(?:sudo\s+)?(systemctl|service)\s)"), lambda m, c: "systemctl list-dependencies --reverse " + _svc(c) + " --no-pager", "what depends on this service"),
-    (re.compile(r"^(\s*(?:sudo\s+)?(cp|mv)\s+(-\S+\s+)*)(.+)$"), lambda m, c: "ls -ld " + m.group(4), "check source and destination"),
+    (re.compile(r"^(\s*(?:sudo\s+)?(systemctl|service)\s)"), lambda m, c: _svc_deps(c), "what depends on this service"),
+    (re.compile(r"^(\s*(?:sudo\s+)?(cp|mv)\s+(-\S+\s+)*)(.+)$"), lambda m, c: "ls -ld " + _no_flags(m.group(4)), "check source and destination"),
     (re.compile(r"^(\s*(?:sudo\s+)?(chmod|chown|chgrp)\s+(-R\s+)?\S+\s+)(.+)$"), lambda m, c: "ls -ld " + m.group(4), "current permissions"),
     (re.compile(r"^(\s*(?:sudo\s+)?crontab\s+-r\b)"), lambda m, c: "crontab -l", "list the crontab first"),
     (re.compile(r"^(\s*(?:sudo\s+)?(umount|swapoff)\s)"), lambda m, c: "lsof +f -- " + _last_arg(c) + " | head -20", "who is using it"),
@@ -35,7 +35,7 @@ _RULES: list[tuple[re.Pattern, object, str]] = [
     (re.compile(r"^(\s*(?:sudo\s+)?(write\s+mem|copy\s+run))", _I), lambda m, c: "show archive config differences", "show pending config differences"),
     # PowerShell: every state-changing cmdlet with -WhatIf support
     (re.compile(r"\b(Remove|Set|New|Stop|Restart|Start|Disable|Enable|Rename|Move|Copy|Clear|Uninstall|Install|Reset|Add|Update)-[A-Za-z]+\b(?!.*-WhatIf)", _I),
-     lambda m, c: c + " -WhatIf", "PowerShell -WhatIf"),
+     lambda m, c: _whatif(m, c), "PowerShell -WhatIf"),
     (re.compile(r"\breg\s+(delete|add)\b", _I), lambda m, c: re.sub(r"\breg\s+(delete|add)\b", "reg query", c, count=1, flags=_I), "query the key first"),
     (re.compile(r"\bnet\s+stop\s+(\S+)", _I), lambda m, c: f"sc queryex {m.group(1)} && sc enumdepend {m.group(1)}", "service state and dependents"),
 ]
@@ -46,9 +46,29 @@ def _last_arg(c: str) -> str:
     return parts[-1] if parts else "."
 
 
-def _svc(c: str) -> str:
-    words = [w for w in c.split() if not w.startswith("-") and w not in ("sudo", "systemctl", "service")]
-    return words[-1] if words else ""
+def _no_flags(args: str) -> str:
+    return " ".join(w for w in args.split() if not w.startswith("-"))
+
+
+def _svc_deps(c: str) -> str | None:
+    """Reverse dependencies of the unit a systemctl/service command acts on. `service NAME
+    ACTION` names it first, `systemctl VERB UNIT` second; `systemctl daemon-reload`, `reboot`
+    and the like name none, so nothing is offered."""
+    words = [w for w in c.split() if not w.startswith("-") and w != "sudo"]
+    if words and words[0] == "service":
+        unit = words[1] if len(words) > 2 else ""
+    else:
+        unit = words[2] if len(words) > 2 else ""
+    user = " --user" if "--user" in c.split() else ""
+    return f"systemctl{user} list-dependencies --reverse {unit} --no-pager" if unit else None
+
+
+def _whatif(m: re.Match, c: str) -> str | None:
+    """-WhatIf goes on the end of the line, so only when nothing follows the cmdlet: after a
+    pipe, `;` or `&&` it would land on a different command."""
+    if re.search(r"[;|\n]|&&", c[m.end():]):
+        return None
+    return c + " -WhatIf"
 
 
 def _fw_backup(tool: str) -> str:
