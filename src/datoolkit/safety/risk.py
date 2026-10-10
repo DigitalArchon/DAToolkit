@@ -178,17 +178,32 @@ _RDP_CUTS: list[tuple[re.Pattern, str]] = [
 ] + [r for r in _WINRM_CUTS if "WinRM" not in r[1] and "remoting" not in r[1]]
 
 
+# Pasted into a remote-support tool's window (ScreenConnect, TeamViewer, AnyDesk...): the
+# network rules apply, plus stopping the tool's own agent and ending the desktop session.
+_REMOTE_AGENTS = r"(ScreenConnect|ConnectWise|TeamViewer|AnyDesk|Splashtop|RustDesk|ITSPlatform|LMIGuardian|LogMeIn|Bomgar|BeyondTrust|DWAgent)"
+_WINDOW_CUTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(Stop|Restart)-Service\b.*" + _REMOTE_AGENTS, _I), "stops the remote-support agent this session runs through"),
+    (re.compile(r"\b(net|sc(\.exe)?)\s+stop\b.*" + _REMOTE_AGENTS, _I), "stops the remote-support agent this session runs through"),
+    (re.compile(r"\b(taskkill|Stop-Process|kill|pkill|killall)\b.*" + _REMOTE_AGENTS, _I), "kills the remote-support agent this session runs through"),
+    (re.compile(r"\b(Uninstall-Package|msiexec\s+/x|wmic\b.*\buninstall)\b.*" + _REMOTE_AGENTS, _I), "uninstalls the remote-support agent"),
+    (re.compile(r"\b(logoff|tsdiscon|shutdown\s+/l)\b", _I), "logs off or disconnects this desktop session"),
+] + [r for r in _WINRM_CUTS if "WinRM" not in r[1] and "remoting" not in r[1]]
+
+
 def session_impact(command: str, session_kind: str) -> str | None:
     """Reason this command would cut the session it is run in, or None.
 
-    session_kind is "local", "ssh", "winrm", "rdp" (typed into a window on the remote desktop). SSH sessions may reach a network device rather
-    than a Linux host, so device rules are checked too."""
+    session_kind is "local", "ssh", "winrm", "rdp" (typed into a window on the remote desktop),
+    "window" (pasted into a remote-support tool's window). SSH sessions may reach a network
+    device rather than a Linux host, so device rules are checked too."""
     if session_kind == "ssh":
         rules = _SSH_CUTS + _NETDEV_CUTS
     elif session_kind == "winrm":
         rules = _WINRM_CUTS
     elif session_kind == "rdp":
         rules = _RDP_CUTS
+    elif session_kind == "window":
+        rules = _WINDOW_CUTS
     else:
         return None
     for pat, why in rules:

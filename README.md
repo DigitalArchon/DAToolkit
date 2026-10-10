@@ -21,6 +21,9 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
   you review and edit the exact text before the AI sees it.
 - **Real terminals.** Local, SSH and WinRM sessions are real PTYs (`sudo`, Ctrl-C, pagers
   and device CLIs behave normally), and RDP opens in a tab through Apache Guacamole's guacd.
+- **Works through ScreenConnect.** A window session follows a ScreenConnect (or TeamViewer,
+  AnyDesk, VM console) window on your screen (X11): the AI sees it through screenshots you
+  send, and you paste the commands it proposes. No setup or API needed.
 - **Any OpenAI-compatible model**: NanoGPT, Ollama, LM Studio, vLLM and others. See
   [which models work well](docs/model-evaluation.md) for how nine popular models did.
 - **Privacy tiers per case.** Open, Confidential and Sovereign cases limit which models may
@@ -93,12 +96,13 @@ it grants terminal access.
 2. **Add a model** under Settings → AI providers. To try DA Toolkit without an API key, add
    the **training provider**: a scripted model that walks through a canned case (the one in
    the screenshot) with nothing leaving the machine.
-3. **+ Session** opens a local shell or a saved host (add hosts under Settings → Hosts).
+3. **+ Session** opens a local shell, a saved host (add hosts under Settings → Hosts), or a
+   window on your screen, such as a ScreenConnect control window.
 4. Describe the problem in the chat, then Run, Skip and Send results as the AI works
    through it.
 
 The [manual](MANUAL.md) covers everything else: the workflow in detail, model tiers and how
-attestation works, SSH/WinRM/RDP specifics, where files are stored and how untrusted output
+attestation works, SSH/WinRM/RDP and window-session specifics, where files are stored and how untrusted output
 is handled.
 
 ## Roadmap

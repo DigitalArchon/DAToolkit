@@ -343,6 +343,19 @@ propose it for the RDP session: it is typed into the focused window, so first te
 window to focus (e.g. an elevated PowerShell), keep it to one line, and keep its output short, \
 since it comes back only as a screenshot or copied text. When the same device also has an SSH \
 or WinRM session, send commands there and use RDP to confirm visually.
+- Window sessions: a window on the technician's screen, usually a remote-support tool's control \
+window (ScreenConnect, TeamViewer, AnyDesk) showing a remote computer. You cannot see it: the \
+technician sends screenshots of it, and pastes your commands into a shell there themselves. \
+Prefer a command to a click path whenever a command can answer, and read the result from the \
+screenshot. Propose each command for the window session and start its `purpose` with where it \
+goes: "[PowerShell]", "[PowerShell, as admin]", "[cmd]" or "[cmd, as admin]"; if no such shell \
+is open there yet, say how to open one. Keep each command to one line and its output to one \
+screen: pick the properties you need, `Format-Table -AutoSize` or `Format-List`, \
+`Select-Object -First 20`, `findstr`. When exact text matters (IDs, paths, hashes, long \
+lists), end the command with `| clip` and say so: the technician copies the output back as \
+text, which is exact where a screenshot may not be. For GUI steps give exact click paths for \
+that Windows version and ask for a screenshot. Read screenshots carefully, and when text is \
+too small, cut off or scrolled away, say so and ask for a better shot instead of guessing.
 - Watch items: for intermittent symptoms, ask the technician to use Watch on a read-only item; \
 you will receive only the iterations that changed.
 - If the technician sends a photo (a screen, an LED panel, a label) or a terminal screenshot, \
@@ -384,6 +397,10 @@ def _session_line(s: dict) -> str:
                  "copied text")
         if not s.get("connected"):
             desc += " (not connected yet)"
+    elif s["kind"] == "window":
+        desc += (", a window on the technician's screen: you cannot see it; the technician PASTES your "
+                 "commands into a shell there, so say which (PowerShell or cmd, elevated or not); output "
+                 "comes back as screenshots of the window or as copied text")
     elif s.get("shell"):
         desc += f", shell: {s['shell']}"
     if s.get("os_hint"):
@@ -400,7 +417,8 @@ def _session_line(s: dict) -> str:
 def session_roster(sessions: list[dict]) -> str:
     """Sessions grouped by device: linked sessions reach the same machine."""
     if not sessions:
-        return "Open sessions: none. Ask the technician to open a session (local shell, SSH, WinRM or RDP)."
+        return ("Open sessions: none. Ask the technician to open a session (local shell, SSH, WinRM, RDP, or a "
+                "window such as a ScreenConnect control window).")
     groups: dict[str, list[dict]] = {}
     for s in sessions:
         groups.setdefault(s.get("device") or s["id"], []).append(s)
@@ -411,8 +429,8 @@ def session_roster(sessions: list[dict]) -> str:
         if len(members) == 1:
             lines.append("- " + _session_line(members[0]))
             continue
-        cmd = [m for m in members if m["kind"] != "rdp" and not m.get("exited")]
-        rdp = [m for m in members if m["kind"] == "rdp" and not m.get("exited")]
+        cmd = [m for m in members if m["kind"] not in ("rdp", "window") and not m.get("exited")]
+        rdp = [m for m in members if m["kind"] in ("rdp", "window") and not m.get("exited")]
         head = f"- One device, reached by {len(members)} linked sessions (the SAME machine):"
         if cmd and rdp:
             head += (f" send commands to `{cmd[0]['id']}`; `{rdp[0]['id']}` is what the technician sees, useful "

@@ -27,6 +27,7 @@ const S = {
   state: null,
   terms: {},          // sid -> {term, fit, host, ws, markers: Map(num -> IMarker)}
   rdps: {},           // sid -> {client, keyboard, host, view, state, clipboard, typedOk}
+  wins: {},           // sid -> {host, preview, status, copiedOk} (window sessions)
   activeSid: null,
   streaming: null,    // {text, reasoning, model, tier}
   promptModals: {},   // prompt id -> modal
@@ -667,7 +668,9 @@ function fillProposalCard(el) {
   const sessOpen = (S.state.sessions || []).some((s) => s.id === item.session_id && !s.exited);
   let actions = null;
   if (pending) {
-    const run = btn("Run", () => runItem(num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
+    const run = isWindowSession(item.session_id)
+      ? btn("Copy to run", () => runItem(num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Copy the command to paste into the window, and mark it run")
+      : btn("Run", () => runItem(num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
     run.disabled = !sessOpen;
     actions = h("div", { class: "pactions" }, run,
       btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
@@ -945,12 +948,15 @@ function activateTab(sid, focus = true) {
   S.activeSid = sid;
   for (const [id, t] of Object.entries(S.terms)) t.host.style.display = id === sid ? "" : "none";
   for (const [id, r] of Object.entries(S.rdps)) r.host.style.display = id === sid ? "" : "none";
+  for (const [id, w] of Object.entries(S.wins)) w.host.style.display = id === sid ? "" : "none";
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.sid === sid);
   const t = S.terms[sid];
   if (t) { fitTerm(t, true); if (focus) t.term.focus(); }
   const r = S.rdps[sid];
   if (!r) rdpMaximize(null, false);
   if (r) { rdpFit(r); if (focus) r.view.focus(); }
+  const w = S.wins[sid];
+  if (w && w.host.isConnected) winPreview(w, true);
 }
 
 // Sessions on the same device get the same colour; the 🔗 button links or unlinks.
@@ -980,6 +986,9 @@ function renderSessions() {
   for (const [id, r] of Object.entries(S.rdps)) {
     if (!ids.has(id)) { try { r.client.disconnect(); } catch { /* gone */ } r.host.remove(); delete S.rdps[id]; }
   }
+  for (const [id, w] of Object.entries(S.wins)) {
+    if (!ids.has(id)) { w.host.remove(); delete S.wins[id]; }
+  }
   if (!S.rdps[S.activeSid]) rdpMaximize(null, false);
   const counts = {};
   for (const s of sessions) if (!s.exited) counts[s.device] = (counts[s.device] || 0) + 1;
@@ -988,7 +997,7 @@ function renderSessions() {
   const list = $("#tab-list");
   list.replaceChildren();
   for (const s of sessions) {
-    if (s.kind === "rdp") ensureRdp(s); else ensureTerm(s);
+    if (s.kind === "rdp") ensureRdp(s); else if (s.kind === "window") ensureWin(s); else ensureTerm(s);
     const linked = colour[s.device];
     const tab = h("div", { class: `tab${s.exited ? " exited" : ""}${linked ? " linked" : ""}${s.kind === "rdp" && !s.connected ? " offline" : ""}`,
       "data-sid": s.id, title: `${s.target} ${s.os_hint || ""}`, style: linked ? `--dev:${linked}` : null,
@@ -1005,7 +1014,8 @@ function renderSessions() {
 }
 
 async function closeSession(s) {
-  if (!s.exited && !(await confirmModal("Close session", `Close ${s.id} (${s.target})? The process will be terminated.`, "Close", "danger"))) return;
+  const what = s.kind === "window" ? "The window itself stays open; DA Toolkit just stops using it." : "The process will be terminated.";
+  if (!s.exited && !(await confirmModal("Close session", `Close ${s.id} (${s.target})? ${what}`, "Close", "danger"))) return;
   await guarded(() => api("DELETE", `/api/sessions/${encodeURIComponent(s.id)}`));
 }
 
@@ -1020,6 +1030,8 @@ function renderSessionMenu() {
   const hosts = S.state.config.hosts || [];
   menu.replaceChildren(
     h("button", { onclick: () => openSession("local") }, "Local shell"),
+    h("button", { title: "A ScreenConnect, TeamViewer or other window on this screen: the AI sees it through screenshots",
+      onclick: () => { hideMenus(); guarded(pickWindow); } }, "Window on this screen…"),
     h("div", { class: "sep" }),
     h("div", { class: "label" }, "Saved hosts"),
     ...(hosts.length ? hosts.map((x) => h("button", { onclick: () => openSession(x.kind, x.name) },
@@ -1034,8 +1046,9 @@ function renderSessionMenu() {
 // buffer no longer has it (reload, closed session, resumed case) the server slices the
 // transcript file instead.
 async function captureFor(item) {
-  if (S.rdps[item.session_id] || (S.state.sessions || []).find((s) => s.id === item.session_id)?.kind === "rdp") {
-    return { text: "", rdp: true };
+  const kind = (S.state.sessions || []).find((s) => s.id === item.session_id)?.kind;
+  if (S.rdps[item.session_id] || kind === "rdp" || kind === "window") {
+    return { text: "", rdp: true, window: kind === "window" };
   }
   const local = captureFromBuffer(item);
   if (!local.error) return local;
@@ -1351,6 +1364,92 @@ async function sendRdpClipboard(r) {
   await sendExcerpt(r.id, r.clipboard, `Send copied text from ${r.id}`);
 }
 
+// ------------------------------------------------------------------ window sessions
+
+// A window of another program on this screen (a ScreenConnect control window, a VM console),
+// found by its X window id. The AI sees it only through screenshots the technician sends;
+// commands for it are copied to the clipboard and pasted there by the technician.
+const isWindowSession = (sid) => (S.state?.sessions || []).find((s) => s.id === sid)?.kind === "window";
+
+async function pickWindow() {
+  if (!S.state?.case) throw new Error("Start a case first.");
+  const res = await api("GET", "/api/windows");
+  if (!res.available) throw new Error(res.why);
+  const name = h("input", { type: "text", placeholder: "Session name, e.g. the computer's name (optional)" });
+  const os = h("input", { type: "text", value: "Windows", placeholder: "OS of the computer shown in it" });
+  const list = h("div", { class: "win-list" });
+  let chosen = null;
+  const free = res.windows.filter((w) => !w.open);
+  const render = () => list.replaceChildren(...(free.length ? free.map((w) =>
+    h("button", { type: "button", class: `win-item${chosen === w ? " on" : ""}${w.visible ? "" : " hidden-win"}`,
+      onclick: () => { chosen = w; if (!name.value.trim() || name.dataset.auto) { name.value = w.short_name; name.dataset.auto = "1"; } render(); } },
+      h("span", { class: "win-title" }, w.title || "(no title)"),
+      h("span", { class: "muted small" }, `${w.wm_class || w.instance || "?"} · ${w.width}×${w.height}${w.visible ? "" : " · minimised or on another workspace"}${w.remote_tool ? " · remote support" : ""}`)))
+    : [h("div", { class: "muted" }, "No other windows found.")]));
+  name.addEventListener("input", () => { delete name.dataset.auto; });
+  render();
+  modal({ title: "Open a window as a session", wide: true,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, "Pick the window to work through, for example a ScreenConnect control window. The AI can't see it until you send a screenshot (you black out anything sensitive first). Commands for it are copied to your clipboard for you to paste there."),
+      list, h("div", { class: "row" }, h("label", { class: "field", style: "flex:2" }, h("span", {}, "Name"), name),
+        h("label", { class: "field", style: "flex:1" }, h("span", {}, "OS"), os))),
+    buttons: [{ label: "Cancel" }, { label: "Open", kind: "primary", onClick: async () => {
+      if (!chosen) throw new Error("Pick a window first.");
+      const r = await api("POST", "/api/sessions", { kind: "window", xid: chosen.xid, name: name.value.trim(), os_hint: os.value.trim() });
+      setTimeout(() => activateTab(r.id), 50);
+    } }] });
+}
+
+function ensureWin(sess) {
+  if (S.wins[sess.id]) return S.wins[sess.id];
+  const w = { id: sess.id, copiedOk: false };
+  const btn = (label, title, fn) => h("button", { type: "button", class: "small ghost", title, onclick: () => guarded(fn) }, label);
+  w.status = h("span", { class: "rdp-status muted small win-status" });
+  w.preview = h("img", { class: "win-preview", alt: "" });
+  w.empty = h("div", { class: "win-help muted" },
+    h("p", {}, h("b", {}, "Copy to run"), " on a command for this session puts it on your clipboard. Paste it into the window, in PowerShell or cmd as the AI says, and run it there."),
+    h("p", {}, "Then send the result: ", h("b", {}, "Screenshot → chat"), ", or copy the output in the window and use ",
+      h("b", {}, "Paste result → AI"), ". Commands ending in ", h("code", {}, "| clip"), " put their output on the clipboard for you."),
+    h("p", {}, "This preview is only for you: nothing reaches the AI until you send it."));
+  w.bar = h("div", { class: "rdp-bar" },
+    needsVision(btn("Screenshot → chat", "Attach a screenshot of the window to your next message", attachScreenshot)),
+    btn("Paste result → AI", "Send the text on your clipboard (output copied in the window) to the AI", () => sendWinClipboard(w)),
+    btn("Refresh preview", "Show what the window looks like now (the preview stays here)", () => winPreview(w)),
+    h("span", { class: "spacer" }), w.status);
+  w.host = h("div", { class: "term-host rdp-host" }, w.bar, h("div", { class: "win-view" }, w.preview, w.empty));
+  setTimeout(renderVision, 0);
+  $("#terms").append(w.host);
+  S.wins[sess.id] = w;
+  return w;
+}
+
+async function winShot(sid, preview = false) {
+  return (await api("GET", `/api/sessions/${encodeURIComponent(sid)}/shot${preview ? "?preview=1" : ""}`)).image;
+}
+
+// quiet: from switching tabs, which happens on every session change, so at most every few seconds
+async function winPreview(w, quiet = false) {
+  const sess = (S.state.sessions || []).find((s) => s.id === w.id);
+  if (!sess || sess.exited) { w.status.textContent = "window closed"; w.preview.classList.remove("on"); return; }
+  if (quiet && Date.now() - (w.shotAt || 0) < 3000) return;
+  w.shotAt = Date.now();
+  w.status.textContent = sess.wm_class || "";
+  try {
+    w.preview.src = await winShot(w.id, true);
+    w.preview.classList.add("on");
+  } catch (e) {
+    w.preview.classList.remove("on");
+    w.status.textContent = "can't capture";
+    if (!quiet) throw e;
+  }
+}
+
+async function sendWinClipboard(w) {
+  const text = await clipRead().catch(() => "");
+  if (!text.trim()) return toast("Your clipboard is empty: copy the output in the window first.");
+  await sendExcerpt(w.id, text, `Send copied text from ${w.id}`);
+}
+
 // ------------------------------------------------------------------ screenshots & redaction
 
 // Every image goes through this before it is attached: drag rectangles to black out, then
@@ -1467,11 +1566,15 @@ async function attachScreenshot() {
   const sess = activeSession();
   if (!sess) return toast("Open and select a session first.");
   if (pendingImages.length >= 4) return toast("Up to four images per message.");
-  const r = S.rdps[sess.id];
+  const r = S.rdps[sess.id], w = S.wins[sess.id];
   let shot;
   if (r) {
     if (r.state !== 3) return toast("The remote desktop is not connected.");
     shot = r.client.getDisplay().flatten().toDataURL("image/png");
+  } else if (w) {
+    shot = await winShot(sess.id);
+    w.preview.src = shot;
+    w.preview.classList.add("on");
   } else {
     shot = terminalScreenshot(sess.id);
   }
@@ -1482,7 +1585,8 @@ async function attachScreenshot() {
   const input = $("#chat-input");
   if (!input.value.trim()) {
     input.value = r ? `This is what I see on the remote desktop of session \`${sess.id}\` right now (screenshot attached).`
-      : `This is what I see in the terminal of session \`${sess.id}\` right now (screenshot attached).`;
+      : w ? `This is what the window of session \`${sess.id}\` shows right now (screenshot attached).`
+        : `This is what I see in the terminal of session \`${sess.id}\` right now (screenshot attached).`;
   }
   input.focus();
   input.selectionStart = input.selectionEnd = input.value.length;
@@ -1657,10 +1761,16 @@ function updateRow(row, item) {
   const sessOpen = (S.state.sessions || []).some((s) => s.id === item.session_id && !s.exited);
   const btns = [];
   if (pending) {
-    const run = btn("Run", () => runItem(item.num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
-    const ins = btn("Insert", () => runItem(item.num, "insert"), "", "Type into the terminal without pressing Enter");
-    run.disabled = ins.disabled = !sessOpen;
-    btns.push(run, ins);
+    if (isWindowSession(item.session_id)) {
+      const copy = btn("Copy to run", () => runItem(item.num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Copy the command to paste into the window, and mark it run");
+      copy.disabled = !sessOpen;
+      btns.push(copy);
+    } else {
+      const run = btn("Run", () => runItem(item.num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
+      const ins = btn("Insert", () => runItem(item.num, "insert"), "", "Type into the terminal without pressing Enter");
+      run.disabled = ins.disabled = !sessOpen;
+      btns.push(run, ins);
+    }
     if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
     if (item.dry_run) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", `Queue the rehearsal first (${item.dry_run.description}): ${item.dry_run.command}`));
     if (item.risk === "read_only" && !item.watch && !item.dry_run_of) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
@@ -1727,6 +1837,24 @@ async function runItem(num, mode) {
       mode === "run" ? "Run it" : "Insert it", "danger");
     if (!ok) return;
   }
+  const w = S.wins[sess.id];
+  if (w) {
+    if (!w.copiedOk) {
+      const ok = await confirmModal("Copy for the window", h("div", {},
+        h("p", {}, `Commands for ${sess.id} aren't typed for you: this copies the command to your clipboard. Paste it into the window, in the shell the AI named, and run it there.`),
+        h("pre", { class: "prompt-text" }, item.command),
+        item.purpose ? h("p", { class: "muted small" }, item.purpose) : null,
+        h("p", { class: "muted small" }, "Then send the result with Screenshot → chat, or copy the output there and use Paste result → AI. You won't be asked again for this session.")),
+      "Copy it", "primary");
+      if (!ok) return;
+      w.copiedOk = true;
+    }
+    await clipWrite(item.command);
+    await api("POST", `/api/queue/${num}`, { status: "ran" });
+    activateTab(sess.id, false);
+    toast(`#${num} copied: paste it into ${sess.id}.`, "ok", 4000);
+    return;
+  }
   const r = S.rdps[sess.id];
   if (r) {
     if (r.state !== 3) throw new Error(`The remote desktop ${sess.id} is not connected.`);
@@ -1764,6 +1892,9 @@ async function runGroup(group) {
     if (cmdEl) await saveCommand(n, cmdEl.value);
   }
   const items = nums.map((n) => S.state.queue.find((i) => i.num === n));
+  if (items.some((i) => isWindowSession(i.session_id))) {
+    throw new Error("This group includes a window session, whose commands you paste by hand: run its items one at a time.");
+  }
   if (items.some((i) => i.risk !== "read_only")) {
     const ok = await confirmModal("Run paired probes", h("div", {}, h("p", {}, "This group contains non read-only commands:"),
       h("pre", { class: "prompt-text" }, items.map((i) => `#${i.num} [${i.risk}] ${i.session_id}: ${i.command}`).join("\n"))), "Run all", "danger");
@@ -2169,10 +2300,15 @@ async function openSendResults() {
   const thumbs = h("div", { class: "thumbs" }, images.map((d) => h("img", { src: d, class: "thumb" })));
   const addShot = (sid) => guarded(async () => {
     needVision();
-    const r = S.rdps[sid];
-    if (!r || r.state !== 3) throw new Error(`The remote desktop ${sid} is not connected.`);
     if (images.length >= 4) throw new Error("Up to four images per message.");
-    const shot = await redactImage(r.client.getDisplay().flatten().toDataURL("image/png"), `Screenshot of ${sid}: black out anything sensitive`);
+    let raw;
+    if (S.wins[sid]) raw = await winShot(sid);
+    else {
+      const r = S.rdps[sid];
+      if (!r || r.state !== 3) throw new Error(`The remote desktop ${sid} is not connected.`);
+      raw = r.client.getDisplay().flatten().toDataURL("image/png");
+    }
+    const shot = await redactImage(raw, `Screenshot of ${sid}: black out anything sensitive`);
     if (!shot) return;
     images.push(await shrinkImage(shot));
     thumbs.replaceChildren(...images.map((d) => h("img", { src: d, class: "thumb" })));
@@ -2180,13 +2316,23 @@ async function openSendResults() {
   const blocks = items.map((item, idx) => {
     const include = h("input", { type: "checkbox", checked: true });
     const skipped = item.status === "skipped";
-    const rdp = !!caps[idx].rdp;
+    const rdp = !!caps[idx].rdp, win = !!caps[idx].window;
     const ta = skipped ? null : h("textarea", { spellcheck: "false", value: prev[idx].text,
-      placeholder: rdp ? "Output isn't captured from a remote desktop: paste it here, or attach a screenshot below." : "" });
+      placeholder: win ? "Output isn't captured from a window: paste it here, or attach a screenshot below."
+        : rdp ? "Output isn't captured from a remote desktop: paste it here, or attach a screenshot below." : "" });
+    const pasteCopied = () => guarded(async () => {
+      let text = "";
+      if (win) text = await clipRead().catch(() => "");
+      else text = S.rdps[item.session_id]?.clipboard || "";
+      if (!text) return toast(win ? "Your clipboard is empty: copy the output in the window first." : "Copy the output in the remote desktop first.");
+      ta.value = (await api("POST", "/api/preview", { texts: [text], nums: [item.num] })).items[0].text;
+      autosize(ta);
+    });
     const rdpTools = rdp && !skipped ? h("div", { class: "row" },
-      h("button", { type: "button", class: "small", "data-needs-vision": true, onclick: () => addShot(item.session_id) }, "📸 Screenshot of the desktop"),
-      h("button", { type: "button", class: "small", title: "Text last copied in the remote desktop",
-        onclick: () => { const r = S.rdps[item.session_id]; if (r?.clipboard) { ta.value = r.clipboard; autosize(ta); } else toast("Copy the output in the remote desktop first."); } }, "Copied text")) : null;
+      h("button", { type: "button", class: "small", "data-needs-vision": true, onclick: () => addShot(item.session_id) },
+        win ? "📸 Screenshot of the window" : "📸 Screenshot of the desktop"),
+      h("button", { type: "button", class: "small", title: win ? "The text on your clipboard (copied in the window)" : "Text last copied in the remote desktop",
+        onclick: pasteCopied }, "Copied text")) : null;
     const note = h("input", { type: "text", placeholder: "Note to the AI (optional)", value: item.note || "" });
     const info = [];
     if (prev[idx].redactions) info.push(`${prev[idx].redactions} redaction(s) applied`);
@@ -2236,6 +2382,8 @@ async function openSendResults() {
 async function sendSelection() {
   const r = S.rdps[S.activeSid];
   if (r) return sendRdpClipboard(r);
+  const w = S.wins[S.activeSid];
+  if (w) return sendWinClipboard(w);
   const t = S.terms[S.activeSid];
   const sel = t?.term.getSelection() || "";
   if (!sel.trim()) return toast("Select some text in the terminal first.");

@@ -41,9 +41,9 @@ from .safety import watch as watch_mod
 from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
-from .sessions import guac, rdpcert
+from .sessions import guac, rdpcert, xwindow
 from .sessions.askpass import AskpassBridge
-from .sessions.manager import RdpSession, SessionManager
+from .sessions.manager import RdpSession, SessionManager, WindowSession
 from .sessions.ssh import ssh_argv, target_label
 
 # A TEE model's attestation is made again, with a fresh nonce, before a send once it is this old.
@@ -1141,6 +1141,66 @@ class Engine:
             sess.connected = connected
             self.log("rdp_connected" if connected else "rdp_disconnected", session_id=sid, error=error)
             self._sessions_changed()
+
+    # ---------------------------------------------------------------- windows
+
+    async def list_windows(self) -> dict:
+        """Windows on this desktop the technician can open as a window session (not our own)."""
+        why = xwindow.available()
+        if why:
+            return {"available": False, "why": why, "windows": []}
+        try:
+            wins = await asyncio.to_thread(xwindow.list_windows, os.getpid())
+        except xwindow.WindowError as e:
+            return {"available": False, "why": str(e), "windows": []}
+        taken = {s.xid for s in self.sessions.sessions.values() if isinstance(s, WindowSession) and not s.exited}
+        return {"available": True, "why": "", "windows": [{**w.to_dict(), "open": w.xid in taken} for w in wins]}
+
+    async def open_window(self, xid: int, name: str = "", os_hint: str = "") -> dict:
+        self._need_case()
+        try:
+            info = await asyncio.to_thread(xwindow.window_info, int(xid))
+        except (TypeError, ValueError) as e:
+            raise UserError("Pick a window from the list.") from e
+        except xwindow.WindowError as e:
+            raise UserError(str(e)) from e
+        if info is None:
+            raise UserError("That window has closed. Pick it again from the list.")
+        for s in self.sessions.sessions.values():
+            if isinstance(s, WindowSession) and s.xid == info.xid and not s.exited:
+                raise UserError(f"That window is already open as session {s.id}.")
+        name = name.strip() or info.short_name
+        sid = self.sessions.unique_id(re.sub(r"\W+", "-", name[:40]))
+        app = info.wm_class or info.instance or "window"
+        sess = self.sessions.add(WindowSession(
+            id=sid, name=name, xid=info.xid, wm_class=app, title=info.title,
+            target=f"{app} window \"{info.title}\"" if info.title else f"{app} window",
+            os_hint=os_hint.strip() or "Windows"))
+        self.log("session_opened", **sess.roster())
+        return sess.roster()
+
+    async def window_shot(self, sid: str, preview: bool = False) -> dict:
+        """A PNG of the session's window, as a data URL for the page, where the technician
+        blacks out what shouldn't be sent before attaching it. Nothing goes to the model here.
+        `preview`: only for the session tab's own preview, so not logged."""
+        sess = self.sessions.sessions.get(sid)
+        if not isinstance(sess, WindowSession):
+            raise UserError(f"{sid} is not a window session.")
+        if sess.exited:
+            raise UserError(f"The window of {sid} has closed.")
+        try:
+            png, notes = await asyncio.to_thread(xwindow.capture, sess.xid)
+        except xwindow.WindowError as e:
+            if await asyncio.to_thread(xwindow.window_info, sess.xid) is None:
+                self.sessions.mark_window_closed(sess)
+                self.log("window_closed", session_id=sid)
+            raise UserError(str(e)) from e
+        if notes["title"] and notes["title"] != sess.title:
+            sess.title = notes["title"]
+            self._sessions_changed()
+        if not preview:
+            self.log("window_screenshot", session_id=sid, width=notes["width"], height=notes["height"])
+        return {"image": "data:image/png;base64," + base64.b64encode(png).decode(), **notes}
 
     def link_session(self, sid: str, to: str | None) -> None:
         if sid not in self.sessions.sessions or (to and to not in self.sessions.sessions):

@@ -353,7 +353,17 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def open_session(body: dict, e: Engine = Depends(auth)):
         if body.get("kind") == "rdp":
             return await e.open_rdp(body.get("host", ""))
+        if body.get("kind") == "window":
+            return await e.open_window(body.get("xid", 0), str(body.get("name", "")), str(body.get("os_hint", "")))
         return e.open_session(body.get("kind", "local"), body.get("host", ""))
+
+    @app.get("/api/windows")
+    async def list_windows(e: Engine = Depends(auth)):
+        return await e.list_windows()
+
+    @app.get("/api/sessions/{sid}/shot")
+    async def window_shot(sid: str, preview: bool = False, e: Engine = Depends(auth)):
+        return await e.window_shot(sid, preview)
 
     @app.post("/api/sessions/{sid}/link")
     async def link_session(sid: str, body: dict, e: Engine = Depends(auth)):

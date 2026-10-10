@@ -12,7 +12,7 @@ This is the full reference. For what DA Toolkit is and how to install it, see th
 - [Workflow](#workflow)
 - [Generation settings](#generation-settings)
 - [Model tiers and end-to-end encryption](#model-tiers-and-end-to-end-encryption)
-- [SSH, WinRM and RDP](#ssh-winrm-and-rdp)
+- [SSH, WinRM, RDP and windows](#ssh-winrm-rdp-and-windows)
 - [Where things are stored](#where-things-are-stored)
 - [Untrusted output](#untrusted-output)
 
@@ -556,7 +556,7 @@ Confidential cases. Verifying contacts NanoGPT, Intel (`api.trustedservices.inte
 `certificates.trustedservices.intel.com`) and NVIDIA (`nras.attestation.nvidia.com`). Intel's
 collateral and NVIDIA's keys are cached for an hour.
 
-## SSH, WinRM and RDP
+## SSH, WinRM, RDP and windows
 
 - **SSH** uses your system `ssh`, so `~/.ssh/config`, keys, the agent, jump hosts and
   known_hosts all work.
@@ -596,10 +596,37 @@ collateral and NVIDIA's keys are cached for an hour.
     desktop (confirmed once per session). Output isn't captured; in the Send results dialog,
     paste it, use "Copied text", or attach a screenshot.
   - Limits: no smart-card or USB redirection, text-only clipboard, one monitor.
+- **Window sessions** work through a window on your own screen: typically a ScreenConnect
+  control window, but TeamViewer, AnyDesk, a VM console or an iDRAC/iLO console work the
+  same way. Nothing needs setting up on the remote side, and DA Toolkit needs no login or API
+  for the tool.
+  - **+ Session → Window on this screen…** lists the open windows, remote-support tools
+    first. Pick one and give it a name (suggested from the title, e.g. the computer's name).
+    The window is followed by its X window id, so moving or resizing it doesn't matter.
+  - The AI can't see the window. **Screenshot → chat** captures just that window (not the
+    rest of your screen), you black out anything sensitive, and it's attached to your next
+    message. The tab shows a preview that stays on your machine.
+  - The AI prefers commands to click paths and says which shell each one goes in
+    (PowerShell or cmd, as admin or not). **Copy to run** puts the command on your
+    clipboard and marks it run; paste it into the window (remote-support tools pass the
+    clipboard through) and run it there. Nothing is ever typed into the window for you.
+  - Send the result as a screenshot, or as text: copy the output in the window and use
+    **Paste result → AI**, or **Copied text** in the Send results dialog. Text is exact
+    where a screenshot may be misread, so for IDs, paths and long lists the AI ends the
+    command with `| clip`, which puts its output on the clipboard.
+  - Commands that would cut the session are flagged: stopping or uninstalling the
+    remote-support agent (ScreenConnect, TeamViewer, AnyDesk, ...), logging off, and the
+    usual network changes.
+  - **X11 only.** Wayland doesn't let one program read another's windows. Under XWayland,
+    X11 programs (the ScreenConnect client among them) may still be listed and captured,
+    but this hasn't been tested. A window that's minimised or on another workspace can't be
+    captured: bring it back first. Without a compositor (most desktops have one), the parts
+    of the window that other windows cover can't be read either.
 - **Linked sessions.** Sessions to the same address are linked automatically as one machine
   (a coloured bar on their tabs); 🔗 links sessions by hand (hostname vs IP, NAT) or unlinks
   one for good. The AI is told which linked session takes commands and which is your
-  desktop view, so it sends commands to the shell while you watch the GUI.
+  desktop view (an RDP or window session), so it sends commands to the shell while you
+  watch the GUI.
 
 ## Where things are stored
 

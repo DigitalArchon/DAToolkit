@@ -1,5 +1,7 @@
 """Sessions. Local, SSH and WinRM sessions are programs running in a PTY; RDP sessions are
-remote desktops drawn by guacd (see guac.py) and have no process or transcript here.
+remote desktops drawn by guacd (see guac.py) and have no process or transcript here. Window
+sessions are a window of another program on this desktop (a ScreenConnect control window, a VM
+console), read only through screenshots (see xwindow.py).
 
 Sessions reaching the same machine share a `device` key, so the model can be told that an
 RDP view and a WinRM shell are the same computer. Opening a session links it automatically
@@ -128,9 +130,35 @@ class RdpSession:
                 "cert": {k: self.cert.get(k) for k in ("tls", "sha256", "subject") if k in self.cert}}
 
 
+@dataclass
+class WindowSession:
+    """A window of another program on this desktop, found by its X window id. DA Toolkit only
+    takes screenshots of it; commands for it are pasted there by the technician."""
+    id: str
+    name: str
+    xid: int
+    wm_class: str = ""
+    title: str = ""
+    kind: str = "window"
+    target: str = ""
+    shell: str = "a window on the technician's screen (commands are pasted there by the technician)"
+    os_hint: str = ""
+    host_name: str = ""
+    exited: bool = False
+    address: str = ""
+    device: str = ""
+    link: str = "auto"
+
+    def roster(self) -> dict:
+        return {"id": self.id, "name": self.name, "kind": self.kind, "target": self.target,
+                "shell": self.shell, "os_hint": self.os_hint, "exited": self.exited,
+                "host_name": self.host_name, "device": self.device, "link": self.link,
+                "xid": self.xid, "wm_class": self.wm_class, "title": self.title}
+
+
 class SessionManager:
     def __init__(self, on_change: Callable[[], None]):
-        self.sessions: dict[str, Session | RdpSession] = {}
+        self.sessions: dict[str, Session | RdpSession | WindowSession] = {}
         self._on_change = on_change
         self._transcript_dir: Callable[[str], Path | None] = lambda sid: None
         self._devices = 0
@@ -161,7 +189,7 @@ class SessionManager:
         self._on_change()
         return sess
 
-    def add(self, sess: RdpSession) -> RdpSession:
+    def add(self, sess: RdpSession | WindowSession) -> RdpSession | WindowSession:
         self._auto_link(sess)
         self.sessions[sess.id] = sess
         self._on_change()
@@ -230,6 +258,12 @@ class SessionManager:
         sess.transcript.close()
         self._on_change()
 
+    def mark_window_closed(self, sess: WindowSession) -> None:
+        """The window has gone: the session stays, marked closed, like an exited shell."""
+        if not sess.exited:
+            sess.exited = True
+            self._on_change()
+
     def subscribe(self, sid: str) -> tuple[bytes, asyncio.Queue]:
         sess = self.sessions[sid]
         q: asyncio.Queue = asyncio.Queue()
@@ -254,9 +288,9 @@ class SessionManager:
         sess = self.sessions.pop(sid, None)
         if sess is None:
             return
-        if isinstance(sess, RdpSession):
+        if isinstance(sess, (RdpSession, WindowSession)):
             sess.exited = True
-            if sess.relay:
+            if isinstance(sess, RdpSession) and sess.relay:
                 sess.relay.cancel()
             self._on_change()
             return
