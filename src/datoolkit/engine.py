@@ -71,6 +71,7 @@ PROMISE_NUDGE = (
     "propose_commands call, so nothing new is in their queue and they can't run anything. Queue those "
     "commands now with propose_commands (or run_recipe). Don't repeat your message; add at most one short "
     "line. If no commands are needed after all, say so in one sentence.")
+HYPOTHESES_TOOL = prompts.HYPOTHESES_TOOL["function"]["name"]
 STALE_NUDGE = (
     "[DAToolkit] Your message asks the technician to run {items}, but those are not pending in their queue, "
     "so there is nothing to run. If you still want them, queue them again with propose_commands; otherwise "
@@ -2612,7 +2613,10 @@ class Engine:
                     self.conv[-1]["content"] += NO_MESSAGE_NUDGE.format(done=_turn_summary(entry))
                     self.log("no_message_nudge", done=_turn_summary(entry))
                     retry = True
-                if not retry and not result.tool_calls and not promise_nudged:
+                # a round whose only call was update_hypotheses gave the technician nothing to do
+                # (live: DeepSeek V4 Pro, "I'll get some basic diagnostics from DC01")
+                if (not retry and not promise_nudged
+                        and all(c.name == HYPOTHESES_TOOL for c in result.tool_calls)):
                     said = entry["text"][round_text:]      # this round's words; earlier rounds made their calls
                     stale = stale_run_refs(said, {p.num for p in self.queue.items if p.status == "pending"})
                     if stale or (promises_commands(said)

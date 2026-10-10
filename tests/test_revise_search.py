@@ -409,3 +409,19 @@ async def test_asking_for_items_no_longer_queued_gets_a_nudge(env):  # noqa: F81
     nudge = fake.requests[1]["messages"][-1]["content"]
     assert nudge.startswith(STALE_NUDGE.split("{")[0]) and "#1 (skipped)" in nudge
     assert engine.chat[-1]["proposals"] == [2]
+
+
+async def test_promise_with_only_a_hypotheses_update_is_nudged(env):  # noqa: F811
+    from datoolkit.engine import PROMISE_NUDGE
+    engine, fake, _ = env
+    sid = setup(engine)
+    fake.responses += [
+        multi_tool_stream([("update_hypotheses", {"items": [{"id": "skew", "text": "clock skew", "confidence": 0.5}]})],
+                          text="Let me get some basic diagnostics from DC01. I'll queue a few read-only checks."),
+        multi_tool_stream([("propose_commands", {"items": [
+            {"session_id": sid, "command": "w32tm /query /status", "purpose": "sync", "risk": "read_only"}]})], text="Here they are."),
+    ]
+    engine.send("users can't log on")
+    await wait_turn(engine)
+    assert len(fake.requests) == 2 and PROMISE_NUDGE in str(fake.requests[1]["messages"][-2:])
+    assert engine.chat[-1]["proposals"] == [1]
