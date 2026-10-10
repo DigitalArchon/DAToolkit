@@ -22,8 +22,8 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
 - **Real terminals.** Local, SSH and WinRM sessions are real PTYs (`sudo`, Ctrl-C, pagers
   and device CLIs behave normally), and RDP opens in a tab through Apache Guacamole's guacd.
 - **Works through ScreenConnect.** A window session follows a ScreenConnect (or TeamViewer,
-  AnyDesk, VM console) window on your screen (X11): the AI sees it through screenshots you
-  send, and you paste the commands it proposes. No setup or API needed.
+  AnyDesk, VM console) window on your screen (X11 or XWayland): the AI sees it through
+  screenshots you send, and you paste the commands it proposes. No setup or API needed.
 - **Any OpenAI-compatible model**: NanoGPT, Ollama, LM Studio, vLLM and others. See
   [which models work well](docs/model-evaluation.md) for how nine popular models did.
 - **Privacy tiers per case.** Open, Confidential and Sovereign cases limit which models may

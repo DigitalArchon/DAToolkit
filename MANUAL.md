@@ -635,11 +635,15 @@ collateral and NVIDIA's keys are cached for an hour.
   - Commands that would cut the session are flagged: stopping or uninstalling the
     remote-support agent (ScreenConnect, TeamViewer, AnyDesk, ...), logging off, and the
     usual network changes.
-  - **X11 only.** Wayland doesn't let one program read another's windows. Under XWayland,
-    X11 programs (the ScreenConnect client among them) may still be listed and captured,
-    but this hasn't been tested. A window that's minimised or on another workspace can't be
-    captured: bring it back first. Without a compositor (most desktops have one), the parts
-    of the window that other windows cover can't be read either.
+  - **X11 windows only, including under XWayland.** Wayland doesn't let one program read
+    another's windows, but programs that run through XWayland (the ScreenConnect client
+    among them) are listed and captured as on X11. Native Wayland windows aren't listed.
+    Tested on KDE Plasma 6 (Wayland, CachyOS): capture, following the window when it's moved
+    or resized, and the clipboard both ways between DA Toolkit and the XWayland window.
+  - A minimised window can't be captured: bring it back first. On X11 the same goes for a
+    window on another workspace; under KDE's XWayland it can still be captured. Without a
+    compositor (most X11 desktops have one), the parts of the window that other windows cover
+    can't be read either; under XWayland they can.
 - **Linked sessions.** Sessions to the same address are linked automatically as one machine
   (a coloured bar on their tabs); 🔗 links sessions by hand (hostname vs IP, NAT) or unlinks
   one for good. The AI is told which linked session takes commands and which is your
