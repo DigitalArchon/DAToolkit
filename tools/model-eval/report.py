@@ -19,7 +19,7 @@ import flags as flags_mod  # noqa: E402
 RESULTS = common.HERE / "results"
 TURN_FLAGS = ["no_message", "no_message_nudge", "promise_without_call", "promise_nudge", "commands_in_prose_only",
               "bad_tool_calls", "risk_under_labelled", "missing_rollback", "shell_rule_breaches", "unknown_session",
-              "reproposed_pending", "repeated_question", "error_or_empty", "tool_markup_in_text", "stale_reference"]
+              "reproposed_pending", "repeated_question", "error_or_empty", "tool_markup_in_text", "stale_reference", "placeholder_in_command"]
 
 
 def _variant(run_id: str) -> str:

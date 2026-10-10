@@ -18,7 +18,7 @@ _PROMISE = re.compile(
     r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
     r"|\b(I['’]?ve|I have|I['’]?ll|I will|let me|I['’]?m going to|I['’]?d like to|I want to|we['’]?ll|we will|we need to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
     r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look|start by)\b"
-    r"|\b(I['’]?ll|I will|let me|I['’]?m going to|I need to|now I need to)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
+    r"|\b(I['’]?ll|I will|let me|I['’]?m going to|I need to|now I need to|I want to)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
     r"fetch|see|ask for|check|confirm|verify|inspect|queue)\b"
     r"|\blet['’]?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
     r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
@@ -72,6 +72,8 @@ CMD_WORDS = re.compile(
 TOOL_MARKUP = re.compile(r"<｜DSML｜|<\|tool_calls?_section_begin\|>|<\|tool_call_begin\|>|</?tool_call>|\[TOOL_CALLS\]|"
                          r"<function=|<\|?(begin|end)_of_tool|<invoke name=", re.I)
 
+_PLACEHOLDER = re.compile(r"<[A-Z][A-Z0-9_]{2,}>|<[a-z][a-z0-9]*[-_](ip|name|path|file|host|hostname|interface|iface|"
+                          r"id|user|share|server|port)>|\bPATH/TO\b|\b[xX]\.[xX]\.[xX]\.[xX]\b|\bYOUR_[A-Z_]+\b")
 PAGERS = re.compile(r"(^|[|;&]\s*)(less|more|vi|vim|nano|htop)\b|(^|[|;&]\s*)top(?!\s+-b)\b|\btail\s+(-\S+\s+)*-f\b|"
                     r"\bwatch\s", re.M)
 
@@ -165,6 +167,9 @@ def turn_flags(entry: dict, rounds: list[dict], proposals: list[dict], sessions:
         else:
             for b in shell_breaches(p["command"], s["kind"], s.get("os_hint", "")):
                 breaches.append(f"#{p['num']} {b}")
+    holes = [p["num"] for p in proposals if _PLACEHOLDER.search(p["command"])]
+    if holes:
+        f["placeholder_in_command"] = holes
     if under:
         f["risk_under_labelled"] = under
     if no_rb:
