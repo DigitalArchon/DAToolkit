@@ -236,6 +236,8 @@ class Engine:
         self._research_ids = itertools.count(1)
         self._research_auto: dict[str, str] = {}    # provider -> the research model picked automatically
         self.pins = rdpcert.PinStore()
+        self.guacd = guac.GuacdContainer()
+        self._guacd_lock = asyncio.Lock()
         # model-request log (requests.jsonl): what was sent and what came back, per request
         self._req_system_sha = ""     # system prompt of the last logged request (logged again only when it changes)
         self._req_conv_len = 0        # conversation messages already logged
@@ -275,6 +277,10 @@ class Engine:
                 task.cancel()
         self.sessions.close_all()
         await self.bridge.stop()
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self.guacd.stop), 4)
+        except asyncio.TimeoutError:
+            pass
 
     def emit(self, type_: str, **data) -> None:
         self._emit({"type": type_, **data})
@@ -1049,6 +1055,41 @@ class Engine:
         except (OSError, asyncio.TimeoutError):
             return False
 
+    async def _ensure_guacd(self) -> bool:
+        """guacd answering on 127.0.0.1:4822, starting our container if that's how it's
+        provided here. False when there is none to start (the technician needs install_help)."""
+        async with self._guacd_lock:
+            if await self._guacd_reachable():
+                await asyncio.to_thread(self.guacd.adopt)
+                return True
+            if not await asyncio.to_thread(self.guacd.usable):
+                return False
+            self.emit("toast", level="info", text="Starting guacd's container for RDP…")
+            try:
+                await asyncio.to_thread(self.guacd.start)
+            except guac.GuacError as e:
+                raise UserError(f"Couldn't start guacd's container: {e}") from e
+            self.log("guacd_container", action="start", runtime=self.guacd.runtime)
+            loop = asyncio.get_running_loop()
+            end = loop.time() + guac.CONTAINER_START_WAIT
+            while loop.time() < end:
+                if await guac.probe(2):
+                    return True
+                await asyncio.sleep(0.3)
+            await asyncio.to_thread(self.guacd.stop)
+            raise UserError("guacd's container started but guacd didn't answer on 127.0.0.1:4822. "
+                            "Is something else using that port?")
+
+    def _guacd_idle(self) -> None:
+        """Stop our guacd container once no RDP session needs it."""
+        if not self.guacd.runtime or any(isinstance(s, RdpSession) and not s.exited
+                                         for s in self.sessions.sessions.values()):
+            return
+        self.log("guacd_container", action="stop", runtime=self.guacd.runtime)
+        task = asyncio.get_running_loop().create_task(asyncio.to_thread(self.guacd.stop))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
     async def open_rdp(self, host_name: str) -> dict:
         """Check guacd, check the server certificate against its pin (asking the technician
         the first time), get the password, and register the session. The desktop itself
@@ -1057,8 +1098,14 @@ class Engine:
         host = self.cfg.host(host_name)
         if not host or host.kind != "rdp":
             raise UserError(f"Unknown RDP host {host_name}")
-        if not await self._guacd_reachable():
+        if not await self._ensure_guacd():
             raise UserError(*guac.install_help())
+        try:
+            return await self._open_rdp(host)
+        finally:
+            self._guacd_idle()     # not opened after all: the container we started isn't needed
+
+    async def _open_rdp(self, host) -> dict:
         sid = self.sessions.unique_id(host.name)
         port = host.port or 3389
         try:
@@ -1211,6 +1258,7 @@ class Engine:
     def close_session(self, sid: str) -> None:
         self.sessions.close(sid)
         self.log("session_closed", session_id=sid)
+        self._guacd_idle()
 
     def set_session_hint(self, sid: str, os_hint: str) -> None:
         self.sessions.sessions[sid].os_hint = os_hint.strip()

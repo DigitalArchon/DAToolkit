@@ -257,41 +257,180 @@ def test_guacd_install_help_per_distribution():
     def which_of(*present):
         return lambda name: f"/usr/bin/{name}" if name in present else None
 
-    def help_for(release, *present, container=None):
-        return guac.install_help(release, which_of(*present), installed=False, container=lambda w: container)
-    podman_run = f"podman run -d --name guacd --restart unless-stopped -p 127.0.0.1:4822:4822 {guac.GUACD_IMAGE}"
+    def help_for(release, *present):
+        return guac.install_help(release, which_of(*present), installed=False)
+    pull = f"podman pull {guac.GUACD_IMAGE}"
+    assert "@sha256:" in guac.GUACD_IMAGE                       # pinned
     mint = {"ID": "linuxmint", "ID_LIKE": "ubuntu debian", "NAME": "Linux Mint"}
     assert help_for(mint)[1] == ["sudo apt install guacd"]
     text, cmds = help_for({"ID": "fedora", "NAME": "Fedora Linux"})
     assert cmds == ["sudo dnf install guacd libguac-client-rdp", "sudo systemctl enable --now guacd"]
     assert "EPEL" not in text
     assert "EPEL" in help_for({"ID": "rocky", "ID_LIKE": "rhel centos fedora"})[0]
-    # Arch and its derivatives: no apt, and the AUR package doesn't build as is, so the container
+    # Arch and its derivatives: no apt, and the AUR package doesn't build as is, so the container,
+    # which DA Toolkit runs only while an RDP session is open: just download it once
     cachy = {"ID": "cachyos", "ID_LIKE": "arch", "NAME": "CachyOS Linux"}
     text, cmds = help_for(cachy)
-    assert "AUR" in text and "only from this machine" in text
-    assert cmds == ["sudo pacman -S --needed podman", podman_run, "systemctl --user enable podman-restart.service"]
-    assert help_for(cachy, "podman")[1] == [podman_run, "systemctl --user enable podman-restart.service"]
-    assert help_for(cachy, "docker")[1] == [podman_run.replace("podman", "docker", 1)]
+    assert "AUR" in text and "only from this machine" in text and "only while an RDP session is open" in text
+    assert cmds == ["sudo pacman -S --needed podman", pull]
+    assert help_for(cachy, "podman")[1] == [pull]
+    assert help_for(cachy, "docker")[1] == [pull.replace("podman", "docker", 1)]
+    assert not any("restart" in c for c in help_for(cachy, "podman")[1])   # never left running
     # Debian 13 ships no guacd either
     text, cmds = help_for({"ID": "debian", "NAME": "Debian GNU/Linux"})
-    assert "Debian GNU/Linux doesn't package it" in text and cmds[0] == "sudo apt install podman"
-    assert help_for({"ID": "gentoo"})[1] == [podman_run, "systemctl --user enable podman-restart.service"]
+    assert "Debian GNU/Linux doesn't package it" in text and cmds == ["sudo apt install podman", pull]
+    assert help_for({"ID": "gentoo"})[1] == [pull]
     # installed but stopped: start it, whatever the distribution
     assert guac.install_help(cachy, which_of(), installed=True)[1] == ["sudo systemctl enable --now guacd"]
-    assert help_for(cachy, "podman", container="podman")[1] == ["podman start guacd"]
 
 
-def test_stopped_container_detection(monkeypatch):
-    calls = []
+class FakeRuntime:
+    """podman as GuacdContainer sees it: records commands, answers like the real one."""
 
-    def run(argv, **kw):
-        calls.append(argv)
-        return type("R", (), {"returncode": 0 if argv[0] == "docker" else 125})()
-    monkeypatch.setattr(guac.subprocess, "run", run)
-    assert guac._stopped_container(lambda n: f"/usr/bin/{n}") == "docker"
-    assert calls == [["podman", "container", "inspect", "guacd"], ["docker", "container", "inspect", "guacd"]]
-    assert guac._stopped_container(lambda n: None) is None
+    def __init__(self, image=True, run_error=""):
+        self.calls, self.image, self.run_error, self.running = [], image, run_error, False
+
+    def which(self, name):
+        return "/usr/bin/podman" if name == "podman" else None
+
+    def run(self, argv, timeout=30):
+        self.calls.append(argv)
+        ok = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})
+        fail = type("R", (), {"returncode": 125, "stdout": "", "stderr": "Error: something\nError: " + self.run_error})
+        if argv[1:3] == ["image", "exists"]:
+            return ok if self.image else fail
+        if argv[1] == "run":
+            if self.run_error:
+                return fail
+            self.running = True
+        if argv[1] == "rm":
+            self.running = False
+        if argv[1:3] == ["container", "inspect"]:
+            return type("R", (), {"returncode": 0 if self.running else 125, "stdout": "true\n" if self.running else "",
+                                  "stderr": ""})
+        return ok
+
+
+def test_guacd_container_runs_pinned_on_loopback_and_stops():
+    rt = FakeRuntime()
+    c = guac.GuacdContainer(rt.which, rt.run)
+    assert c.usable() == "podman"
+    c.start()
+    assert c.runtime == "podman"
+    assert rt.calls[-2] == ["podman", "rm", "-f", guac.CONTAINER]          # a stopped leftover goes first
+    assert rt.calls[-1] == ["podman", "run", "-d", "--rm", "--name", guac.CONTAINER,
+                            "-p", "127.0.0.1:4822:4822", guac.GUACD_IMAGE]
+    c.stop()
+    assert rt.calls[-1] == ["podman", "rm", "-f", "-t", "0", guac.CONTAINER] and c.runtime is None
+    n = len(rt.calls)
+    c.stop()                                                               # not ours any more: nothing to do
+    assert len(rt.calls) == n
+    # left running by a run that didn't end cleanly: taken over, so it's stopped later
+    rt.running = True
+    c.adopt()
+    assert c.runtime == "podman"
+    assert guac.GuacdContainer(FakeRuntime(image=False).which, FakeRuntime(image=False).run).usable() is None
+    bad = FakeRuntime(run_error="port 4822 already in use")
+    with pytest.raises(guac.GuacError, match="already in use"):
+        guac.GuacdContainer(bad.which, bad.run).start()
+
+
+@pytest.fixture
+def container_env(env, monkeypatch):  # noqa: F811
+    """An engine whose guacd is our container: not answering until started."""
+    engine, _, events = env
+    rt = FakeRuntime()
+    engine.guacd = guac.GuacdContainer(rt.which, rt.run)
+
+    async def reachable():
+        return rt.running
+
+    async def probe(timeout=3):
+        return rt.running
+    monkeypatch.setattr(engine, "_guacd_reachable", reachable)
+    monkeypatch.setattr(guac, "probe", probe)
+    engine.new_case("rdp", "open")
+    return engine, events, rt
+
+
+async def _settle(engine):
+    for _ in range(50):
+        if not engine._background:
+            return
+        await asyncio.sleep(0.02)
+
+
+async def test_guacd_container_lives_only_while_rdp_is_open(container_env):
+    engine, events, rt = container_env
+    server, port = await fake_rdp_server("legacy")
+    engine.cfg.hosts.append(Host("old", "rdp", "127.0.0.1", port=port, user="bob", auth="password"))
+    creds.set_secret("host", "old", "pw")
+    async with server:
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["yes"])
+        a = await opener
+        assert rt.running and engine.guacd.runtime == "podman"
+        assert any(e["type"] == "toast" and "Starting guacd" in e["text"] for e in events)
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["yes"])
+        b = await opener
+        assert sum(1 for c in rt.calls if c[1] == "run") == 1          # one container for both
+        # a session that fails to open doesn't stop it while another needs it ...
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["no"])
+        with pytest.raises(UserError):
+            await opener
+        await _settle(engine)
+        assert rt.running
+    engine.close_session(a["id"])
+    await _settle(engine)
+    assert rt.running                                                   # b still open
+    engine.close_session(b["id"])
+    await _settle(engine)
+    assert not rt.running and engine.guacd.runtime is None
+    log = (engine.case.dir / "events.jsonl").read_text()
+    assert '"action": "start"' in log and '"action": "stop"' in log
+
+
+async def test_guacd_container_stops_when_rdp_fails_to_open_and_on_quit(container_env):
+    engine, _, rt = container_env
+    server, port = await fake_rdp_server("legacy")
+    engine.cfg.hosts.append(Host("old", "rdp", "127.0.0.1", port=port, user="bob", auth="password"))
+    async with server:
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["no"])               # legacy security declined: no session
+        with pytest.raises(UserError):
+            await opener
+        await _settle(engine)
+        assert not rt.running                              # started for nothing, so stopped again
+        creds.set_secret("host", "old", "pw")
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["yes"])
+        await opener
+        assert rt.running
+    await engine.stop()                                    # the app quits with the session open
+    assert not rt.running
+
+
+async def test_guacd_container_failures_are_explained(container_env, monkeypatch):
+    engine, _, rt = container_env
+    engine.cfg.hosts.append(Host("old", "rdp", "127.0.0.1", port=3389, user="bob", auth="password"))
+    rt.run_error = "rootlessport listen tcp 127.0.0.1:4822: bind: address already in use"
+    with pytest.raises(UserError, match="Couldn't start guacd's container: .*address already in use"):
+        await engine.open_rdp("old")
+    rt.run_error = ""
+
+    async def never(timeout=3):
+        return False
+    monkeypatch.setattr(guac, "probe", never)
+    monkeypatch.setattr(guac, "CONTAINER_START_WAIT", 0.5)
+    with pytest.raises(UserError, match="didn't answer"):
+        await engine.open_rdp("old")
+    assert not rt.running                                  # not left behind
+    rt.image = False                                       # no image: the download instructions
+    monkeypatch.setattr(guac, "install_help", lambda: ("guacd isn't installed.", ["podman pull x"]))
+    with pytest.raises(UserError, match="isn't installed"):
+        await engine.open_rdp("old")
 
 
 def test_os_release_parsing(tmp_path):

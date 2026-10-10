@@ -27,7 +27,11 @@ HANDSHAKE_TIMEOUT = 20
 # Always this machine, on guacd's default port. The link to guacd is plain, unauthenticated
 # TCP carrying the password and the whole session, so it is never made over a network.
 GUACD = ("127.0.0.1", 4822)
-GUACD_IMAGE = "docker.io/guacamole/guacd:1.6.0"
+# Upstream's 1.6.0 image, pinned to its multi-architecture manifest list
+GUACD_IMAGE = ("docker.io/guacamole/guacd:1.6.0"
+               "@sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfba1edea39eed75524e78ef4b08f4f")
+CONTAINER = "datoolkit-guacd"     # the container DA Toolkit runs while an RDP session is open
+CONTAINER_START_WAIT = 20         # seconds for guacd to answer once the container runs
 GUACD_BINARIES = ("/usr/sbin/guacd", "/usr/bin/guacd", "/usr/local/sbin/guacd")
 
 
@@ -52,21 +56,101 @@ def _which(name: str) -> str | None:
     return shutil.which(name, path=os.environ.get("PATH", "") + ":/usr/bin:/usr/sbin:/bin")
 
 
-def _stopped_container(which) -> str | None:
-    """The runtime holding a guacd container from an earlier install_help, if there is one."""
-    for runtime in ("podman", "docker"):
-        if which(runtime):
-            try:
-                if subprocess.run([runtime, "container", "inspect", "guacd"], capture_output=True,
-                                  timeout=5, env=host_env()).returncode == 0:
-                    return runtime
-            except (OSError, subprocess.SubprocessError):
-                pass
-    return None
+def _run(argv: list[str], timeout: float = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=host_env())
 
 
-def install_help(release: dict[str, str] | None = None, which=_which, installed: bool | None = None,
-                 container=_stopped_container) -> tuple[str, list[str]]:
+def container_runtime(which=_which) -> str | None:
+    return next((r for r in ("podman", "docker") if which(r)), None)
+
+
+def image_present(runtime: str, run=_run) -> bool:
+    argv = ([runtime, "image", "exists", GUACD_IMAGE] if runtime == "podman"
+            else [runtime, "image", "inspect", GUACD_IMAGE])
+    try:
+        return run(argv, 15).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+class GuacdContainer:
+    """guacd in upstream's container, where the distribution doesn't package it. DA Toolkit
+    runs it only while an RDP session is open: start() when one opens and guacd isn't
+    answering, stop() when the last one closes and when the app quits. It is published on
+    loopback only, since guacd's link is unencrypted. Never pulls: the technician downloads
+    the pinned image once (install_help says how)."""
+
+    def __init__(self, which=_which, run=_run):
+        self._which, self._run = which, run
+        self.runtime: str | None = None      # set while a container we run is up
+
+    def usable(self) -> str | None:
+        """The runtime that can start it now (installed, image present), or None."""
+        runtime = container_runtime(self._which)
+        return runtime if runtime and image_present(runtime, self._run) else None
+
+    def adopt(self) -> None:
+        """guacd is already answering: if it's our container, left by a run that didn't end
+        cleanly, take it over so it's stopped like one we started."""
+        if self.runtime:
+            return
+        runtime = container_runtime(self._which)
+        if not runtime:
+            return
+        try:
+            r = self._run([runtime, "container", "inspect", "--format", "{{.State.Running}}", CONTAINER], 15)
+        except (OSError, subprocess.SubprocessError):
+            return
+        if r.returncode == 0 and r.stdout.strip() == "true":
+            self.runtime = runtime
+
+    def start(self) -> None:
+        """Run the container (removing a stopped leftover first). Raises GuacError."""
+        runtime = self.usable()
+        if not runtime:
+            raise GuacError("no container runtime with the guacd image")
+        try:
+            self._run([runtime, "rm", "-f", CONTAINER], 30)
+            r = self._run([runtime, "run", "-d", "--rm", "--name", CONTAINER,
+                           "-p", f"{GUACD[0]}:{GUACD[1]}:4822", GUACD_IMAGE], 60)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise GuacError(str(e)) from e
+        if r.returncode != 0:
+            lines = (r.stderr or r.stdout).strip().splitlines()
+            raise GuacError(lines[-1] if lines else f"{runtime} run failed")
+        self.runtime = runtime
+
+    def stop(self) -> None:
+        if not self.runtime:
+            return
+        runtime, self.runtime = self.runtime, None
+        try:   # guacd keeps no state: kill it straight away (--rm removes it)
+            self._run([runtime, "rm", "-f"] + (["-t", "0"] if runtime == "podman" else []) + [CONTAINER], 30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+async def probe(timeout: float = 3) -> bool:
+    """Whether guacd answers the protocol, not just the port: rootless podman's port
+    forwarder accepts connections before guacd inside the container is listening."""
+    try:
+        reader, writer = await connect(timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    try:
+        writer.write(encode("select", "rdp").encode())
+        await writer.drain()
+        ins = await asyncio.wait_for(_read_instruction(reader, Parser(), codecs.getincrementaldecoder("utf-8")(), []),
+                                     timeout)
+        return ins[0] == "args"
+    except (OSError, asyncio.TimeoutError, GuacError):
+        return False
+    finally:
+        writer.close()
+
+
+def install_help(release: dict[str, str] | None = None, which=_which,
+                 installed: bool | None = None) -> tuple[str, list[str]]:
     """What to tell a technician whose guacd isn't answering: a sentence and the commands to
     run, for this distribution. guacd must listen on 127.0.0.1:4822 (its default)."""
     if installed is None:
@@ -74,9 +158,6 @@ def install_help(release: dict[str, str] | None = None, which=_which, installed:
     if installed:
         return ("guacd is installed but isn't running on 127.0.0.1:4822. Start it, and have it "
                 "start at boot:", ["sudo systemctl enable --now guacd"])
-    runtime = container(which)
-    if runtime:
-        return "guacd's container isn't running. Start it:", [f"{runtime} start guacd"]
     release = os_release() if release is None else release
     ids = {release.get("ID", "")} | set(release.get("ID_LIKE", "").split())
     if ids & {"ubuntu", "linuxmint"}:
@@ -100,14 +181,14 @@ def install_help(release: dict[str, str] | None = None, which=_which, installed:
 
 
 def _container_help(why: str, which, install_podman: str) -> tuple[str, list[str]]:
-    """Run upstream's guacd image, published on loopback only (guacd's link is unencrypted)."""
-    run = f"run -d --name guacd --restart unless-stopped -p 127.0.0.1:4822:4822 {GUACD_IMAGE}"
-    text = f"{why} Run Apache Guacamole's own guacd container, reachable only from this machine:"
-    if which("podman") or not which("docker"):
-        # rootless podman restarts --restart containers only through this user service
-        cmds = [f"podman {run}", "systemctl --user enable podman-restart.service"]
-        return text, ([install_podman] if install_podman and not which("podman") else []) + cmds
-    return text, [f"docker {run}"]
+    """Download upstream's guacd image once; DA Toolkit runs it while an RDP session is open."""
+    text = (f"{why} DA Toolkit can run Apache Guacamole's own guacd container for you, only while an "
+            "RDP session is open and reachable only from this machine. Download it once, then open "
+            "the RDP host again:")
+    runtime = container_runtime(which)
+    if runtime == "docker":
+        return text, [f"docker pull {GUACD_IMAGE}"]
+    return text, ([install_podman] if install_podman and not runtime else []) + [f"podman pull {GUACD_IMAGE}"]
 
 
 async def connect(timeout: float) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:

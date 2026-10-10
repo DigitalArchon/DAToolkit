@@ -34,3 +34,13 @@ def memory_keyring(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     yield backend
     keyring.set_keyring(old)
+
+
+@pytest.fixture(autouse=True)
+def no_real_containers(monkeypatch):
+    """Never find the real podman or docker: the guacd container code would start or remove
+    containers on this machine. Tests that pass their own `which` still see their fakes."""
+    from datoolkit.sessions import guac
+
+    real = guac.container_runtime
+    monkeypatch.setattr(guac, "container_runtime", lambda which=guac._which: None if which is guac._which else real(which))
