@@ -20,7 +20,7 @@ CMD = r"(?:^|[;&|(]\s*|\bsudo\s+(?:-\S+\s+)*)"
 DISRUPTIVE: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\brm\s+(-[a-z]*[rf][a-z]*\s+)+", _I), "recursive/forced delete"),
     (re.compile(r"\b(mkfs(\.\w+)?|wipefs|fdisk|sfdisk|parted|sgdisk|gdisk|blkdiscard)\b"), "disk/partition tool"),
-    (re.compile(r"\bdd\b.*\bof=", _I), "dd writing to a target"),
+    (re.compile(r"\bdd\b(?=.*\bof=)(?!.*\bof=/dev/null\b)", _I), "dd writing to a target"),
     (re.compile(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)"), "write to block device"),
     (re.compile(CMD + r"(shutdown|reboot|poweroff|halt)\b", re.M), "shutdown/reboot"),
     (re.compile(CMD + r"(telinit|init)\s+[06]\b", re.M), "runlevel change"),
@@ -89,19 +89,30 @@ MODIFYING: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bdocker\s+(rm|rmi|stop|restart|kill|run|start|pull|compose\s+(up|down|restart))\b"), "container change"),
     (re.compile(r"\bkubectl\s+(apply|create|scale|rollout|patch|edit|label|annotate|cordon|drain)\b"), "kubernetes change"),
     (re.compile(r"\b(ip\s+(addr|route|link)\s+(add|del|change|replace|set|flush)|ifdown|ifup|nmcli\s+(con|connection|dev|device)\s+(up|down|modify|delete|add))\b"), "network change"),
-    (re.compile(r"\b(iptables|ip6tables|nft|ufw|firewall-cmd)\b"), "firewall"),
-    (re.compile(r"\b(mount|umount|swapoff|swapon)\b"), "mount change"),
+    # firewall tools, except when they only list rules
+    (re.compile(r"\bip6?tables\b(?!-save\b)(?![^|;&\n]*\s(-[a-zA-Z]*[LS][a-zA-Z]*|--list(-rules)?)\b)"
+                r"|\bnft\b(?!\s+(-\S+\s+)*list\b)|\bufw\b(?!\s+(status|show|app\s+list)\b)"
+                r"|\bfirewall-cmd\b(?!(\s+--(zone=\S+|permanent))*\s+--(state|get-\S+|list-\S+|query-\S+|info-\S+)\b)"),
+     "firewall"),
+    # mount alone, or with only -t/-l, lists what is mounted
+    (re.compile(CMD + r"mount\b(?!\s*($|[|;&)]))(?!(\s+(-l|-t\s+\S+))+\s*($|[|;&)]))", re.M), "mount change"),
+    (re.compile(r"\b(umount|swapoff|swapon)\b"), "mount change"),
     (re.compile(r"\bsysctl\s+-w\b"), "kernel parameter change"),
     (re.compile(CMD + r"eval\b", re.M), "eval"),
     (re.compile(r"\b(python[23]?|perl|ruby|node|php)\s+-[ce]\s", _I), "inline interpreter code"),
     (re.compile(CMD + r"(su|sudo\s+-i|sudo\s+su)\b(?!\S)", re.M), "switch user"),
     (re.compile(r"\bkill\b"), "signal process"),
     # PowerShell / Windows
-    (re.compile(r"\b(Set|New|Add|Remove|Enable|Disable|Start|Install|Uninstall|Update|Rename|Move|Copy|Clear|Reset|Register|Unregister|Grant|Revoke|Restore)-[A-Za-z]+\b", _I), "state-changing cmdlet"),
+    (re.compile(r"\b(?!(New-(Object|TimeSpan|Guid|PSSessionOption|CimSessionOption)|Start-Sleep|Clear-(Host|Variable)|"
+                r"Set-(Variable|Location|StrictMode)|Add-Member)\b)"
+                r"(Set|New|Add|Remove|Enable|Disable|Start|Install|Uninstall|Update|Rename|Move|Copy|Clear|Reset|Register|Unregister|Grant|Revoke|Restore)-[A-Za-z]+\b", _I), "state-changing cmdlet"),
     (re.compile(r"\breg\s+(add|import|load|unload|restore)\b", _I), "registry change"),
     (re.compile(r"\bnetsh\b.*\b(set|add|delete|reset)\b", _I), "network change"),
     (re.compile(r"\bipconfig\s+/(release|renew|flushdns|registerdns)\b", _I), "network change"),
-    (re.compile(r"\b(sc(\.exe)?\s+(config|stop|start|delete|create)|net\s+(start|user|localgroup|share))\b", _I), "service/account change"),
+    (re.compile(r"\bsc(\.exe)?\s+(config|stop|start|delete|create)\b|\bnet\s+start\s+[^\s|;&]", _I), "service/account change"),
+    # net user/localgroup/share on their own only list; these switches, a share=path or a password change things
+    (re.compile(r"\bnet\s+(user|localgroup|share)\b[^|;&\n]*(/(add|delete|del|active|expires|passwordreq|passwordchg|times|grant|remark|unlimited|users|cache)\b|\s\S+=)"
+                r"|\bnet\s+user\s+[^/\s|;&]\S*\s+[^/\s|;&]", _I), "service/account change"),
     (re.compile(r"\b(gpupdate|DISM|sfc\s+/scannow|chkdsk\s+.*/[fr])\b", _I), "system repair"),
     # Network devices
     (re.compile(r"^\s*(conf(igure)?(\s+t(erminal)?)?|config\s+system)\b", _I | re.M), "configuration mode"),

@@ -186,3 +186,32 @@ def test_writes_still_modifying(cmd):
 def test_quoted_command_still_disruptive_when_a_shell_runs_it():
     assert classify("ssh host 'sudo reboot'")[0] == "disruptive"
     assert classify("bash -c 'ls; shutdown -h now'")[0] == "disruptive"
+
+
+@pytest.mark.parametrize("cmd", [
+    "dd if=/mnt/nas/film.mkv of=/dev/null bs=4M count=250 iflag=direct status=progress",
+    "mount -t cifs; grep -i cifs /etc/fstab", "mount | grep nas", "mount", "grep mount /etc/fstab",
+    "sudo iptables -S", "iptables -nvL INPUT --line-numbers", "sudo iptables-save | head -50",
+    "(sudo iptables -S 2>/dev/null; sudo nft list ruleset 2>/dev/null) | head -200", "nft -a list ruleset",
+    "ufw status verbose", "firewall-cmd --list-all", "firewall-cmd --permanent --zone=public --list-ports",
+    "net share | Select-String 'SYSVOL|NETLOGON'", "net user bob /domain", "net localgroup Administrators",
+    "net start | findstr /i spool", "net user",
+    "$p = New-Object Net.NetworkInformation.Ping; $p.Send('10.0.0.1', 300)", "Start-Sleep -Seconds 5; Get-Date",
+    "Get-Service W32Time | Format-List; Clear-Host",
+])
+def test_listing_forms_are_read_only(cmd):
+    assert classify(cmd) == ("read_only", [])
+
+
+@pytest.mark.parametrize("cmd,level", [
+    ("dd if=/dev/zero of=/tmp/x bs=1M count=10", "disruptive"), ("sudo mount -t cifs //nas/media /mnt/nas -o ro", "modifying"),
+    ("mount -o remount,rw /", "modifying"), ("sudo mount -a", "modifying"), ("iptables -A INPUT -p tcp --dport 22 -j ACCEPT", "modifying"),
+    ("iptables -S; iptables -I INPUT 1 -s 1.2.3.4 -j ACCEPT", "modifying"), ("nft add rule inet filter input tcp dport 22 accept", "modifying"),
+    ("ufw allow 22/tcp", "modifying"), ("firewall-cmd --permanent --add-port=8443/tcp", "modifying"), ("firewall-cmd --reload", "modifying"),
+    ("net user bob P4ssw0rd /add", "modifying"), ("net user bob *", "modifying"), ("net localgroup Administrators bob /add", "modifying"),
+    ("net share docs=C:\\docs /grant:everyone,read", "modifying"), ("net start spooler", "modifying"),
+    ("New-Item -ItemType File C:\\x.txt", "modifying"), ("Start-Service Spooler", "modifying"),
+    ("New-Object -ComObject Shell.Application; Set-ItemProperty HKLM:\\x -Name y -Value 1", "modifying"),
+])
+def test_changing_forms_still_raise(cmd, level):
+    assert classify(cmd)[0] == level
