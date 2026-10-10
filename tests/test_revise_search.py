@@ -110,10 +110,11 @@ async def test_nudge_happens_only_once(env):  # noqa: F811
     engine, fake, _ = env
     setup(engine)
     hyp = lambda: multi_tool_stream([("update_hypotheses", {"items": []})], text="")  # noqa: E731
-    fake.responses += [hyp(), hyp()]
+    fake.responses += [hyp(), hyp(), hyp()]
     engine.send("x")
     await wait_turn(engine)
-    assert len(fake.requests) == 2
+    # a silent board update gets one more round with the tools, then the nudge once, then the turn ends
+    assert len(fake.requests) == 3 and [r.get("tool_choice") for r in fake.requests] == ["auto", "auto", "none"]
 
 
 # ---------------------------------------------------------------- web search
@@ -448,3 +449,18 @@ async def test_a_hypotheses_only_round_gets_another_round(env):  # noqa: F811
     await wait_turn(engine)
     assert len(fake.requests) == 2 and fake.requests[1]["messages"][-1]["role"] in ("tool", "user")
     assert engine.chat[-1]["proposals"] == [1] and engine.chat[-1]["hyp_changes"]
+
+
+async def test_an_empty_words_only_round_is_asked_again_with_tools(env):  # noqa: F811
+    engine, fake, _ = env
+    sid = setup(engine)
+    fake.responses += [
+        multi_tool_stream([("propose_commands", {"items": [
+            {"session_id": sid, "command": "uptime", "purpose": "load", "risk": "read_only"}]})], text=""),
+        sse(({}, "stop")),                                                    # words only: nothing at all
+        sse(({"role": "assistant", "content": "Run #1 for the load."}, "stop")),
+    ]
+    engine.send("slow")
+    await wait_turn(engine)
+    assert [r.get("tool_choice") for r in fake.requests] == ["auto", "none", "auto"]
+    assert engine.chat[-1]["text"] == "Run #1 for the load." and engine.chat[-1]["proposals"] == [1]

@@ -91,7 +91,7 @@ _PROMISE = re.compile(
     r"|\blet['’]?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
     r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
     r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
-    r"|\bthe (fix|next step|change) (is|would be|will be) to\b"
+    r"|\bthe (fix|next step|change) (is|would be|will be) (to|one|a single|simple|this)\b"
     r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b", re.I | re.M)
 _ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready queued\b|\bpending\b|\bqueued (above|earlier)\b",
                              re.I)
@@ -2560,7 +2560,7 @@ class Engine:
                 entry["tee_attested"] = tee[1]["summary"]
             reply_ids: list[str] = []
             turn: dict = {}
-            nudged = promise_nudged = text_only = hyp_continued = False
+            nudged = promise_nudged = text_only = hyp_continued = text_only_retried = False
             vision = self.vision_status()
             ttl = self._cache_ttl(prov, model, tier)
             for _ in range(MAX_TOOL_ROUNDS):
@@ -2597,6 +2597,16 @@ class Engine:
                         raise
                     in_flight = None
                     continue                     # the same round again, without that setting
+                if text_only and not text_only_retried and not result.tool_calls and not result.content.strip():
+                    # live, Qwen 3.8 Max answered the words-only round with nothing at all (its tool call,
+                    # presumably, dropped by the route): ask once more with the tools back
+                    self._log_request("chat", model, tier, system, sent, {
+                        "content": "", "reasoning": entry["reasoning"][round_reasoning:], "tool_calls": [],
+                        "finish_reason": result.finish_reason, "usage": result.usage}, conv_index=start)
+                    self._req_conv_len = len(self.conv)
+                    self.log("text_only_empty")
+                    text_only, text_only_retried, in_flight = False, True, None
+                    continue
                 if not result.tool_calls and result.content:
                     clean, calls = textcalls.extract(result.content)
                     if calls:          # tool calls written as text (seen from Qwen 3.8 27B): make them
@@ -2614,9 +2624,9 @@ class Engine:
                 in_flight = None
                 retry = await self._record_assistant(result, entry, turn)
                 said = entry["text"][round_text:].strip()
-                if (not retry and not hyp_continued and said and result.tool_calls
+                if (not retry and not hyp_continued and result.tool_calls
                         and all(c.name == HYPOTHESES_TOOL for c in result.tool_calls)
-                        and (not re.search(r"[.!?:)\]`\"'’]$", said) or promises_commands(said))):
+                        and (not said or not re.search(r"[.!?:)\]`\"'’]$", said) or promises_commands(said))):
                     # the board update is done at once, so the model carries on: live, Kimi K2.7 Code
                     # planned "update_hypotheses and propose commands", made only the first call, and
                     # its message stopped mid-sentence with nothing queued
