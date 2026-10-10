@@ -155,3 +155,28 @@ async def test_raising_a_case_on_disk(env):  # noqa: F811
     engine.edit_case(old, "old", sensitivity="sovereign")
     assert {c["id"]: c["sensitivity"] for c in engine.list_cases()}[old] == "sovereign"
     assert engine.case.sensitivity == "open"
+
+
+# ---------------------------------------------------------------- setting up before any case
+
+async def test_setup_works_without_a_case(env):  # noqa: F811
+    """The start-a-case dialog can be closed: settings, providers, models and hosts must work
+    with no case, and nothing about a case is saved until one is started."""
+    engine, _, _ = env
+    app: FastAPI = create_app("main", lambda emit: engine)
+    app.state.engine = engine
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        m = {"x-token": "main"}
+        assert (await c.get("/api/state", headers=m)).json()["case"] is None
+        r = await c.post("/api/providers", json={"provider": {"name": "Local", "base_url": "http://127.0.0.1:11434/v1"}}, headers=m)
+        assert r.status_code == 200
+        r = await c.post("/api/hosts", json={"host": {"name": "fs01", "kind": "ssh", "host": "fs01.lan", "user": "bob"}}, headers=m)
+        assert r.status_code == 200 and engine.cfg.host("fs01")
+        assert (await c.post("/api/settings", json={"font_size": 15}, headers=m)).status_code == 200
+        assert (await c.post("/api/model", json={"provider": "Fake", "model": "anthropic/claude-opus-5.5"}, headers=m)).status_code == 200
+        # what needs a case says so (the page offers to start one on this exact message)
+        for path, body in (("/api/send", {"message": "hi"}), ("/api/sessions", {"kind": "local"})):
+            r = await c.post(path, json=body, headers=m)
+            assert r.status_code == 400 and r.json()["error"] == "Start a case first."
+        assert (await c.get("/api/cases", headers=m)).json()["cases"] == []
+    assert engine.case is None

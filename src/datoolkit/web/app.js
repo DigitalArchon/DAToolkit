@@ -84,9 +84,11 @@ function toast(text, kind = "info", ms = 6000) {
   setTimeout(() => el.remove(), ms);
 }
 
-// An error that comes with commands to fix it stays up, so they can be copied.
+// An action that needs a case, tried without one, offers to start one; an error that comes
+// with commands to fix it stays up, so they can be copied.
 function showError(e) {
-  if (e.commands?.length) fixModal(e.message, e.commands);
+  if (e.message === "Start a case first." && !S.state?.case) openCaseModal(false, e.message);
+  else if (e.commands?.length) fixModal(e.message, e.commands);
   else toast(e.message, "error");
 }
 
@@ -431,7 +433,8 @@ function renderAll() {
   renderQueue();
   renderBusy();
   for (const p of S.state.prompts || []) if (!S.promptModals[p.id]) showCredentialPrompt(p);
-  if (!S.state.case && !document.querySelector(".case-modal")) openCaseModal(true);
+  // offered once when the app opens; closing it leaves the app usable for setting up
+  if (!S.state.case && !S.caseOffered && !document.querySelector(".case-modal")) { S.caseOffered = true; openCaseModal(true); }
 }
 
 // ------------------------------------------------------------------ hypothesis board
@@ -707,7 +710,11 @@ function renderChat(scroll) {
   }
   log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
   if (S.streaming) log.append(streamingBubble());
-  if (!chat.length && !S.streaming) {
+  if (!S.state.case) {
+    log.append(h("div", { class: "empty" },
+      h("p", {}, "No case is open. Settings, providers, models and hosts work without one; the conversation, sessions and the command queue belong to a case."),
+      h("button", { class: "primary", onclick: () => openCaseModal(false) }, "Start or open a case")));
+  } else if (!chat.length && !S.streaming) {
     log.append(h("div", { class: "empty" },
       "Describe the problem as you would to a colleague. The AI will talk it through with you, ask what it needs to know, and propose commands; nothing runs until you click Run."));
   }
@@ -853,6 +860,7 @@ async function sendChat(ev) {
   ev?.preventDefault();
   const message = $("#chat-input").value.trim();
   if (!message && !pendingImages.length) return;
+  if (!S.state.case) return openCaseModal(false, "Start a case to send this; your message stays in the chat box.");
   await guarded(async () => {
     await api("POST", "/api/send", { message, images: pendingImages.slice() });
     composerSent(message);
@@ -2338,11 +2346,16 @@ function editCaseModal(c) {
   });
 }
 
-function openCaseModal(first) {
+// first: offered at startup; closing it leaves the app usable without a case. reason: why
+// it was opened instead of doing what was asked.
+function openCaseModal(first, reason = "") {
+  if (document.querySelector(".case-modal")) return;
   const st = S.state;
   const name = h("input", { type: "text", placeholder: "e.g. TKT-1042 Acme file server slow" });
   const notes = h("textarea", { rows: 3, placeholder: "Site/client notes for the AI (optional): environment, known quirks, what's been tried…" });
   const body = h("div", { style: "display:flex;flex-direction:column;gap:10px", class: "case-modal" },
+    reason ? h("div", { class: "warnbox" }, reason) : null,
+    first ? h("div", { class: "muted small" }, "Setting up first? Choose Not now: Settings, providers, models and hosts work without a case. Start one later from “No case” in the top bar.") : null,
     h("label", { class: "field" }, h("span", {}, "Case name / ticket"), name),
     h("div", { class: "field" }, h("span", {}, "Sensitivity"), sensitivityCards("open")),
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
@@ -2420,15 +2433,14 @@ function openCaseModal(first) {
     }
   });
   m = modal({
-    title: first ? "Start a case" : "New case",
-    dismissable: !first,
+    title: first || !st.case ? "Start a case" : "New case",
     body,
-    buttons: [first ? null : { label: "Cancel" }, {
+    buttons: [{ label: first ? "Not now" : "Cancel" }, {
       label: "Start case", kind: "primary", onClick: async () => {
         const sensitivity = body.querySelector("input[type=radio]:checked").value;
         await api("POST", "/api/case", { name: name.value.trim(), sensitivity, notes: notes.value.trim() });
       },
-    }].filter(Boolean),
+    }],
   });
   name.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); m.box.querySelector(".buttons button.primary").click(); }
@@ -3238,7 +3250,7 @@ function init() {
   $("#context-menu").addEventListener("click", (e) => { const a = e.target.closest("button")?.dataset.act; if (a) doExport(a); });
   $("#new-session-btn").addEventListener("click", (e) => {
     e.stopPropagation();
-    if (!S.state.case) return toast("Start a case first.");
+    if (!S.state.case) return openCaseModal(false, "Sessions belong to a case: start one first.");
     renderSessionMenu();
     toggleMenu($("#session-menu"));
   });

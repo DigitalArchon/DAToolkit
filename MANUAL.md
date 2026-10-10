@@ -27,7 +27,10 @@ run, and `--no-open` just prints the local URL. In the browser, use **Quit** in 
 DA Toolkit: closing the tab leaves it running. The app window's clipboard and Save dialog are
 the system's own; in the browser they're the browser's.
 
-1. **Start a case.** Give it a name or ticket number and pick a sensitivity:
+1. **Start a case.** The app offers this when it opens. Choose **Not now** to set it up
+   first: settings, providers, models and hosts work without a case, and nothing is saved as a
+   case until you start one (from **No case** in the top bar, or by sending a message or
+   opening a session, which ask for one). Give it a name or ticket number and pick a sensitivity:
 
    | Sensitivity    | Allowed model tiers        | Use for                              |
    |----------------|----------------------------|--------------------------------------|

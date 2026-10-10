@@ -88,7 +88,8 @@ it grants terminal access.
 
 ## Quick start
 
-1. **Start a case**: give it a name or ticket number and pick a sensitivity.
+1. **Start a case**: give it a name or ticket number and pick a sensitivity. To set things up
+   first, choose **Not now**: settings, providers, models and hosts don't need a case.
 2. **Add a model** under Settings → AI providers. To try DA Toolkit without an API key, add
    the **training provider**: a scripted model that walks through a canned case (the one in
    the screenshot) with nothing leaving the machine.
