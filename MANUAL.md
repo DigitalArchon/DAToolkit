@@ -65,7 +65,14 @@ the system's own; in the browser they're the browser's.
   **show done** to see them) and **Restore** puts one back. The AI sees the queue, so it
   knows what is still pending and what has run but not been sent.
 - If a model replies with commands but no message (thinking models sometimes go straight from
-  reasoning to tool calls), DA Toolkit asks it once for the message.
+  reasoning to tool calls), DA Toolkit asks it once for the message, offering it no tools that
+  time so it can only write.
+- If a model's message announces commands ("I'll queue a few checks", "The fix is to turn on…",
+  "Let's get a baseline first") but it queued nothing, or asks you to run items that are no
+  longer pending (skipped, withdrawn or already run), DA Toolkit asks it once to queue them or
+  correct itself. A model that writes its tool call into the message as text (some smaller
+  and local models print `<tool_call>…` markup) has it read back as a real call; the markup is
+  taken out of the message and the commands go to the queue like any other.
 - **Web search**: the AI can search the web through NanoGPT (Perplexity by default; Valyu,
   Tavily, Kagi, Linkup, Brave, Sofya, Firecrawl or Exa in Settings → General) for advisories,
   release notes and exact syntax. By default each query appears in the AI's message for you to
@@ -444,6 +451,13 @@ results and research reports the AI receives while it works are paid at the full
 in each further step of that reply, then cached with your next message. (Sonnet caches them at
 once.) The recipe list in the system prompt is always the full one, so opening a session
 doesn't throw the cached conversation away.
+
+**Model-specific instructions** (Settings → Model): text added to the end of the system prompt
+when the chat model's id contains a match you choose (case doesn't matter, so `glm` covers
+`z-ai/glm-5.3` and `private/glm-5-3`). DA Toolkit has built-in notes for models whose habits
+were measured in its model evaluation (`tools/model-eval`); the settings show them and can
+turn them off. Use your own to correct a model's habits, e.g. one that keeps describing
+commands instead of queueing them.
 
 ## Model tiers and end-to-end encryption
 
