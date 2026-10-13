@@ -195,6 +195,12 @@ the system's own; in the browser they're the browser's.
   answering; if the selected model isn't allowed at the new level, choose another. The AI
   sees the new name and notes from your next message. The case folder keeps its original
   name, and every change is recorded in the audit log.
+- **Clients.** A case can belong to a client (a customer), chosen when it starts or under
+  **✎**, from the list kept under **Settings → Clients** (or typed there and then as "New
+  client…"). The client shows beside the case name, and the case list can be filtered by it.
+  Renaming a client renames it on its cases; deleting one leaves its cases on disk but
+  belonging to no client. The point of it is what the AI may be told about earlier cases: see
+  **Distil runbook** below.
 - **Context ▾**, next to the model, shows `Context 23k / 200k`: the prompt size of the last
   request (kept with the case, so a resumed case shows it too), against the selected model's
   context window when that is known. It turns amber past the threshold in **Settings →
@@ -344,10 +350,16 @@ host, not the case: deleting a case leaves them. They live under
   **Undo last compaction** puts it back while the summary still opens the conversation;
   exchanges added since are kept.
 - **Export ▾ → Client update** writes the plain-language version of the ticket note.
-- **Export ▾ → Distil runbook** turns a solved case into `runbook.md`. When a new case's
-  first message resembles a past case, the similar cases are noted in the chat and their
-  runbooks go into the AI's context as leads. **Context ▾ → Similar past cases…** searches by
-  hand, and **Context ▾ → Open case folder** opens the case's files.
+- **Export ▾ → Distil runbook** turns a solved case into `runbook.md`. A runbook reaches the
+  AI in a later case only within one client: the new case must belong to a client and have
+  **Include this client's history** ticked, and then, when its first message resembles one of
+  that client's earlier cases of the same or a lower sensitivity (a Confidential case may use
+  Open and Confidential ones, an Open case only Open ones), those cases are noted in the chat
+  and their runbooks go into the AI's context as leads. A case with no client, or with the box
+  unticked, never gets another case's runbook, and nothing from one client's cases reaches
+  another client's. Changing the client or unticking the box drops them again. **Context ▾ →
+  Similar past cases…** is your own search across every case, on this machine only, and
+  **Context ▾ → Open case folder** opens the case's files.
 
 ### Companion view
 
@@ -699,7 +711,7 @@ collateral and NVIDIA's keys are cached for an hour.
 
 | What | Where |
 |---|---|
-| Config (no secrets) | `~/.config/datoolkit/config.toml` |
+| Config (no secrets; providers, hosts, clients, settings) | `~/.config/datoolkit/config.toml` |
 | Pinned RDP and WinRM certificates | `~/.config/datoolkit/rdp_pins.json` |
 | Companion certificate and key | `~/.config/datoolkit/companion-cert.pem`, `companion-key.pem` (0600) |
 | Secrets | OS keyring, service `datoolkit` |
@@ -713,7 +725,8 @@ it they fall back to `/tmp/datoolkit-<pid>`, where on a machine shared with othe
 someone who creates that name first stops DA Toolkit from starting, so keep
 `XDG_RUNTIME_DIR` set there.
 
-Inside a case directory: `case.json` (name, sensitivity, notes), `events.jsonl` (audit log),
+Inside a case directory: `case.json` (name, sensitivity, notes, client, whether its history is
+used), `events.jsonl` (audit log),
 `state.json` (conversation, chat and queue, rewritten on every change so the case can be
 resumed), `requests.jsonl` (every model request: prompt, messages, reasoning, reply),
 `img-N.png/jpg` (images as sent), `term-<session>.log` (transcripts), `transcript.md` and

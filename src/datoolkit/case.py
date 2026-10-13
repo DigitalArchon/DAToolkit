@@ -27,17 +27,22 @@ class Case:
     id: str = ""
     dir: Path = field(default_factory=Path)
     started: str = ""
+    # the client (customer) the case is for, one of the config's client list; "" for none
+    client: str = ""
+    # feed the AI runbooks from this client's earlier cases (of the same or a lower sensitivity)
+    history: bool = False
 
     @classmethod
-    def create(cls, name: str, sensitivity: str, notes: str = "", root: Path | None = None) -> "Case":
+    def create(cls, name: str, sensitivity: str, notes: str = "", root: Path | None = None,
+               client: str = "", history: bool = False) -> "Case":
         if sensitivity not in SENSITIVITIES:
             raise ValueError(f"Unknown sensitivity {sensitivity}")
         now = datetime.now()
         case_id = f"{now:%Y%m%d-%H%M%S}-{_slug(name)}"
         d = private_dir((root or data_dir() / "cases") / case_id)
         case = cls(name=name, sensitivity=sensitivity, notes=notes, id=case_id, dir=d,
-                   started=now.isoformat(timespec="seconds"))
-        case.log("case_started", name=name, sensitivity=sensitivity, notes=notes)
+                   started=now.isoformat(timespec="seconds"), client=client, history=bool(history))
+        case.log("case_started", name=name, sensitivity=sensitivity, notes=notes, client=client, history=bool(history))
         case.write_meta()
         return case
 
@@ -47,7 +52,8 @@ class Case:
         d = _case_dir(case_id, root)
         meta = _read_meta(d)
         return cls(name=meta["name"], sensitivity=meta["sensitivity"], notes=meta.get("notes", ""),
-                   id=case_id, dir=d, started=meta.get("started", ""))
+                   id=case_id, dir=d, started=meta.get("started", ""), client=meta.get("client", ""),
+                   history=bool(meta.get("history", False)))
 
     @staticmethod
     def list_all(root: Path | None = None) -> list[dict]:
@@ -65,6 +71,7 @@ class Case:
             state = d / "state.json"
             summary = {"id": d.name, "name": meta["name"], "sensitivity": meta["sensitivity"],
                        "notes": meta.get("notes", ""), "started": meta.get("started", ""),
+                       "client": meta.get("client", ""), "history": bool(meta.get("history", False)),
                        "resumable": state.exists(), "messages": 0}
             if state.exists():
                 try:
@@ -80,25 +87,39 @@ class Case:
         """Remove a case directory and everything in it."""
         shutil.rmtree(_case_dir(case_id, root))
 
-    def edit(self, name: str, notes: str, sensitivity: str | None = None) -> None:
-        """Rename the case, replace its notes and raise its sensitivity. Sensitivity only goes up:
-        what was sent under the old level has been sent, and a lower level would allow more models
-        to see the conversation so far. The directory keeps its original id."""
+    def edit(self, name: str, notes: str, sensitivity: str | None = None, client: str | None = None,
+             history: bool | None = None) -> None:
+        """Rename the case, replace its notes, raise its sensitivity, and change its client and
+        whether that client's history is used (None: unchanged). Sensitivity only goes up: what
+        was sent under the old level has been sent, and a lower level would allow more models to
+        see the conversation so far. The directory keeps its original id."""
         sensitivity = sensitivity or self.sensitivity
         if sensitivity not in SENSITIVITIES:
             raise ValueError(f"Unknown sensitivity {sensitivity}")
         if SENSITIVITIES.index(sensitivity) < SENSITIVITIES.index(self.sensitivity):
             raise ValueError(f"A case's sensitivity can only be raised, not lowered from {self.sensitivity}")
-        if (name, notes, sensitivity) == (self.name, self.notes, self.sensitivity):
+        client = self.client if client is None else client
+        history = self.history if history is None else bool(history)
+        if (name, notes, sensitivity, client, history) == (self.name, self.notes, self.sensitivity, self.client, self.history):
             return
-        self.log("case_edited", name=name, notes=notes, sensitivity=sensitivity,
-                 old_name=self.name, old_notes=self.notes, old_sensitivity=self.sensitivity)
-        self.name, self.notes, self.sensitivity = name, notes, sensitivity
+        self.log("case_edited", name=name, notes=notes, sensitivity=sensitivity, client=client, history=history,
+                 old_name=self.name, old_notes=self.notes, old_sensitivity=self.sensitivity, old_client=self.client,
+                 old_history=self.history)
+        self.name, self.notes, self.sensitivity, self.client, self.history = name, notes, sensitivity, client, history
+        self.write_meta()
+
+    def set_client(self, client: str) -> None:
+        """The client was renamed or deleted in the config: follow it."""
+        if client == self.client:
+            return
+        self.log("client_changed", client=client, old_client=self.client)
+        self.client = client
         self.write_meta()
 
     def write_meta(self) -> None:
         _write_json(self.dir / "case.json", {"name": self.name, "sensitivity": self.sensitivity,
-                                             "notes": self.notes, "started": self.started})
+                                             "notes": self.notes, "started": self.started,
+                                             "client": self.client, "history": self.history})
 
     def save_state(self, conv: list[dict], chat: list[dict], queue: list[dict],
                    hypotheses: list[dict] | None = None, compactions: list[dict] | None = None,
@@ -124,12 +145,13 @@ class Case:
 
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "sensitivity": self.sensitivity,
-                "notes": self.notes, "dir": str(self.dir), "started": self.started}
+                "notes": self.notes, "dir": str(self.dir), "started": self.started,
+                "client": self.client, "history": self.history}
 
     def export_markdown(self, chat: list[dict], queue: list[dict], hypotheses: list[dict] | None = None) -> Path:
         out = [f"# {self.name}", "",
                f"- Case id: `{self.id}`", f"- Started: {self.started}",
-               f"- Sensitivity: {self.sensitivity}", ""]
+               f"- Sensitivity: {self.sensitivity}"] + ([f"- Client: {self.client}"] if self.client else []) + [""]
         if self.notes:
             out += ["## Notes", "", self.notes, ""]
         out += ["## Conversation", ""]

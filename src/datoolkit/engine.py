@@ -932,11 +932,20 @@ class Engine:
 
     # ---------------------------------------------------------------- cases
 
-    def new_case(self, name: str, sensitivity: str, notes: str = "") -> None:
+    def _known_client(self, client: str) -> str:
+        """A client name as given, which must be in the config's list ("" for none)."""
+        client = " ".join(str(client or "").split())
+        if client and client not in self.cfg.clients:
+            raise UserError(f"{client} is not in the client list: add it under Settings → Clients.")
+        return client
+
+    def new_case(self, name: str, sensitivity: str, notes: str = "", client: str = "", history: bool = False) -> None:
         if self.busy:
             raise UserError("Wait for the AI to finish (or stop it) before starting a new case.")
+        client = self._known_client(client)
         self.compact_cancel()        # a summary of the old case's conversation is no use now
-        self.case = Case.create(name.strip() or "Untitled case", sensitivity, notes.strip())
+        self.case = Case.create(name.strip() or "Untitled case", sensitivity, notes.strip(), client=client,
+                                history=bool(history))
         self.queue = Queue()
         self.conv, self.chat = [], []
         self.last_usage = None
@@ -967,12 +976,16 @@ class Engine:
             self.emit("similar", cases=self.snapshot()["similar_cases"])
         return {"deleted": deleted, "errors": errors}
 
-    def edit_case(self, case_id: str, name: str, notes: str | None = None, sensitivity: str | None = None) -> dict:
-        """Rename a case, the open one or one on disk, change its notes and raise its sensitivity
-        (see Case.edit), each if given. The AI sees the new name and notes from its next request."""
+    def edit_case(self, case_id: str, name: str, notes: str | None = None, sensitivity: str | None = None,
+                  client: str | None = None, history: bool | None = None) -> dict:
+        """Rename a case, the open one or one on disk, change its notes, raise its sensitivity,
+        and change its client and whether its history is used (see Case.edit), each if given.
+        The AI sees the new name and notes from its next request."""
         name = name.strip()
         if not name:
             raise UserError("A case needs a name.")
+        if client is not None:
+            client = self._known_client(client)
         if self.case and case_id == self.case.id:
             case = self.case
         else:
@@ -986,12 +999,17 @@ class Engine:
             if self.busy:
                 raise UserError("Wait for the AI to finish (or stop it) before changing the case's sensitivity.")
             self.compact_cancel()        # a summary being written goes to a model the new level may not allow
+        old_client, old_history = case.client, case.history
         try:
-            case.edit(name, case.notes if notes is None else notes.strip(), sensitivity or None)
+            case.edit(name, case.notes if notes is None else notes.strip(), sensitivity or None, client, history)
         except ValueError as e:
             raise UserError(str(e)) from e
         except OSError as e:
             raise UserError(f"Could not save case {case_id}: {e}") from e
+        if case is self.case and self._similar and (case.client != old_client or (old_history and not case.history)):
+            # runbooks of another client, or no longer wanted: out of the AI's context from the next request
+            self._similar, self._runbooks = [], ""
+            self.emit("similar", cases=[])
         if raising and case is self.case:
             self.chat.append({"kind": "note", "text": f"Sensitivity raised from {old_sens.upper()} to {case.sensitivity.upper()} "
                               f"{datetime.now():%Y-%m-%d %H:%M}. What was sent before stays with the models it was sent to."})
@@ -1006,7 +1024,68 @@ class Engine:
             self.emit("similar", cases=self.snapshot()["similar_cases"])
         if case is self.case:
             self._changed()
-        return {"id": case.id, "name": case.name, "notes": case.notes, "sensitivity": case.sensitivity}
+        return {"id": case.id, "name": case.name, "notes": case.notes, "sensitivity": case.sensitivity,
+                "client": case.client, "history": case.history}
+
+    # ---------------------------------------------------------------- clients
+
+    def add_client(self, name: str) -> None:
+        name = " ".join(str(name or "").split())[:80]
+        if not name:
+            raise UserError("Give the client a name.")
+        if name in self.cfg.clients:
+            raise UserError(f"{name} is already in the client list.")
+        self.cfg.clients.append(name)
+        self._save_config(self.cfg)
+        self.log("client_added", client=name)
+        self._changed()
+
+    def _cases_of(self, client: str) -> list[Case]:
+        """Every case on disk that belongs to `client`, the open one as itself."""
+        out = []
+        for c in Case.list_all():
+            if c.get("client", "") != client:
+                continue
+            try:
+                out.append(self.case if self.case and c["id"] == self.case.id else Case.load(c["id"]))
+            except (OSError, ValueError):
+                continue
+        return out
+
+    def rename_client(self, old: str, new: str) -> int:
+        """Rename a client; its cases follow it (their case.json is updated). Returns how many."""
+        new = " ".join(str(new or "").split())[:80]
+        if old not in self.cfg.clients:
+            raise UserError(f"Unknown client {old}")
+        if not new:
+            raise UserError("Give the client a name.")
+        if new != old and new in self.cfg.clients:
+            raise UserError(f"{new} is already in the client list.")
+        cases = self._cases_of(old)
+        self.cfg.clients[self.cfg.clients.index(old)] = new
+        for case in cases:
+            case.set_client(new)
+        self._save_config(self.cfg)
+        self.log("client_renamed", old=old, client=new, cases=len(cases))
+        self._changed()
+        return len(cases)
+
+    def delete_client(self, name: str) -> int:
+        """Remove a client from the list; its cases stay but belong to no client (so none of them
+        feeds a runbook to any case again). Returns how many cases that was."""
+        if name not in self.cfg.clients:
+            raise UserError(f"Unknown client {name}")
+        cases = self._cases_of(name)
+        self.cfg.clients.remove(name)
+        for case in cases:
+            case.set_client("")
+        if self.case and self.case in cases and self._similar:
+            self._similar, self._runbooks = [], ""
+            self.emit("similar", cases=[])
+        self._save_config(self.cfg)
+        self.log("client_deleted", client=name, cases=len(cases))
+        self._changed()
+        return len(cases)
 
     def open_case(self, case_id: str) -> None:
         """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
@@ -2405,8 +2484,9 @@ class Engine:
                        cached_at=hit["ts"])
                 self.log("research", task=task, brief=brief, status="cached", model=hit.get("model", ""))
                 return (f"Cached research report from {datetime.fromtimestamp(hit['ts']):%Y-%m-%d} by {hit.get('model')}, "
-                        f"for the brief: {hit['brief']!r}. If it doesn't answer your question, or may be out of date, "
-                        "call research again with fresh: true.\n\n" + self._report_text(hit["report"]))
+                        "kept on this machine from an earlier research on the same product, version and question. If it "
+                        "doesn't answer your question, or may be out of date, call research again with fresh: true.\n\n"
+                        + self._report_text(hit["report"]))
         try:
             prov, model, tier = await self._research_target()
         except UserError as e:
@@ -2677,17 +2757,25 @@ class Engine:
         return out
 
     async def _find_similar(self, message: str) -> None:
-        """Past cases like this one, for their runbooks (searched on a worker thread: every
-        case's files are read)."""
+        """Past cases like this one, for their runbooks in the system prompt. Only a case that
+        belongs to a client and has "include history" ticked gets any, and only from that
+        client's cases of the same or a lower sensitivity: nothing of one client's cases ever
+        reaches another client's, and nothing told to a private model reaches a less private
+        one. Searched on a worker thread: every case's files are read."""
+        case = self.case
+        self._similar, self._runbooks = [], ""
+        if not case or not case.client or not case.history:
+            return
         try:
-            hits = await asyncio.to_thread(search.search, message, exclude_id=self.case.id if self.case else "")
+            hits = await asyncio.to_thread(search.search, message, exclude_id=case.id, client=case.client,
+                                           max_sensitivity=case.sensitivity)
         except OSError:
             hits = []
         self._similar = hits
         self._runbooks = search.runbook_context(hits)
         if hits:
             names = ", ".join(f"{h['name']} ({h['started'][:10]})" for h in hits[:3])
-            self.chat.append({"kind": "note", "text": f"Similar past cases: {names}. "
+            self.chat.append({"kind": "note", "text": f"Similar past cases of {case.client}: {names}. "
                               + ("Their runbooks are in the AI's context." if self._runbooks else "No runbooks were distilled from them.")})
             self.log("similar_cases", ids=[h["id"] for h in hits])
             self.emit("chat", entry=self.chat[-1])

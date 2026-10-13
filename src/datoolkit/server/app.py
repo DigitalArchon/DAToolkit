@@ -328,8 +328,22 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/case")
     async def new_case(body: dict, e: Engine = Depends(auth)):
-        e.new_case(body.get("name", ""), body.get("sensitivity", "open"), body.get("notes", ""))
+        e.new_case(body.get("name", ""), body.get("sensitivity", "open"), body.get("notes", ""),
+                   client=str(body.get("client") or ""), history=bool(body.get("history")))
         return {"ok": True}
+
+    @app.post("/api/clients")
+    async def add_client(body: dict, e: Engine = Depends(auth)):
+        e.add_client(str(body.get("name", "")))
+        return {"ok": True, "clients": e.cfg.clients}
+
+    @app.post("/api/clients/{name}")
+    async def rename_client(name: str, body: dict, e: Engine = Depends(auth)):
+        return {"ok": True, "cases": e.rename_client(name, str(body.get("name", ""))), "clients": e.cfg.clients}
+
+    @app.delete("/api/clients/{name}")
+    async def delete_client(name: str, e: Engine = Depends(auth)):
+        return {"ok": True, "cases": e.delete_client(name), "clients": e.cfg.clients}
 
     @app.get("/api/cases")
     async def list_cases(e: Engine = Depends(auth)):
@@ -343,7 +357,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def edit_case(body: dict, e: Engine = Depends(auth)):
         notes = body.get("notes")
         return e.edit_case(str(body.get("id", "")), str(body.get("name", "")), None if notes is None else str(notes),
-                           str(body.get("sensitivity") or "") or None)
+                           str(body.get("sensitivity") or "") or None,
+                           client=None if "client" not in body else str(body.get("client") or ""),
+                           history=None if "history" not in body else bool(body.get("history")))
 
     @app.post("/api/case/open")
     async def open_case(body: dict, e: Engine = Depends(auth)):

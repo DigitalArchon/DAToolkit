@@ -343,24 +343,57 @@ async def test_engine_transfer_tool_needs_local_session(env, tmp_path, monkeypat
 
 # ---------------------------------------------------------------- search & runbooks
 
-async def test_similar_cases_and_runbook_context(env):  # noqa: F811
+async def test_runbooks_reach_the_ai_only_within_a_client_with_history_on(env):  # noqa: F811
     engine, fake, _ = env
-    engine.new_case("Acme NAS slow SMB transfers", "open")
+    engine.cfg.clients = ["Acme", "Beta"]
+    engine.new_case("Acme NAS slow SMB transfers", "open", client="Acme")
     engine.select_model("Fake", "anthropic/claude-opus-5.5")
     fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
     engine.send("NAS transfers over SMB are slow since the switch swap")
     await wait_turn(engine)
     (engine.case.dir / "runbook.md").write_text("## Symptoms\nSlow SMB\n## Fix\nSet MTU 1500 on the NAS uplink\n")
-    old = engine.case.id
-    hits = search.search("slow SMB NAS", exclude_id="")
-    assert hits and hits[0]["id"] == old and hits[0]["has_runbook"]
-    assert "MTU 1500" in search.runbook_context(hits)
+    acme_open = engine.case.id
+    engine.new_case("Acme VPN NAS slow", "confidential", client="Acme")        # a more private Acme case
+    (engine.case.dir / "runbook.md").write_text("## Fix\nRotate the IPsec PSK on the NAS VPN\n")
+    acme_conf = engine.case.id
+    hits = search.search("slow SMB NAS", exclude_id="")                        # the technician's own search: everything
+    assert {h["id"] for h in hits} >= {acme_open, acme_conf} and "MTU 1500" in search.runbook_context(hits)
+
+    async def first_message(text):
+        fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
+        engine.send(text)
+        await wait_turn(engine)
+        notes = [e["text"] for e in engine.chat if e["kind"] == "note"]
+        return fake.requests[-1]["messages"][0]["content"], notes
+
+    # no client: nothing from any case
     engine.new_case("Beta NAS slow", "open")
-    fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
-    engine.send("Another NAS with slow SMB transfers")
-    await wait_turn(engine)
-    assert engine.chat[0]["kind"] == "note" and "Similar past cases" in engine.chat[0]["text"]
-    assert "MTU 1500" in fake.requests[-1]["messages"][0]["content"]
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    system, notes = await first_message("Another NAS with slow SMB transfers")
+    assert "MTU 1500" not in system and not any("Similar" in n for n in notes) and engine._runbooks == ""
+    # the client, but history not ticked: nothing
+    engine.new_case("Acme NAS again", "open", client="Acme")
+    system, notes = await first_message("NAS slow SMB transfers again")
+    assert "MTU 1500" not in system and not notes
+    # another client with history on: nothing of Acme's
+    engine.new_case("Beta NAS slow too", "open", client="Beta", history=True)
+    system, notes = await first_message("NAS slow SMB transfers")
+    assert "MTU 1500" not in system and "IPsec" not in system and not notes
+    # Acme with history on: Acme's Open case, not its Confidential one (an Open case is less private)
+    engine.new_case("Acme NAS slow once more", "open", client="Acme", history=True)
+    system, notes = await first_message("NAS slow SMB transfers after a switch swap")
+    assert "MTU 1500" in system and "IPsec" not in system
+    assert any("Similar past cases of Acme" in n for n in notes) and acme_open in [h["id"] for h in engine._similar]
+    # a Confidential Acme case may use both (equal or lower sensitivity)
+    ids = {h["id"] for h in search.search("slow SMB NAS IPsec VPN", client="Acme", max_sensitivity="confidential")}
+    assert ids >= {acme_open, acme_conf}
+    beta = {h["id"] for h in search.search("slow SMB NAS", client="Beta", max_sensitivity="sovereign")}
+    assert beta and not beta & {acme_open, acme_conf}                 # Beta's own cases only
+    # dropping the client, or the history, takes the runbooks out of the context again
+    engine.edit_case(engine.case.id, engine.case.name, history=False)
+    assert engine._runbooks == "" and "MTU 1500" not in engine._system_prompt()
+    with pytest.raises(UserError, match="client list"):
+        engine.new_case("x", "open", client="Nobody")
 
 
 # ---------------------------------------------------------------- context view, timeline, photos

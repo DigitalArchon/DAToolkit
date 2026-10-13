@@ -146,6 +146,9 @@ class Config:
     active_provider: str = ""
     active_model: str = ""
     recent_models: list[str] = field(default_factory=list)
+    # clients (customers) a case can belong to (Settings → Clients). Runbooks from earlier cases
+    # reach the AI only within one client's cases: see Engine._find_similar
+    clients: list[str] = field(default_factory=list)
 
     def provider(self, name: str) -> Provider | None:
         return next((p for p in self.providers if p.name == name), None)

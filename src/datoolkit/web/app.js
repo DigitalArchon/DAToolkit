@@ -173,6 +173,18 @@ function fixModal(message, commands) {
   });
 }
 
+// One line of text, or null when cancelled.
+function textModal(title, label, value = "") {
+  return new Promise((resolve) => {
+    let result = null;
+    const input = h("input", { type: "text", value });
+    const m = modal({ title, body: h("label", { class: "field" }, h("span", {}, label), input),
+      buttons: [{ label: "Cancel" }, { label: "OK", kind: "primary", onClick: () => { result = input.value.trim(); } }],
+      onClose: () => resolve(result) });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); m.box.querySelector(".buttons button.primary").click(); } });
+  });
+}
+
 function confirmModal(title, message, okLabel = "OK", kind = "primary") {
   return new Promise((resolve) => {
     let result = false;
@@ -307,7 +319,7 @@ function handleEvent(ev) {
 
 function renderTop() {
   const st = S.state;
-  $("#case-btn").textContent = st.case ? st.case.name : "No case";
+  $("#case-btn").textContent = st.case ? (st.case.client ? `${st.case.name} · ${st.case.client}` : st.case.name) : "No case";
   $("#case-edit-btn").classList.toggle("hidden", !st.case);
   const sb = $("#sens-badge");
   sb.textContent = st.case ? st.case.sensitivity : "";
@@ -2242,13 +2254,16 @@ async function openSimilar() {
     list.replaceChildren(h("div", { class: "muted small" }, "Searching…"));
     const cases = (await api("GET", `/api/search?q=${encodeURIComponent(q.value)}`)).cases;
     list.replaceChildren(...(cases.length ? cases.map((c) => h("div", { class: "case-row", style: "flex-direction:column;align-items:stretch" },
-      h("div", { class: "row" }, h("b", {}, c.name), h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity), h("span", { class: "muted small" }, `${c.started.slice(0, 10)} · matched ${c.matched.join(", ")}`), h("span", { class: "spacer" }), c.has_runbook ? h("span", { class: "badge read_only" }, "runbook") : null),
+      h("div", { class: "row" }, h("b", {}, c.name), h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity), c.client ? h("span", { class: "badge" }, c.client) : null,
+        h("span", { class: "muted small" }, `${c.started.slice(0, 10)} · matched ${c.matched.join(", ")}`), h("span", { class: "spacer" }), c.has_runbook ? h("span", { class: "badge read_only" }, "runbook") : null),
       c.runbook_preview ? h("pre", { class: "prompt-text small", style: "max-height:120px;overflow:auto" }, c.runbook_preview) : null))
       : [h("div", { class: "muted small" }, "No similar cases.")]));
   };
   q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); guarded(run); } });
   modal({ title: "Similar past cases", wide: true,
-    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" }, h("div", { class: "row" }, q, h("button", { type: "button", onclick: () => guarded(run) }, "Search")), list),
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, "Your own search across every case, on this machine only: nothing here goes to the AI. The AI gets runbooks only from the open case's client, when its history is included."),
+      h("div", { class: "row" }, q, h("button", { type: "button", onclick: () => guarded(run) }, "Search")), list),
     buttons: [{ label: "Close" }] });
   if (q.value) guarded(run);
 }
@@ -2515,14 +2530,42 @@ function sensitivityCards(current, floor = "open") {
     h("div", {}, h("div", {}, h("span", { class: `badge ${value}` }, value), " ", title), h("div", { class: "desc" }, desc))));
 }
 
-// Rename a case, change its notes or raise its sensitivity: the open case from the top bar, any
-// other from the case list. Resolves with the saved {id, name, notes, sensitivity}, or null when cancelled.
+// The client a case belongs to, and whether the AI gets runbooks from that client's earlier
+// cases (Settings → Clients explains the rule). A name typed under "New client…" is added to
+// the list when the case is saved (ensureClient).
+const NEW_CLIENT = "\u0000new";
+function clientField(current = "", history = false) {
+  const clients = S.state.config.clients || [];
+  const sel = h("select", {}, h("option", { value: "" }, "No client"),
+    ...clients.map((x) => h("option", { value: x, selected: x === current }, x)),
+    h("option", { value: NEW_CLIENT }, "New client…"));
+  const fresh = h("input", { type: "text", placeholder: "Client name", class: "hidden" });
+  const hist = h("input", { type: "checkbox", checked: history });
+  sel.addEventListener("change", () => { fresh.classList.toggle("hidden", sel.value !== NEW_CLIENT); if (sel.value === NEW_CLIENT) fresh.focus(); });
+  const el = h("div", { class: "field" }, h("span", {}, "Client"), h("div", { class: "row" }, sel, fresh),
+    h("label", { class: "check" }, hist, "Include this client's history: runbooks from its earlier cases of the same or a lower sensitivity go to the AI as leads"),
+    h("div", { class: "muted small" }, "With no client, or with this unticked, the AI never sees another case's runbook. One client's cases never feed another's."));
+  return { el, value: () => (sel.value === NEW_CLIENT ? fresh.value.trim() : sel.value),
+    isNew: () => sel.value === NEW_CLIENT && !!fresh.value.trim(), history: () => hist.checked };
+}
+async function ensureClient(cf) {
+  if (cf.isNew()) {
+    const r = await api("POST", "/api/clients", { name: cf.value() });
+    S.state.config.clients = r.clients;
+  }
+  return cf.value();
+}
+
+// Rename a case, change its notes, raise its sensitivity or change its client: the open case from
+// the top bar, any other from the case list. Resolves with the saved {id, name, notes, sensitivity,
+// client, history}, or null when cancelled.
 function editCaseModal(c) {
   return new Promise((resolve) => {
     let saved = null;
     const isOpen = c.id === S.state.case?.id;
     const name = h("input", { type: "text", value: c.name });
     const notes = h("textarea", { rows: 4, value: c.notes || "", placeholder: "Site/client notes for the AI (optional): environment, known quirks, what's been tried…" });
+    const cf = clientField(c.client || "", !!c.history);
     const cards = h("div", { class: "field" }, h("span", {}, "Sensitivity (can only be raised)"), sensitivityCards(c.sensitivity, c.sensitivity));
     const raiseNote = h("div", { class: "warnbox hidden" },
       "Raising the sensitivity can't be undone. It limits which models see this case from now on; what was already sent stays with the models it went to.",
@@ -2531,12 +2574,15 @@ function editCaseModal(c) {
     cards.addEventListener("change", () => raiseNote.classList.toggle("hidden", chosen() === c.sensitivity));
     const save = async () => {
       if (!name.value.trim()) throw new Error("A case needs a name.");
-      saved = await api("POST", "/api/case/edit", { id: c.id, name: name.value.trim(), notes: notes.value.trim(), sensitivity: chosen() });
+      const client = await ensureClient(cf);
+      saved = await api("POST", "/api/case/edit", { id: c.id, name: name.value.trim(), notes: notes.value.trim(), sensitivity: chosen(),
+        client, history: cf.history() });
     };
     const m = modal({
       title: "Edit case",
       body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
         h("label", { class: "field" }, h("span", {}, "Case name / ticket"), name),
+        cf.el,
         h("label", { class: "field" }, h("span", {}, "Notes"), notes),
         cards, raiseNote,
         isOpen ? h("div", { class: "muted small" }, "The AI sees the new name and notes from your next message.") : null),
@@ -2557,10 +2603,12 @@ function openCaseModal(first, reason = "") {
   const st = S.state;
   const name = h("input", { type: "text", placeholder: "e.g. TKT-1042 Acme file server slow" });
   const notes = h("textarea", { rows: 3, placeholder: "Site/client notes for the AI (optional): environment, known quirks, what's been tried…" });
+  const cf = clientField(st.case?.client || "", false);
   const body = h("div", { style: "display:flex;flex-direction:column;gap:10px", class: "case-modal" },
     reason ? h("div", { class: "warnbox" }, reason) : null,
     first ? h("div", { class: "muted small" }, "Setting up first? Choose Not now: Settings, providers, models and hosts work without a case. Start one later from “No case” in the top bar.") : null,
     h("label", { class: "field" }, h("span", {}, "Case name / ticket"), name),
+    cf.el,
     h("div", { class: "field" }, h("span", {}, "Sensitivity"), sensitivityCards("open")),
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
     st.case && st.chat.length ? h("div", { class: "muted small" }, "The current case's log stays on disk and can be resumed later. Open sessions carry over; the conversation and queue start fresh.") : null);
@@ -2576,7 +2624,7 @@ function openCaseModal(first, reason = "") {
   const chosen = new Set();
   const shown = () => {
     const q = filter.value.trim().toLowerCase();
-    return q ? cases.filter((c) => `${c.name} ${c.notes} ${c.started} ${c.sensitivity}`.toLowerCase().includes(q)) : cases;
+    return q ? cases.filter((c) => `${c.name} ${c.notes} ${c.started} ${c.sensitivity} ${c.client || ""}`.toLowerCase().includes(q)) : cases;
   };
   const syncBulk = () => {
     const vis = shown();
@@ -2606,6 +2654,7 @@ function openCaseModal(first, reason = "") {
       return h("div", { class: "case-row" },
         h("label", { class: "case-pick" }, pick,
           h("div", {}, h("b", {}, c.name), " ", h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity),
+            c.client ? h("span", { class: "badge", title: c.history ? "Its history feeds the AI" : "" }, c.client + (c.history ? " · history" : "")) : null,
             h("div", { class: "muted small" }, `${(c.started || c.id).replace("T", " ")} · ${c.resumable ? `${c.messages} message(s)` : "log only (no saved conversation)"}`))),
         h("div", { class: "row" },
           h("button", { type: "button", class: "small primary", onclick: () => guarded(async () => {
@@ -2642,7 +2691,8 @@ function openCaseModal(first, reason = "") {
     buttons: [{ label: first ? "Not now" : "Cancel" }, {
       label: "Start case", kind: "primary", onClick: async () => {
         const sensitivity = body.querySelector("input[type=radio]:checked").value;
-        await api("POST", "/api/case", { name: name.value.trim(), sensitivity, notes: notes.value.trim() });
+        const client = await ensureClient(cf);
+        await api("POST", "/api/case", { name: name.value.trim(), sensitivity, notes: notes.value.trim(), client, history: cf.history() });
       },
     }],
   });
@@ -2755,14 +2805,14 @@ function openSettings(tab = "providers") {
   const pane = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
   const show = (name) => {
     for (const b of tabs.children) b.classList.toggle("active", b.dataset.tab === name);
-    pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, model: modelPane, tools: toolsPane, general: generalPane })[name]());
+    pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, model: modelPane, tools: toolsPane, clients: clientsPane, general: generalPane })[name]());
   };
   // The state event from a save can arrive after the HTTP reply, so fetch the config before redrawing a list.
   const reshow = async (name) => {
     S.state.config = (await api("GET", "/api/state")).config;
     show(name);
   };
-  for (const [key, label] of [["providers", "AI providers"], ["model", "Model"], ["hosts", "Hosts"], ["tools", "Tool cache"], ["general", "General"]]) {
+  for (const [key, label] of [["providers", "AI providers"], ["model", "Model"], ["hosts", "Hosts"], ["clients", "Clients"], ["tools", "Tool cache"], ["general", "General"]]) {
     tabs.append(h("button", { type: "button", "data-tab": key, onclick: () => show(key) }, label));
   }
   const m = modal({ title: "Settings", wide: true, body: h("div", {}, pane), buttons: [{ label: "Close" }] });
@@ -3113,6 +3163,38 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, S.state.config.active_model
         ? (notes.active ? `In use for ${S.state.config.active_model}:` : `None apply to ${S.state.config.active_model}.`) : "No chat model chosen."),
       notes.active ? h("div", { class: "muted small pre" }, notes.active) : null);
+  }
+
+  function clientsPane() {
+    const clients = S.state.config.clients || [];
+    const name = h("input", { type: "text", placeholder: "Client name, e.g. Acme Pty Ltd" });
+    const add = async () => {
+      if (!name.value.trim()) throw new Error("Give the client a name.");
+      await api("POST", "/api/clients", { name: name.value.trim() });
+      await reshow("clients");
+    };
+    name.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); guarded(add); } });
+    const rows = h("div", { class: "case-list" }, ...(clients.length ? clients.map((c) => h("div", { class: "case-row" },
+      h("b", {}, c),
+      h("div", { class: "row" },
+        h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
+          const to = await textModal("Rename client", `New name for ${c} (its cases follow it)`, c);
+          if (to === null || to === c) return;
+          const r = await api("POST", `/api/clients/${encodeURIComponent(c)}`, { name: to });
+          toast(`Renamed to ${to}; ${r.cases} case(s) follow it.`, "ok");
+          await reshow("clients");
+        }) }, "Rename"),
+        h("button", { type: "button", class: "small ghost danger", onclick: () => guarded(async () => {
+          if (!(await confirmModal("Delete client", `Delete ${c}? Its cases stay on disk as they are, but belong to no client any more, so none of them feeds the AI a runbook again.`, "Delete", "danger"))) return;
+          const r = await api("DELETE", `/api/clients/${encodeURIComponent(c)}`);
+          toast(r.cases ? `Deleted ${c}; ${r.cases} case(s) now belong to no client.` : `Deleted ${c}.`, "ok");
+          await reshow("clients");
+        }) }, "Delete"))))
+      : [h("div", { class: "muted" }, "No clients yet.")]));
+    return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
+      h("div", { class: "muted small" }, "A case can belong to a client (chosen when it starts, or under ✎). Only a case that does, and has \"Include this client's history\" ticked, gets runbooks from that client's earlier cases into the AI's context, and only from cases of the same or a lower sensitivity. Nothing from one client's cases ever reaches another client's."),
+      rows,
+      h("div", { class: "row" }, name, h("button", { type: "button", class: "primary", onclick: () => guarded(add) }, "Add client")));
   }
 
   function generalPane() {

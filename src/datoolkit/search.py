@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from .case import Case
+from .case import SENSITIVITIES, Case
 from .config import data_dir
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9._-]{2,}")
@@ -47,15 +47,24 @@ def _case_text(d: Path) -> tuple[str, str]:
     return "\n".join(parts), runbook
 
 
-def search(query: str, root: Path | None = None, limit: int = 5, exclude_id: str = "") -> list[dict]:
-    """Past cases ranked by term overlap with the query. Cases with a runbook rank higher."""
+def search(query: str, root: Path | None = None, limit: int = 5, exclude_id: str = "",
+           client: str | None = None, max_sensitivity: str | None = None) -> list[dict]:
+    """Past cases ranked by term overlap with the query. Cases with a runbook rank higher.
+    `client` keeps to that client's cases (the empty string: cases of no client); `max_sensitivity`
+    to cases of that sensitivity or a lower one. Both are None for the technician's own search,
+    which stays on this machine; what goes to the AI is always narrowed by both."""
     q = terms(query)
     if not q:
         return []
     base = root or data_dir() / "cases"
+    allowed = SENSITIVITIES.index(max_sensitivity) if max_sensitivity in SENSITIVITIES else None
     hits = []
     for c in Case.list_all(base):
         if c["id"] == exclude_id:
+            continue
+        if client is not None and c.get("client", "") != client:
+            continue
+        if allowed is not None and (c["sensitivity"] not in SENSITIVITIES or SENSITIVITIES.index(c["sensitivity"]) > allowed):
             continue
         text, runbook = _case_text(base / c["id"])
         words = terms(text)
