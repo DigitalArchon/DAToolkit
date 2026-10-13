@@ -467,10 +467,11 @@ function renderEntry(e, live = false) {
   if (e.kind === "note") {
     const last = S.state.chat[S.state.chat.length - 1] === e;
     const canRetry = e.retry && last && S.state.can_retry && !S.state.busy;
+    const stillRetired = e.retired && S.state.config.active_model === e.retired.model;   // retrying with it would fail again
     return h("div", { class: "msg note" }, e.text,
       e.context && last && !S.state.busy ? h("span", {}, " ", h("button", { class: "small", onclick: () => guarded(openContextView) }, "What the AI knows…")) : null,
       canRetry && e.retired ? retireNote(e.retired) : null,
-      canRetry ? h("span", {}, " ", retryButton()) : null);
+      canRetry && !stillRetired ? h("span", {}, " ", retryButton()) : null);
   }
   if (e.kind === "user") {
     const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You", e.via === "phone" ? " · 📱 from your phone" : ""));
@@ -793,6 +794,12 @@ function renderStatus() {
   if (S.state.can_retry) {
     bar.className = "failed";
     const err = S.lastTurn?.error || S.state.last_error;
+    const lastNote = S.state.chat?.[S.state.chat.length - 1];
+    if (lastNote?.retired && S.state.config.active_model === lastNote.retired.model) {
+      text.replaceChildren("✕ Not sent: the model is no longer offered. ",
+        h("span", { class: "muted" }, "Carry on with one the note above offers, or choose another model."));
+      return;
+    }
     text.replaceChildren(err === "stopped" ? "■ Stopped. " : "✕ The last message got no answer. ",
       retryButton(), h("span", { class: "muted" }, " or change the model first, or type a new message."));
     return;
