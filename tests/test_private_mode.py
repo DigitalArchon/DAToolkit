@@ -10,8 +10,8 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from datoolkit.llm.client import LLMClient, detect_tier
 from datoolkit.llm.private_mode import (
-    Attestation, Enclave, PrivateModeClient, PrivateModeError, Verified, _NonEmptyBodyTransport,
-    offers_private_mode, relay_url, sealing_transport)
+    Attestation, Enclave, ModelRetired, PrivateModeClient, PrivateModeError, Verified, _NonEmptyBodyTransport,
+    offered, offers_private_mode, relay_url, sealing_transport)
 from datoolkit.llm.prompts import PROPOSE_TOOL
 
 BASE = "https://nano-gpt.com/api/v1"
@@ -40,11 +40,16 @@ TOOL_REPLY = (chunk({"role": "assistant", "content": "Checking."})
               + chunk({}, "tool_calls") + "data: [DONE]\n\n")
 
 
+LISTED = ["private/gemma4-31b:thinking", "private/glm-5-3", "private/kimi-k3"]   # as the relay lists them (sorted)
+
+
 class Relay:
-    def __init__(self, replies=None, private_header="tinfoil"):
+    def __init__(self, replies=None, private_header="tinfoil", listed=LISTED, preflight_status=200):
         self.replies = list(replies or [(200, TOOL_REPLY)])
         self.private_header = private_header
-        self.preflights, self.requests, self.keys, self.verifies = [], [], [], 0
+        self.listed = listed                    # the relay's public list of Private Mode models
+        self.preflight_status = preflight_status
+        self.preflights, self.requests, self.keys, self.verifies, self.lists = [], [], [], 0, 0
 
     def verifier(self, relay, secret):
         assert relay == RELAY and len(secret) == 64
@@ -52,8 +57,16 @@ class Relay:
         return verified()
 
     def preflight(self, request):
+        if request.url.path.endswith("/private/tinfoil/models"):
+            assert request.method == "GET" and "authorization" not in request.headers   # public: no key sent
+            self.lists += 1
+            if self.listed is None:
+                return httpx.Response(503, text="down")
+            return httpx.Response(200, json={"data": [{"id": m} for m in self.listed] + [{"id": "TEE/glm-5.3"}]})
         assert request.url.path.endswith("/private/tinfoil/preflight")
         self.preflights.append((json.loads(request.content), request.headers["authorization"]))
+        if self.preflight_status >= 400:
+            return httpx.Response(self.preflight_status, json={"error": {"message": "nope"}})
         return httpx.Response(200, json={"cacheScope": SCOPE, "upstreamModel": "glm-5-3"})
 
     def transport(self, key):
@@ -223,6 +236,119 @@ async def test_engine_routes_private_model_sealed_and_logs_attestation(tmp_path,
         assert [p.command for p in engine.queue.items] == ["df -h"]
         log = (engine.case.dir / "events.jsonl").read_text()
         assert "enclave_attested" in log and KEY not in log  # key fingerprint only, never the key
+    finally:
+        await engine.stop()
+
+
+def test_a_model_off_the_relays_list_is_known_to_be_retired():
+    assert offered("private/glm-5-3", LISTED) is True
+    assert offered("private/glm-5.3", LISTED) is True, "NanoGPT's dotted alias"
+    assert offered("private/glm-5-3-flash", LISTED) is False
+    assert offered("private/gemma4-31b", LISTED) is False, ":thinking is its own model"
+    assert offered("private/glm-5-3-flash", []) is None, "a list that couldn't be read"
+
+
+async def test_nothing_is_sent_to_a_retired_model():
+    relay = Relay()
+    client = relay.client()
+    with pytest.raises(ModelRetired, match="no longer offered.*choose another end-to-end encrypted model") as caught:
+        await collect(client, model="private/glm-5-3-flash")
+    assert caught.value.model == "private/glm-5-3-flash"
+    assert caught.value.offered == LISTED                          # what to carry on with (private/ only)
+    assert relay.lists == 1 and relay.verifies == 0 and relay.preflights == [] and relay.requests == []
+    with pytest.raises(ModelRetired):
+        await client.attest("private/glm-5-3-flash")               # not attested either
+    assert relay.verifies == 0
+    assert await client.attest("private/glm-5-3") == verified().attestation
+    assert relay.lists == 1, "the list is kept, like the attestation"
+
+
+async def test_the_private_list_is_read_again_once_it_is_old():
+    relay = Relay(replies=[(200, TOOL_REPLY)] * 4)
+    now = [1000.0]
+    client = relay.client(Enclave(RELAY, verifier=relay.verifier, clock=lambda: now[0]))
+    await collect(client)
+    await collect(client)
+    assert relay.lists == 1
+    now[0] += 301
+    await collect(client)
+    assert relay.lists == 2
+    relay.listed = ["private/kimi-k3"]                              # retired meanwhile: found at the next read
+    await collect(client)
+    now[0] += 301
+    with pytest.raises(ModelRetired):
+        await collect(client)
+
+
+async def test_a_preflight_refusal_for_a_retired_model_says_so():
+    """Every path's backstop: a model retired since the list was read."""
+    relay = Relay(preflight_status=400)
+    client = relay.client()
+    with pytest.raises(PrivateModeError, match=r"refused the Private Mode request \(HTTP 400\)") as plain:
+        await collect(client)                                       # still listed: NanoGPT's own refusal
+    assert not isinstance(plain.value, ModelRetired)
+    relay.listed = ["private/kimi-k3"]                              # gone, but the kept list still has it
+    with pytest.raises(ModelRetired) as caught:
+        await collect(client)
+    assert caught.value.status_code == 400 and caught.value.offered == ["private/kimi-k3"]
+    assert relay.requests == [], "nothing sealed was sent"
+    # The list can't be read: nothing is claimed about the model.
+    down = Relay(preflight_status=400, listed=None)
+    with pytest.raises(PrivateModeError) as unknown:
+        await collect(down.client())
+    assert not isinstance(unknown.value, ModelRetired) and down.lists == 2
+
+
+async def test_engine_says_a_private_model_is_retired_and_carries_on_with_another(tmp_path, monkeypatch):
+    import asyncio
+
+    from datoolkit import creds
+    from datoolkit.config import Config, Provider
+    from datoolkit.engine import Engine
+
+    relay = Relay(replies=[(200, TOOL_REPLY)] * 2)
+    cfg = Config(providers=[Provider("NanoGPT", BASE)])
+    engine = Engine(cfg, lambda e: None, tmp_path / "rt", save_config=lambda c: None)
+    creds.set_secret("provider", "NanoGPT", "sk-test")
+    enclave = Enclave(RELAY, verifier=relay.verifier)
+    real_client = engine._client
+    monkeypatch.setattr(engine, "_client",
+                        lambda prov, model="": relay.client(enclave) if model.startswith("private/") else real_client(prov, model))
+    await engine.start()
+    try:
+        engine.new_case("client X", "confidential")
+        engine.select_model("NanoGPT", "private/glm-5-3-flash")
+        for _ in range(200):
+            if engine.attestation.get("status") != "checking":
+                break
+            await asyncio.sleep(0.01)
+        assert engine.attestation["status"] == "retired" and engine.attestation["offered"] == LISTED
+        assert "no longer offered" in engine.attestation["error"] and relay.verifies == 0
+        assert (await engine.attest_now())["status"] == "retired"
+
+        engine.send("fs01 is slow")
+        for _ in range(200):
+            if not engine.busy:
+                break
+            await asyncio.sleep(0.01)
+        assert relay.preflights == [] and relay.requests == [], "nothing was sent"
+        note = engine.chat[-1]
+        assert note["kind"] == "note" and note["retry"] and "not sent" in note["text"] and "no longer offered" in note["text"]
+        assert note["retired"] == {"model": "private/glm-5-3-flash", "offered": LISTED}
+        assert engine.can_retry
+        log = (engine.case.dir / "events.jsonl").read_text()
+        assert "private_model_retired" in log
+
+        engine.select_model("NanoGPT", "private/glm-5-3")          # "Ask again with it"
+        engine.retry()
+        for _ in range(300):
+            if not engine.busy and engine.attestation.get("status") == "verified":
+                break
+            await asyncio.sleep(0.01)
+        assert engine.attestation["status"] == "verified"
+        assert engine.chat[-1]["kind"] == "assistant" and engine.chat[-1]["tier"] == "e2ee"
+        assert [p["model"] for p, _ in relay.preflights] == ["private/glm-5-3"]
+        assert relay.lists == 1, "one read of the list served the check, the turn and the retry"
     finally:
         await engine.stop()
 

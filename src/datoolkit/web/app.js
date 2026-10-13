@@ -324,7 +324,7 @@ function renderTop() {
   if (lab) {
     ab.className = `ghost small ${lab.cls}`;
     ab.textContent = lab.text;
-    ab.title = lab.title + (att.status === "verified" || att.status === "failed" ? "\nClick to re-check." : "");
+    ab.title = lab.title + (["verified", "failed", "retired"].includes(att.status) ? "\nClick to re-check." : "");
   }
   const banner = $("#keyring-banner");
   banner.textContent = st.keyring_error ? `⚠ ${st.keyring_error} API keys and passwords cannot be stored.` : "";
@@ -342,6 +342,7 @@ function attestLabel(att) {
   if (att.status === "checking") return { text: tee ? "TEE attesting…" : "attesting…", cls: "",
     title: tee ? "Verifying the enclave: Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict…" : "Verifying the enclave…" };
   if (att.status === "failed") return { text: tee ? "⚠ TEE attestation refused" : "⚠ attestation failed", cls: "bad", title: `${att.error}\nNothing is sent to it until attestation succeeds.` };
+  if (att.status === "retired") return { text: "⚠ no longer offered", cls: "bad", title: `${att.error}.\nNothing is sent to it.${att.offered?.length ? `\nStill offered: ${att.offered.join(", ")}` : ""}` };
   if (tee) {
     const partial = att.level === "partial";
     return { text: partial ? "🛡 TEE attested (partial)" : "🛡 TEE attested", cls: partial ? "warn" : "ok",
@@ -465,9 +466,11 @@ function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeigh
 function renderEntry(e, live = false) {
   if (e.kind === "note") {
     const last = S.state.chat[S.state.chat.length - 1] === e;
+    const canRetry = e.retry && last && S.state.can_retry && !S.state.busy;
     return h("div", { class: "msg note" }, e.text,
       e.context && last && !S.state.busy ? h("span", {}, " ", h("button", { class: "small", onclick: () => guarded(openContextView) }, "What the AI knows…")) : null,
-      e.retry && last && S.state.can_retry && !S.state.busy ? h("span", {}, " ", retryButton()) : null);
+      canRetry && e.retired ? retireNote(e.retired) : null,
+      canRetry ? h("span", {}, " ", retryButton()) : null);
   }
   if (e.kind === "user") {
     const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You", e.via === "phone" ? " · 📱 from your phone" : ""));
@@ -805,6 +808,20 @@ function renderStatus() {
   if (last.questions?.length) todo.push(`${last.questions.length} question${last.questions.length > 1 ? "s" : ""} to answer`);
   bar.className = "done";
   text.textContent = `✓ AI finished${S.lastTurn?.secs ? ` (${clock(S.lastTurn.secs)})` : ""}. Your turn${todo.length ? ": " + todo.join(" · ") : "."}`;
+}
+
+// NanoGPT no longer offers the private model the last message went to (nothing was sent): offer
+// to ask again with an end-to-end encrypted model its list still has - the list just read,
+// nothing more is fetched - which the conversation then carries on with.
+function retireNote(retired) {
+  const offered = retired.offered || [];
+  if (!offered.length) return h("div", { class: "small" }, "NanoGPT lists no other end-to-end encrypted model; choose another model with the model button.");
+  const prov = S.state.config.active_provider;
+  const pick = h("select", {}, offered.map((m) => h("option", { value: m }, m)));
+  return h("div", { class: "row small", style: "margin-top:6px" }, "Carry on with ", pick,
+    h("button", { type: "button", class: "small primary", title: "Choose this model and send the last message again with it",
+      onclick: () => guarded(async () => { await api("POST", "/api/model", { provider: prov, model: pick.value }); await api("POST", "/api/retry"); }) },
+    "Ask again with it"));
 }
 
 function retryButton() {
@@ -2975,7 +2992,7 @@ function openSettings(tab = "providers") {
       h("b", {}, `Vision helper ${v.helper}: ${lab.text}`), h("div", { class: "muted small pre" }, lab.title),
       att.status === "verified" || att.status === "failed" ? h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
         const r = await api("POST", "/api/attest", { slot: "helper" });
-        toast(r.status === "verified" ? `Vision helper attested: ${r.summary}` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
+        toast(r.status === "verified" ? `Vision helper attested: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
         show("model");
       }) }, "Re-check") : null);
   }
@@ -3411,7 +3428,7 @@ function init() {
   $("#model-btn").addEventListener("click", openModelPicker);
   $("#attest-btn").addEventListener("click", () => guarded(async () => {
     const r = await api("POST", "/api/attest");
-    toast(r.status === "verified" ? `${r.kind === "tee" ? "TEE" : "Enclave"} attested: ${r.summary}` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
+    toast(r.status === "verified" ? `${r.kind === "tee" ? "TEE" : "Enclave"} attested: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
   }));
   $("#settings-btn").addEventListener("click", () => openSettings());
   $("#phone-btn").addEventListener("click", () => guarded(openPhone));

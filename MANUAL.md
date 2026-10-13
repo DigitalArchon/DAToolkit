@@ -515,6 +515,17 @@ edit. Sovereign cases do neither.
    - Each attestation is recorded in the case's `events.jsonl`.
    - Attestation is redone every five minutes.
 
+NanoGPT retires Private Mode models from time to time, and the enclave (Tinfoil's router,
+whatever the model) would still attest. So before a `private/` model is attested or sent to,
+it is looked up in NanoGPT's public list of them (no key is sent; the list is kept five
+minutes, like the attestation). If it is gone, nothing is sent: the top bar reads **⚠ no
+longer offered** (hover for the models still listed), the chat note after a message offers
+the end-to-end encrypted models the list still has, and **Ask again with it** sends your
+message again with the one you pick, which the conversation then carries on with. A vision
+helper or research model that is gone says so the same way. A list that cannot be read says
+nothing either way: NanoGPT's own check still refuses a model that is gone, and the note then
+says why.
+
 Like SealedLore, DA Toolkit doesn't use NanoGPT's `npx @nanogpt/private-mode@latest` proxy,
 because that would let NanoGPT change the code that holds your plaintext.
 

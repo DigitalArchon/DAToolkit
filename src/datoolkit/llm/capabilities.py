@@ -14,7 +14,10 @@ import httpx
 EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
-def _norm(model_id: str) -> str:
+def norm_id(model_id: str) -> str:
+    """A model id without its provider prefix, dots and underscores as dashes: NanoGPT names the
+    same model glm-5.3 in one list and glm-5-3 in another. A :thinking suffix stays: that is
+    another model."""
     return re.sub(r"[._]", "-", model_id.split("/")[-1].lower())
 
 
@@ -49,8 +52,8 @@ def lookup(caps: dict[str, dict], model_id: str) -> dict | None:
     """Capabilities of `model_id`; a private/ model borrows those of its public twin."""
     if model_id in caps:
         return caps[model_id]
-    n = _norm(model_id)
-    twins = [mid for mid in caps if _norm(mid) == n]
+    n = norm_id(model_id)
+    twins = [mid for mid in caps if norm_id(mid) == n]
     twins.sort(key=lambda mid: (not mid.startswith("TEE/"), mid))     # the enclave build first
     return caps[twins[0]] if twins else None
 

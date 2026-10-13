@@ -29,8 +29,8 @@ from .case import Case, _slug, fence
 from .config import Config, Host, Provider, data_dir
 from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
-from .llm.private_mode import (Enclave, PrivateModeClient, PrivateModeError, list_private_models,
-                               offers_private_mode, relay_url)
+from .llm.private_mode import (Enclave, ModelRetired, PrivateModeClient, PrivateModeError,
+                               list_private_models, offers_private_mode, relay_url)
 from .llm import capabilities, model_prompts, research, textcalls, websearch
 from .llm import tee as tee_mod
 from .llm import params as params_mod
@@ -627,9 +627,12 @@ class Engine:
                 result = {"status": "verified", "kind": "tee", "model": model,
                           **(await self._attest_tee(prov, model)).to_dict()}
             else:
-                att = await self._client(prov, model).attest()
+                att = await self._client(prov, model).attest(model)   # a retired model is not attested
                 result = {"status": "verified", "model": model, **att.to_dict()}
             self.log("enclave_attested", role=slot, **result)
+        except ModelRetired as e:
+            result = self._retired(e)
+            self.log("private_model_retired", role=slot, model=model, offered=e.offered)
         except Exception as e:  # noqa: BLE001
             result = {"status": "failed", "model": model, "error": str(e), **({"kind": "tee"} if tee else {})}
             self.log("enclave_attestation_failed", role=slot, model=model, error=str(e))
@@ -637,6 +640,12 @@ class Engine:
             self._set_attestation(slot, result)
             self._changed()
         return result
+
+    @staticmethod
+    def _retired(e: ModelRetired) -> dict:
+        """The attestation state of a private/ model NanoGPT no longer offers (ModelRetired):
+        nothing is sent to it, and the models the relay still lists are offered instead."""
+        return {"status": "retired", "model": e.model, "error": str(e), "offered": e.offered}
 
     async def _attest_tee(self, prov: Provider, model: str) -> tee_mod.Attestation:
         """A TEE model's enclave, checked now with a fresh nonce. Raises TeeRefused when it
@@ -1817,7 +1826,7 @@ class Engine:
 
         client = self._client(prov, model)
         if isinstance(client, PrivateModeClient):
-            await client.attest()     # nothing is sent until the enclave has proved itself
+            await client.attest(model)     # nothing is sent until the enclave has proved itself
         await self._tee_guard(prov, model, "chat")
         conv = await self._conv_for_model(self.vision_status())
         ttl = self._cache_ttl(prov, model, tier) if whole else ""
@@ -2188,7 +2197,7 @@ class Engine:
         the generation settings (less any the model refuses), every request logged."""
         client = self._client(prov, model)
         if isinstance(client, PrivateModeClient):
-            await client.attest()
+            await client.attest(model)
         await self._tee_guard(prov, model, "research")
         logged = 1
 
@@ -2660,11 +2669,14 @@ class Engine:
         usage = None
         error = None
         overflowed = None     # a plain explanation when the request was too long for the model
+        retired = None        # the model is no longer offered: {"model", "offered": [...]} for the note
         in_flight = None      # (system, messages sent, ...) of the request being streamed, for the log
         try:
             client = self._client(prov, model)
             if isinstance(client, PrivateModeClient):
-                att = await client.attest()  # nothing is sent until the enclave has proved itself
+                # nothing is sent until the enclave has proved itself, and not to a model NanoGPT
+                # has retired, which would attest all the same (the enclave is Tinfoil's router)
+                att = await client.attest(model)
                 if not self.attestation or self.attestation.get("hpke_key_sha256") != att.hpke_key_sha256:
                     self.attestation = {"status": "verified", "model": model, **att.to_dict()}
                     self.log("enclave_attested", **self.attestation)
@@ -2783,6 +2795,15 @@ class Engine:
                     rec["status"] = "cancelled"
             if entry["text"]:
                 self.conv.append({"role": "assistant", "content": entry["text"] + "\n[response stopped by technician]"})
+        except ModelRetired as e:
+            # Gone since it was listed: nothing was sent. The note offers what is listed instead,
+            # and the top bar says so until another model is chosen.
+            error = f"not sent: {e}"
+            retired = self._retired(e)
+            self._log_failed_round(in_flight, model, tier, entry, error)
+            self.log("private_model_retired", role="chat", model=model, offered=e.offered)
+            if (self.attestation or {}).get("model") == model:
+                self.attestation = retired
         except Exception as e:  # noqa: BLE001
             error = f"not sent: {e}" if isinstance(e, UserError) else f"{type(e).__name__}: {e}"
             self._log_failed_round(in_flight, model, tier, entry, error)
@@ -2804,7 +2825,8 @@ class Engine:
         self._last_turn_error = error
         if error:
             self.chat.append({"kind": "note", "text": f"AI request {error}", "retry": True,
-                              **({"context": True} if overflowed else {})})
+                              **({"context": True} if overflowed else {}),
+                              **({"retired": {"model": retired["model"], "offered": retired["offered"]}} if retired else {})})
             self.log("turn_error", error=error)
         if usage:
             self.last_usage = usage
@@ -3066,12 +3088,18 @@ class Engine:
         sealed = ""
         try:
             if isinstance(client, PrivateModeClient):
-                att = await client.attest()      # nothing is sealed until the helper's enclave has proved itself
+                att = await client.attest(hmodel)    # nothing is sealed until the helper's enclave has proved itself
                 if (self.helper_attestation or {}).get("hpke_key_sha256") != att.hpke_key_sha256:
                     self.helper_attestation = {"status": "verified", "model": hmodel, **att.to_dict()}
                     self.log("enclave_attested", role="helper", **self.helper_attestation)
                     self._changed()
                 sealed = att.summary
+        except ModelRetired as e:
+            self.helper_attestation = self._retired(e)
+            self.log("private_model_retired", role="helper", model=hmodel, offered=e.offered)
+            self._changed()
+            raise UserError(f"The vision helper {hmodel} is no longer offered by NanoGPT's Private Mode, so the "
+                            f"image was not sent: choose another helper under Settings → Model.") from e
         except Exception as e:  # noqa: BLE001
             self.helper_attestation = {"status": "failed", "model": hmodel, "error": str(e)}
             self._changed()

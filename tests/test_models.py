@@ -221,7 +221,7 @@ def _fake_private_client(engine, fake_api, fail=False):
         def __init__(self):
             self.calls = []
 
-        async def attest(self):
+        async def attest(self, model=""):
             self.calls.append("attest")
             if fail:
                 raise RuntimeError("measurement mismatch")
