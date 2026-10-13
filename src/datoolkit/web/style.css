@@ -460,6 +460,7 @@ p.small.warn { color: var(--warn); }
 #vision-btn.none { color: var(--muted); text-decoration: line-through; }
 .model-row .cap { font-size: 11px; color: var(--muted); font-family: system-ui, sans-serif; }
 .model-row .cap.off { opacity: .6; }
+.model-row .cap.tested { color: var(--ok); }
 .vision-now { font-size: 13px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); }
 .vision-now.native { border-color: var(--ok); }
 .vision-now.helper { border-color: var(--warn); }

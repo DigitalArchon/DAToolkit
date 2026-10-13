@@ -317,6 +317,7 @@ class Engine:
             "hypotheses": self.hypotheses,
             "similar_cases": [{k: v for k, v in c.items() if k != "runbook"} for c in self._similar],
             "model_notes": {"builtin": [{"match": p, "text": t} for p, t in model_prompts.BUILTIN],
+                            "evaluated": model_prompts.EVALUATED,
                             "active": model_prompts.notes_for(self.cfg.active_model, self.cfg.settings.model_prompts,
                                                               self.cfg.settings.builtin_model_prompts)},
         }
@@ -461,7 +462,8 @@ class Engine:
             tier = detect_tier(m, prov.base_url, prov.tier_overrides)
             caps = self.caps_for(prov, m) or {}
             out.append({"id": m, "tier": tier, "allowed": tier in allowed, "vision": self.vision_of(prov, m),
-                        "reasoning": caps.get("reasoning", False), "efforts": caps.get("efforts", [])})
+                        "reasoning": caps.get("reasoning", False), "efforts": caps.get("efforts", []),
+                        "tested": model_prompts.tested(m)})
         return out
 
     # ---------------------------------------------------------------- capabilities, vision, generation

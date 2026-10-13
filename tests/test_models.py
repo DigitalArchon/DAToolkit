@@ -391,3 +391,21 @@ async def test_model_notes_end_the_static_system_prompt(env, monkeypatch):  # no
         engine.save_settings({"model_prompts": [{"match": "claude", "text": ""}]})
     engine.save_settings({"model_prompts": []})
     assert "Additional instructions" not in engine._prompt_parts()[0]
+
+
+def test_tested_models_are_known_under_every_provider_prefix():
+    from datoolkit.llm import model_prompts
+    for mid in ("anthropic/claude-opus-5.5", "anthropic/claude-sonnet-5.5", "qwen/qwen3.8-max", "moonshotai/kimi-k3",
+                "z-ai/glm-5.3", "TEE/glm-5.3", "private/glm-5-3", "moonshotai/kimi-k2.7-code",
+                "deepseek/deepseek-v4-pro", "qwen/qwen3.7-plus", "qwen/qwen3.8-27b"):
+        assert model_prompts.tested(mid), mid
+    assert model_prompts.tested("anthropic/claude-opus-5.5").startswith("Recommended")
+    for mid in ("z-ai/glm-5.3-flash", "private/kimi-k3:thinking", "anthropic/claude-opus-5.6", "qwen/qwen3.8", ""):
+        assert model_prompts.tested(mid) is None, mid
+
+
+async def test_the_model_list_says_which_models_the_prompts_were_tested_with(env):  # noqa: F811
+    engine, _, _ = env
+    tested = {m["id"]: m["tested"] for m in await engine.list_models("Fake")}
+    assert tested["anthropic/claude-opus-5.5"].startswith("Recommended")
+    assert tested["TEE/glm-5.3"] == tested["private/glm-5-3"] and "built-in note" in tested["TEE/glm-5.3"]

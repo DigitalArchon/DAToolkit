@@ -2680,7 +2680,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     const q = search.value.trim().toLowerCase();
     const recent = st.config.recent_models.filter((r) => r.startsWith(prov + "|")).map((r) => r.split("|")[1]);
     const pool = filter ? models.filter(filter) : models;
-    const shown = pool.filter((x) => !q || x.id.toLowerCase().includes(q) || x.tier.includes(q));
+    const shown = pool.filter((x) => !q || x.id.toLowerCase().includes(q) || x.tier.includes(q) || (q === "tested" && x.tested));
     shown.sort((a, b) => (b.allowed - a.allowed) || ((recent.indexOf(a.id) + 1 || 99) - (recent.indexOf(b.id) + 1 || 99)) || a.id.localeCompare(b.id));
     listEl.replaceChildren(...shown.slice(0, 400).map((x) => h("div", {
       class: `model-row${x.allowed ? "" : " blocked"}${x.id === curModel && prov === curProv ? " current" : ""}`,
@@ -2691,6 +2691,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
       },
     }, h("span", { class: "id" }, x.id), recent.includes(x.id) ? h("span", { class: "muted small" }, "recent") : null,
     x.reasoning ? h("span", { class: "cap", title: `Reasoning model${x.efforts?.length ? `: effort ${x.efforts.join(" / ")}` : ""}` }, "🧠") : null,
+    x.tested ? h("span", { class: "cap tested", title: `DA Toolkit's prompts were tested with this model (evaluation of ${S.state.model_notes?.evaluated || "2026-10-10"}). ${x.tested}` }, "✓ tested") : null,
     h("span", { class: `cap${x.vision ? "" : " off"}`, title: x.vision === true ? "Reads images" : x.vision === false ? "Text only: can't read images" : "Unknown whether it reads images (set it under Settings → Providers)" },
       x.vision === true ? "👁" : x.vision === false ? "text only" : "?"),
     h("span", { class: `badge ${x.tier}` }, x.tier))));
@@ -2714,7 +2715,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       note ? h("div", { class: "small" }, note) : null,
       h("div", { class: "muted small" }, legend, " Tier is detected from the model id; override it in Settings → Providers."),
-      h("div", { class: "muted small" }, filter ? `Showing ${filterNote} models only.` : "👁 reads images · text only: needs a vision helper (Settings → Model) for screenshots and photos · 🧠 reasoning model."),
+      h("div", { class: "muted small" }, filter ? `Showing ${filterNote} models only.` : "👁 reads images · text only: needs a vision helper (Settings → Model) for screenshots and photos · 🧠 reasoning model · ✓ tested: the prompts were evaluated with it (hover for the verdict; filter by \"tested\")."),
       h("div", { class: "row" }, providers.length > 1 ? provSel : null, search,
         h("button", { type: "button", onclick: () => load(true) }, "Refresh")),
       listEl),

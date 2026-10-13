@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+from .capabilities import norm_id
+
 # (pattern on the model id, note). Matched case-insensitively anywhere in the id, so a note for
 # "glm" covers z-ai/glm-5.3, TEE/glm-5.3 and private/glm-5-3 alike.
 _QUEUE_RULE = (
@@ -36,9 +38,32 @@ BUILTIN: list[tuple[str, str]] = [
     (r"qwen(?!.*max)", _QUEUE_RULE),
 ]
 
+# The models DA Toolkit's prompts were evaluated with (docs/model-evaluation.md: six scripted cases
+# each, context probes to 128k), by id without provider prefix, dots as dashes, so that
+# anthropic/claude-opus-5.5, TEE/glm-5.3 and private/glm-5-3 all match. Each verdict is the
+# evaluation's one-line recommendation; the picker shows it as "tested".
+EVALUATED = "2026-10-10"
+TESTED: dict[str, str] = {
+    "claude-opus-5-5": "Recommended: the strongest diagnostician, and the default.",
+    "claude-sonnet-5-5": "Recommended: matches Opus at about half the cost.",
+    "qwen3-8-max": "Recommended: the best of the rest, and cheap.",
+    "kimi-k3": "Good: clean tool use, the occasional reasoning slip.",
+    "glm-5-3": "Good, with its built-in note.",
+    "kimi-k2-7-code": "Usable, with its built-in note; it needed the nudge most often.",
+    "deepseek-v4-pro": "Usable, with its built-in note; watch that it answers your questions.",
+    "qwen3-7-plus": "Simple jobs: it can lock onto a wrong theory.",
+    "qwen3-8-27b": "Borderline; a stand-in for a model you would run locally.",
+}
+
 MAX_RULES = 30
 MAX_MATCH = 100
 MAX_TEXT = 4000
+
+
+def tested(model: str) -> str | None:
+    """The evaluation's verdict on this model, when the prompts were tested with it; else None.
+    A variant (glm-5.3-flash, kimi-k3:thinking) is another model and was not."""
+    return TESTED.get(norm_id(model)) if model else None
 
 
 def builtin_for(model: str) -> list[str]:

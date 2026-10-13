@@ -284,7 +284,11 @@ host, not the case: deleting a case leaves them. They live under
   rather than a shell: the layout makes that obvious where plain text may not.
 - **Vision.** The model picker marks models that read images (👁), text-only ones, and
   reasoning models (🧠), from NanoGPT's model details (Private Mode models borrow their public
-  twin's; other providers can be marked under Settings → Providers → "Reads images"). With a
+  twin's; other providers can be marked under Settings → Providers → "Reads images"). It also
+  marks **✓ tested** the models DA Toolkit's prompts were evaluated with (hover for the verdict,
+  or type "tested" in the filter): see [which models work well](docs/model-evaluation.md). A
+  variant of a tested model (a flash or thinking edition) is another model and isn't marked.
+  With a
   text-only chat model, set a **vision helper** in Settings → Model: it describes each image
   once (text transcribed exactly, then the rest) and the chat model gets the description,
   shown under the image in the chat. That adds a request per image, so replies with images
