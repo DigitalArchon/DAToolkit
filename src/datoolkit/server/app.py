@@ -25,7 +25,7 @@ from ..sessions import guac
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 COMPANION_FILES = {"style.css", "companion.js", "icon.svg"}
-# a photo is at most 6 MB (8 MB as base64, see Engine._save_images) plus its description
+# a photo is at most 6 MB (8 MB as base64, see Engine.clean_images) plus its description
 MAX_COMPANION_BODY = 10 * 1024 * 1024
 
 
@@ -174,7 +174,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         image = body.get("image")
         if not isinstance(image, str) or not image:
             raise HTTPException(400, "a photo is required")
-        e.send(str(body.get("message", ""))[:4000], images=[image], via="phone")
+        cleaned = await asyncio.to_thread(e.clean_images, [image])   # CPU-bound: not on the event loop
+        e.send(str(body.get("message", ""))[:4000], images=cleaned, via="phone")
         return {"ok": True}
 
     @comp.post("/api/companion/hypotheses/{hid}")
@@ -400,7 +401,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/send")
     async def send(body: dict, e: Engine = Depends(auth)):
-        e.send(body.get("message", ""), body.get("results"), body.get("snippets"), body.get("images"))
+        images = body.get("images") or []
+        if images:                              # decoded and re-encoded off the event loop
+            images = await asyncio.to_thread(e.clean_images, images)
+        e.send(body.get("message", ""), body.get("results"), body.get("snippets"), images)
         return {"ok": True}
 
     @app.post("/api/web-search/{sid}")

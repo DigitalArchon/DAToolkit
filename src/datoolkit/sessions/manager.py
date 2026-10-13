@@ -89,6 +89,7 @@ class Session:
     exited: bool = False
     exit_status: int | None = None
     backlog: bytearray = field(default_factory=bytearray)
+    pending: bytearray = field(default_factory=bytearray)   # input the PTY hasn't taken yet
     subscribers: set = field(default_factory=set)
     transcript: TranscriptWriter = field(default_factory=TranscriptWriter)
     used_stored_password: bool = False
@@ -162,6 +163,7 @@ class SessionManager:
         self._on_change = on_change
         self._transcript_dir: Callable[[str], Path | None] = lambda sid: None
         self._devices = 0
+        self._tasks: set[asyncio.Task] = set()     # reaping and terminating, off the event loop
 
     def set_transcript_paths(self, path_for: Callable[[str], Path | None]) -> None:
         self._transcript_dir = path_for
@@ -181,6 +183,9 @@ class SessionManager:
     def spawn(self, sid: str, argv: list[str], env: dict[str, str], **meta) -> Session:
         full_env = host_env(TERM="xterm-256color", COLORTERM="truecolor", **env)
         proc = PtyProcess.spawn(argv, env=full_env, cwd=os.path.expanduser("~"), dimensions=(30, 100))
+        # Never block the event loop on the PTY: a paste the program isn't reading waits in
+        # `pending` (see write) instead of stalling every session, the GUI and the companion.
+        os.set_blocking(proc.fd, False)
         sess = Session(id=sid, proc=proc, **meta)
         sess.transcript.open(self._transcript_dir(sid))
         self._auto_link(sess)
@@ -226,9 +231,22 @@ class SessionManager:
         dev = self.sessions[sid].device
         return [s for s in self.sessions.values() if s.device == dev and not s.exited]
 
+    def _task(self, coro) -> asyncio.Task:
+        task = asyncio.get_running_loop().create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def wait_closed(self, timeout: float = 3) -> None:
+        """Wait (briefly) for the background reaping and termination of closed sessions."""
+        if self._tasks:
+            await asyncio.wait(list(self._tasks), timeout=timeout)
+
     def _on_readable(self, sess: Session) -> None:
         try:
             data = os.read(sess.proc.fd, 65536)
+        except BlockingIOError:
+            return                       # woken for nothing: not the end of the session
         except OSError:
             data = b""
         if not data:
@@ -245,18 +263,23 @@ class SessionManager:
             q.put_nowait(data)
 
     def _mark_exited(self, sess: Session) -> None:
+        """The PTY reported EOF. The child is reaped on a worker thread (it may take a moment
+        to go), and the closing line is written once its exit status is known."""
         loop = asyncio.get_running_loop()
         loop.remove_reader(sess.proc.fd)
+        self._drop_pending(sess)
         sess.exited = True
-        try:
-            sess.proc.isalive()  # reaps the child
-            sess.exit_status = sess.proc.exitstatus
-        except Exception:  # noqa: BLE001
-            pass
         sess.proc.close()
+        self._on_change()
+        self._task(self._reap(sess))
+
+    async def _reap(self, sess: Session) -> None:
+        try:
+            sess.exit_status = await asyncio.to_thread(sess.proc.reap, 1.0)
+        except Exception:  # noqa: BLE001 - already reaped, or gone some other way
+            pass
         self._publish(sess, f"\r\n\x1b[2m[session ended, exit status {sess.exit_status}]\x1b[0m\r\n".encode())
         sess.transcript.close()
-        self._on_change()
 
     def mark_window_closed(self, sess: WindowSession) -> None:
         """The window has gone: the session stays, marked closed, like an exited shell."""
@@ -275,9 +298,41 @@ class SessionManager:
             self.sessions[sid].subscribers.discard(q)
 
     def write(self, sid: str, data: bytes) -> None:
+        """Input for the program. What the PTY doesn't take at once (its input buffer is a few
+        KB, and a program that isn't reading never empties it) waits in `pending` and goes in
+        as the PTY accepts it, so a long paste never stalls the event loop."""
         sess = self.sessions[sid]
-        if not sess.exited:
-            os.write(sess.proc.fd, data)
+        if sess.exited:
+            return
+        if sess.pending:
+            sess.pending += data
+            return
+        try:
+            n = os.write(sess.proc.fd, data)
+        except BlockingIOError:
+            n = 0
+        if n < len(data):
+            sess.pending += data[n:]
+            asyncio.get_running_loop().add_writer(sess.proc.fd, self._on_writable, sess)
+
+    def _on_writable(self, sess: Session) -> None:
+        try:
+            n = os.write(sess.proc.fd, sess.pending)
+        except BlockingIOError:
+            return
+        except OSError:                  # the PTY is gone: the reader sees EOF and ends the session
+            n = len(sess.pending)
+        del sess.pending[:n]
+        if not sess.pending:
+            asyncio.get_running_loop().remove_writer(sess.proc.fd)
+
+    def _drop_pending(self, sess: Session) -> None:
+        if sess.pending:
+            sess.pending.clear()
+            try:
+                asyncio.get_running_loop().remove_writer(sess.proc.fd)
+            except (RuntimeError, OSError):
+                pass
 
     def resize(self, sid: str, cols: int, rows: int) -> None:
         sess = self.sessions[sid]
@@ -297,9 +352,12 @@ class SessionManager:
         if not sess.exited:
             try:
                 asyncio.get_running_loop().remove_reader(sess.proc.fd)
-            except RuntimeError:
-                pass
-            sess.proc.terminate()
+                self._drop_pending(sess)
+                # SIGHUP, a moment's grace, then SIGKILL: waited for on a worker thread (see
+                # wait_closed), never on the event loop
+                self._task(asyncio.to_thread(sess.proc.terminate))
+            except RuntimeError:         # no event loop (scripts, some tests): wait here
+                sess.proc.terminate()
         sess.transcript.close()
         for q in list(sess.subscribers):
             q.put_nowait(None)

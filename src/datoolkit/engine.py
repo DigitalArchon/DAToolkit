@@ -257,6 +257,10 @@ class Engine:
         self._tee: dict[tuple[str, str], tuple[tee_mod.TeeClient, float, dict]] = {}
         self._tee_factory: Callable | None = None      # tests: (base_url, key, model) -> TeeClient
         self._background: set[asyncio.Task] = set()     # reply-signature checks and automatic reviews still running
+        # (kind, name) -> whether the keyring holds it. Each lookup is a synchronous Secret
+        # Service call (and may raise the unlock dialog), and a snapshot asks about every
+        # provider and host, so the answers are kept until a secret is stored or removed here.
+        self._secret_cache: dict[tuple[str, str], bool] = {}
         self._review_slots = asyncio.Semaphore(REVIEW_CONCURRENCY)
         self._reviewer_attest = asyncio.Lock()          # one attestation of a TEE reviewer, not one per review
 
@@ -276,6 +280,7 @@ class Engine:
             if task:
                 task.cancel()
         self.sessions.close_all()
+        await self.sessions.wait_closed()
         await self.bridge.stop()
         try:
             await asyncio.wait_for(asyncio.to_thread(self.guacd.stop), 4)
@@ -333,12 +338,17 @@ class Engine:
                 h["pinned"] = pin["sha256"] if pin else ""
         return c
 
-    @staticmethod
-    def _has_secret(kind: str, name: str) -> bool:
-        try:
-            return creds.has_secret(kind, name)
-        except Exception:  # noqa: BLE001 - keyring locked/unavailable
-            return False
+    def _has_secret(self, kind: str, name: str) -> bool:
+        key = (kind, name)
+        if key not in self._secret_cache:
+            try:
+                self._secret_cache[key] = creds.has_secret(kind, name)
+            except Exception:  # noqa: BLE001 - keyring locked/unavailable: asked again next time
+                return False
+        return self._secret_cache[key]
+
+    def _secrets_changed(self) -> None:
+        self._secret_cache.clear()
 
     def _changed(self) -> None:
         self.emit("state", state=self.snapshot())
@@ -395,12 +405,14 @@ class Engine:
         if not self.cfg.active_provider:
             self.cfg.active_provider = name
         self._models.pop(name, None)
+        self._secrets_changed()
         self._save_config(self.cfg)
         self._changed()
 
     def delete_provider(self, name: str) -> None:
         self.cfg.providers = [p for p in self.cfg.providers if p.name != name]
         creds.delete_secret("provider", name)
+        self._secrets_changed()
         if self.cfg.active_provider == name:
             self.cfg.active_provider = self.cfg.providers[0].name if self.cfg.providers else ""
             self.cfg.active_model = ""
@@ -793,17 +805,20 @@ class Engine:
             self.cfg.hosts.append(host)
         if password:
             creds.set_secret("host", name, password)
+        self._secrets_changed()
         self._save_config(self.cfg)
         self._changed()
 
     def delete_host(self, name: str) -> None:
         self.cfg.hosts = [h for h in self.cfg.hosts if h.name != name]
         creds.delete_secret("host", name)
+        self._secrets_changed()
         self._save_config(self.cfg)
         self._changed()
 
     def forget_host_password(self, name: str) -> None:
         creds.delete_secret("host", name)
+        self._secrets_changed()
         self._changed()
 
     def save_settings(self, data: dict) -> None:
@@ -1334,6 +1349,7 @@ class Engine:
             if sess and sess.host_name:
                 creds.set_secret("host", sess.host_name, answer)
                 sess.used_stored_password = True
+                self._secrets_changed()
         return answer
 
     def answer_prompt(self, pid: str, answer: str | None, save: bool = False) -> None:
@@ -2486,9 +2502,9 @@ class Engine:
             raise UserError("Nothing to send.")
         if images and self.vision_status()["mode"] == "none":
             raise UserError(self.vision_status()["why"] + " Images can't be sent.")
-        saved_images = self._save_images(images)
-        if not self.conv and message.strip():
-            self._find_similar(message)
+        saved_images = self._save_images(self.clean_images(images))
+        # the first message of a case looks for similar past cases (off the loop, in the turn)
+        similar_for = message if not self.conv and message.strip() else ""
 
         parts, shown = [], []
         if via == "phone":
@@ -2547,16 +2563,19 @@ class Engine:
         self.emit("chat", entry=self.chat[-1])
         self._queue_changed()
         self._persist()
-        self._turn = asyncio.create_task(self._run_turn(prov, model, tier))
+        self._turn = asyncio.create_task(self._run_turn(prov, model, tier, similar_for))
 
-    def _save_images(self, images: list[str]) -> list[tuple[str, str]]:
-        """Clean attached images (decoded and re-encoded from pixels only: no metadata, no
-        embedded thumbnails, no extra frames or trailing bytes), store them in the case
-        directory under a generic name, and return (file name, data URL of the CLEANED image)
-        pairs. Only the cleaned image is ever stored or sent; the audit log records the name."""
+    @staticmethod
+    def clean_images(images: list) -> list[images_mod.Cleaned]:
+        """Attached images as data URLs, decoded and re-encoded from pixels only (no metadata,
+        no embedded thumbnails, no extra frames or trailing bytes; safety/images.py). CPU-bound:
+        the server runs it in a thread before send(). Images already cleaned pass through."""
         cleaned = []
-        for data_url in images[:4]:
-            m = re.match(r"data:image/(jpeg|jpg|png);base64,([A-Za-z0-9+/=]+)$", data_url or "")
+        for image in (images or [])[:4]:
+            if isinstance(image, images_mod.Cleaned):
+                cleaned.append(image)
+                continue
+            m = re.match(r"data:image/(jpeg|jpg|png);base64,([A-Za-z0-9+/=]+)$", image or "")
             if not m:
                 raise UserError("Images must be PNG or JPEG.")
             raw = base64.b64decode(m.group(2))
@@ -2566,19 +2585,27 @@ class Engine:
                 cleaned.append(images_mod.clean(raw))
             except ValueError as e:
                 raise UserError(f"Could not use an attached image: {e}") from e
+        return cleaned
+
+    def _save_images(self, cleaned: list[images_mod.Cleaned]) -> list[tuple[str, str]]:
+        """Store cleaned images in the case directory under a generic name, and return (file
+        name, data URL of the CLEANED image) pairs. Only the cleaned image is ever stored or
+        sent; the audit log records the name."""
         out = []
-        for data, ext in cleaned:
+        for image in cleaned:
             n = 1 + sum(1 for _ in self.case.dir.glob("img-*"))
-            name = f"img-{n}.{ext}"
-            (self.case.dir / name).write_bytes(data)
-            self.log("image_attached", file=name, bytes=len(data), metadata="stripped (re-encoded from pixels)")
-            mime = "image/jpeg" if ext == "jpg" else "image/png"
-            out.append((name, f"data:{mime};base64,{base64.b64encode(data).decode()}"))
+            name = f"img-{n}.{image.ext}"
+            (self.case.dir / name).write_bytes(image.data)
+            self.log("image_attached", file=name, bytes=len(image.data), metadata="stripped (re-encoded from pixels)")
+            mime = "image/jpeg" if image.ext == "jpg" else "image/png"
+            out.append((name, f"data:{mime};base64,{base64.b64encode(image.data).decode()}"))
         return out
 
-    def _find_similar(self, message: str) -> None:
+    async def _find_similar(self, message: str) -> None:
+        """Past cases like this one, for their runbooks (searched on a worker thread: every
+        case's files are read)."""
         try:
-            hits = search.search(message, exclude_id=self.case.id if self.case else "")
+            hits = await asyncio.to_thread(search.search, message, exclude_id=self.case.id if self.case else "")
         except OSError:
             hits = []
         self._similar = hits
@@ -2683,7 +2710,7 @@ class Engine:
             {"role": "user", "content": prompts.STATE_HEADER + "\n\n" + state}]
         return messages, {"prompt_caching": {"enabled": True, "ttl": ttl, "cut_after_message_index": len(messages) - 2}}
 
-    async def _run_turn(self, prov: Provider, model: str, tier: str) -> None:
+    async def _run_turn(self, prov: Provider, model: str, tier: str, similar_for: str = "") -> None:
         self.emit("turn_start", model=model, tier=tier)
         entry = {"kind": "assistant", "text": "", "reasoning": "", "proposals": [], "model": model, "tier": tier}
         usage = None
@@ -2692,6 +2719,8 @@ class Engine:
         retired = None        # the model is no longer offered: {"model", "offered": [...]} for the note
         in_flight = None      # (system, messages sent, ...) of the request being streamed, for the log
         try:
+            if similar_for:
+                await self._find_similar(similar_for)
             client = self._client(prov, model)
             if isinstance(client, PrivateModeClient):
                 # nothing is sent until the enclave has proved itself, and not to a model NanoGPT

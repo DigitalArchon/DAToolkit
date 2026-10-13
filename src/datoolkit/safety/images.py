@@ -9,6 +9,7 @@ what is cleaned here is exactly what the technician saw."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from io import BytesIO
 
 from PIL import Image
@@ -18,8 +19,19 @@ MAX_SIDE = 10_000
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS          # refuse decompression bombs
 
 
-def clean(raw: bytes) -> tuple[bytes, str]:
-    """Return (re-encoded bytes, "png" | "jpg"). PNG stays lossless (screenshots); JPEG is
+@dataclass(frozen=True)
+class Cleaned:
+    """An image re-encoded from its pixels: `data` in `ext` ("png" | "jpg")."""
+    data: bytes
+    ext: str
+
+    def __iter__(self):                      # (data, ext), as clean() always returned
+        yield self.data
+        yield self.ext
+
+
+def clean(raw: bytes) -> Cleaned:
+    """Return the image re-encoded from its pixels. PNG stays lossless (screenshots); JPEG is
     re-encoded at quality 90 (photos). Raises ValueError for anything else."""
     try:
         with Image.open(BytesIO(raw)) as im:
@@ -38,6 +50,6 @@ def clean(raw: bytes) -> tuple[bytes, str]:
     out = BytesIO()
     if fmt == "JPEG":
         fresh.save(out, "JPEG", quality=90)
-        return out.getvalue(), "jpg"
+        return Cleaned(out.getvalue(), "jpg")
     fresh.save(out, "PNG")
-    return out.getvalue(), "png"
+    return Cleaned(out.getvalue(), "png")

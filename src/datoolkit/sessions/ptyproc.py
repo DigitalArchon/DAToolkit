@@ -53,6 +53,15 @@ class PtyProcess:
             return True
         return False
 
+    def reap(self, timeout: float = 1.0) -> int | None:
+        """Wait up to `timeout` for the child to be reaped and return its exit status (None
+        while it runs or when a signal ended it). Blocks: call it from a worker thread."""
+        try:
+            self.popen.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        return self.exitstatus
+
     def setwinsize(self, rows: int, cols: int) -> None:
         _set_size(self.fd, rows, cols)
 
