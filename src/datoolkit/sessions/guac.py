@@ -199,6 +199,18 @@ def encode(*elements) -> str:
     return ",".join(f"{len(s)}.{s}" for s in (str(e) for e in elements)) + ";"
 
 
+def fingerprint_param(sha256: str) -> str:
+    """A pinned certificate as guacd's `cert-fingerprints` (1.6+) takes it: FreeRDP's
+    `hash:fingerprint` form, the fingerprint as colon-separated lower-case hex."""
+    return "sha256:" + sha256.lower()
+
+
+def enforces_pin(names: list[str], params: dict[str, str]) -> bool:
+    """Whether this guacd checks the certificate against the pin on the connection itself:
+    it offers `cert-fingerprints` (1.6 and later) and there is a pin to give it."""
+    return "cert-fingerprints" in names and bool(params.get("cert-fingerprints"))
+
+
 class Parser:
     """Incremental parser: feed text, get complete instructions as lists of strings."""
 
@@ -264,10 +276,15 @@ async def handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, 
     writer.write(encode("select", protocol).encode())
     await writer.drain()
     names = await expect("args")
+    pinned = enforces_pin(names, params)
     values = []
     for name in names:
         if name.startswith("VERSION_"):
             values.append(name)            # speak whatever protocol version guacd offers
+        elif name == "ignore-cert" and pinned:
+            # guacd 1.6+: FreeRDP checks the certificate against the pin on this very
+            # connection, so the probe that read it (rdpcert.fetch) can't be told apart from it
+            values.append("false")
         else:
             values.append(params.get(name, ""))
     writer.write((encode("size", width, height, dpi) + encode("audio") + encode("video")

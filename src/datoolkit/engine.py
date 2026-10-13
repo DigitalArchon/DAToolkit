@@ -1209,10 +1209,17 @@ class Engine:
                                            secret=True, can_save=True)
             if password is None:
                 raise UserError("No password given; RDP session not opened.")
+        # "Negotiate (any)" takes the security the server chose when its certificate was read
+        # (NLA or TLS; legacy RDP only after the technician accepted that), so someone in the
+        # middle can't offer guacd a downgrade to legacy security, which has no certificate to pin.
+        security = host.rdp_security if host.rdp_security != "any" else cert.get("protocol") or "any"
         params = {"hostname": host.host, "port": str(port), "username": user, "password": password,
-                  "domain": domain, "security": host.rdp_security, "ignore-cert": "true",
+                  "domain": domain, "security": security, "ignore-cert": "true",
                   "server-layout": host.rdp_layout, "resize-method": "display-update",
                   "disable-audio": "true", "enable-font-smoothing": "true"}
+        if cert["tls"]:
+            # a guacd that can (1.6+) checks the pin on the connection itself (guac.handshake)
+            params["cert-fingerprints"] = guac.fingerprint_param(cert["sha256"])
         sess = self.sessions.add(RdpSession(
             id=sid, name=host.name, params=params, target=f"{host.user + '@' if host.user else ''}{host.host}:{port}",
             os_hint=host.os_hint or "Windows", host_name=host.name, address=host.host, cert=cert))
@@ -1285,11 +1292,16 @@ class Engine:
             raise KeyError(sid)
         return dict(sess.params)
 
-    def rdp_state(self, sid: str, connected: bool, error: str = "") -> None:
+    def rdp_state(self, sid: str, connected: bool, error: str = "", pin_enforced: bool | None = None) -> None:
+        """`pin_enforced`: whether guacd itself checked the certificate against the pin on this
+        connection (guacd 1.6+), or only DA Toolkit's probe did."""
         sess = self.sessions.sessions.get(sid)
         if isinstance(sess, RdpSession):
             sess.connected = connected
-            self.log("rdp_connected" if connected else "rdp_disconnected", session_id=sid, error=error)
+            if connected:
+                sess.pin_enforced = pin_enforced
+            self.log("rdp_connected" if connected else "rdp_disconnected", session_id=sid, error=error,
+                     **({"pin_enforced": pin_enforced} if connected else {}))
             self._sessions_changed()
 
     # ---------------------------------------------------------------- windows

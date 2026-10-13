@@ -45,7 +45,8 @@ def test_encode_and_incremental_parse():
 class FakeGuacd:
     """A guacd that offers a few args, records the handshake and what arrives afterwards."""
 
-    def __init__(self, reply_ready=True):
+    def __init__(self, reply_ready=True, args=("VERSION_1_3_0", "hostname", "password", "ignore-cert")):
+        self.args = list(args)
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(1)
@@ -66,7 +67,7 @@ class FakeGuacd:
                     return
                 got += parser.feed(data.decode())
                 if got and got[0][0] == "select" and len(got) == 1:
-                    conn.sendall(guac.encode("args", "VERSION_1_3_0", "hostname", "password", "ignore-cert").encode())
+                    conn.sendall(guac.encode("args", *self.args).encode())
             self.handshake = got
             if not self.reply_ready:
                 conn.sendall(guac.encode("error", "Aborted. See logs.", "519").encode())
@@ -95,6 +96,25 @@ async def test_handshake_answers_args_from_params():
     assert g.handshake[-1] == ["connect", "VERSION_1_3_0", "dc01", "p;w", "true"]
     assert g.handshake[1] == ["size", "1024", "768", "96"]
     assert leftover == guac.encode("sync", "7")          # nothing guacd sent after ready is lost
+
+
+async def test_handshake_hands_the_pin_to_a_guacd_that_checks_it():
+    """guacd 1.6 offers cert-fingerprints: it gets the pin and ignore-cert false; 1.3 doesn't,
+    and ignore-cert stays true (DA Toolkit's own probe checked the certificate)."""
+    params = {"hostname": "dc01", "password": "pw", "ignore-cert": "true", "cert-fingerprints": "sha256:ab:cd"}
+    g = FakeGuacd(args=("VERSION_1_5_0", "hostname", "password", "ignore-cert", "cert-fingerprints", "cert-tofu"))
+    r, w = await asyncio.open_connection("127.0.0.1", g.port)
+    _, names, _, _ = await guac.handshake(r, w, "rdp", params, 800, 600)
+    w.close()
+    assert g.handshake[-1] == ["connect", "VERSION_1_5_0", "dc01", "pw", "false", "sha256:ab:cd", ""]
+    assert guac.enforces_pin(names, params)
+    g = FakeGuacd()
+    r, w = await asyncio.open_connection("127.0.0.1", g.port)
+    _, names, _, _ = await guac.handshake(r, w, "rdp", params, 800, 600)
+    w.close()
+    assert g.handshake[-1] == ["connect", "VERSION_1_3_0", "dc01", "pw", "true"]
+    assert not guac.enforces_pin(names, params)
+    assert guac.fingerprint_param("AB:CD:EF") == "sha256:ab:cd:ef"
 
 
 async def test_handshake_error_from_guacd():
@@ -209,6 +229,8 @@ async def test_tofu_pins_then_trusts_then_blocks_a_change(rdp_env):
         params = engine.rdp_params(roster["id"])
         assert params["username"] == "bob" and params["domain"] == "CORP" and params["password"] == "s3cret"
         assert params["ignore-cert"] == "true"
+        assert params["cert-fingerprints"] == "sha256:" + fp1.lower()     # enforced by a guacd that can
+        assert params["security"] == "tls"                               # what the server chose: no downgrade
         assert params["resize-method"] == "display-update"     # Fit to window resizes live where the server can
         assert engine.pins.get("127.0.0.1", port)["sha256"] == fp1
         assert engine.snapshot()["config"]["hosts"][-1]["pinned"] == fp1
@@ -242,6 +264,8 @@ async def test_legacy_rdp_asks_every_time_and_guacd_missing(rdp_env, monkeypatch
         opener = asyncio.create_task(engine.open_rdp("old"))
         await answer_prompts(engine, ["yes"])
         assert (await opener)["cert"]["tls"] is False
+        legacy = engine.rdp_params("old")
+        assert legacy["security"] == "rdp" and "cert-fingerprints" not in legacy
         assert "no TLS certificate" in [e for e in events if e["type"] == "prompt"][-1]["prompt"]["text"]
 
     async def down():

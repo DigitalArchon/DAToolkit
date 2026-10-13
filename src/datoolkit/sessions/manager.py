@@ -121,13 +121,14 @@ class RdpSession:
     link: str = "auto"
     cert: dict = field(default_factory=dict)
     connected: bool = False
+    pin_enforced: bool | None = None   # guacd checked the pin on the connection itself (1.6+)
     relay: object = None        # the task relaying the current browser connection
 
     def roster(self) -> dict:
         return {"id": self.id, "name": self.name, "kind": self.kind, "target": self.target,
                 "shell": self.shell, "os_hint": self.os_hint, "exited": self.exited,
                 "host_name": self.host_name, "device": self.device, "link": self.link,
-                "connected": self.connected,
+                "connected": self.connected, "pin_enforced": self.pin_enforced,
                 "cert": {k: self.cert.get(k) for k in ("tls", "sha256", "subject") if k in self.cert}}
 
 

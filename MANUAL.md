@@ -630,8 +630,12 @@ collateral and NVIDIA's keys are cached for an hour.
     issuer and SHA-256 fingerprint to verify (on Windows: the Remote Desktop certificate in
     `certlm.msc`); after that, a different certificate blocks the connection until you forget
     the pin in Settings → Hosts. Servers offering only legacy RDP security have no
-    certificate, so you are warned on every connection. guacd 1.3 cannot enforce a pin
-    itself, so the check and guacd's connection are separate TLS sessions.
+    certificate, so you are warned on every connection. With guacd 1.6 or later (the
+    container) the pin is also handed to guacd, which checks the certificate on the
+    connection itself; guacd 1.3 (Ubuntu's and Mint's package) cannot, so there the check
+    and guacd's connection are separate TLS sessions. The **Negotiate (any)** security mode
+    connects with what the server chose when its certificate was read (NLA or TLS), so a
+    downgrade to legacy RDP security, which has no certificate to check, is refused.
   - The toolbar sends Ctrl+Alt+Del, Win and Win+R (keys the app window can't capture), takes
     a screenshot to the chat, sends text you copied on the remote desktop to the AI, and puts
     text on the remote clipboard or types it.

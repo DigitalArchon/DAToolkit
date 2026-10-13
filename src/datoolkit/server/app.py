@@ -651,15 +651,15 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         try:
             try:
                 reader, writer = await guac.connect(5)
-                _, _, leftover, decoder = await guac.handshake(reader, writer, "rdp", params, width, height, dpi,
-                                                               _local_timezone())
+                _, names, leftover, decoder = await guac.handshake(reader, writer, "rdp", params, width, height, dpi,
+                                                                   _local_timezone())
             except (OSError, asyncio.TimeoutError, guac.GuacError) as e:
                 msg = str(e) or type(e).__name__
                 engine.rdp_state(sid, False, msg)
                 await ws.send_text(guac.tunnel_uuid() + guac.encode("error", f"Could not start RDP via guacd: {msg}", "519"))
                 await ws.close()
                 return
-            engine.rdp_state(sid, True)
+            engine.rdp_state(sid, True, pin_enforced=guac.enforces_pin(names, params) if params.get("cert-fingerprints") else None)
             await ws.send_text(guac.tunnel_uuid() + leftover)
 
             async def down():            # guacd -> browser

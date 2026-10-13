@@ -56,8 +56,10 @@ def describe(der: bytes) -> dict:
 
 
 async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
-    """{"tls": bool, "sha256": str, "subject", "issuer", "not_after", "self_signed"}.
-    tls False means the server only offers legacy RDP security: there is no certificate."""
+    """{"tls": bool, "protocol": "nla" | "tls" | "rdp", "sha256": str, "subject", "issuer",
+    "not_after", "self_signed"}. `protocol` is the security the server chose when offered TLS
+    and CredSSP (guacd's names); tls False means it only offers legacy RDP security, so there
+    is no certificate."""
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), TIMEOUT)
     except (OSError, asyncio.TimeoutError) as e:
@@ -77,7 +79,9 @@ async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
             raise CertError(f"{host}:{port} refused TLS negotiation (RDP failure code {code})")
         selected = struct.unpack("<I", neg[4:8])[0] if len(neg) >= 8 and neg[0] == 0x02 else 0
         if not selected & (PROTOCOL_TLS | PROTOCOL_HYBRID):
-            return {"tls": False, "sha256": "", "subject": "", "issuer": "", "not_after": "", "self_signed": False}
+            return {"tls": False, "protocol": "rdp", "sha256": "", "subject": "", "issuer": "", "not_after": "",
+                    "self_signed": False}
+        protocol = "nla" if selected & PROTOCOL_HYBRID else "tls"
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE          # we verify by pin, not by CA
@@ -92,7 +96,7 @@ async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
         der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
         if not der:
             raise CertError(f"{host}:{port} sent no certificate")
-        return {"tls": True, "sha256": fingerprint(der), **describe(der)}
+        return {"tls": True, "protocol": protocol, "sha256": fingerprint(der), **describe(der)}
     except (asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError, ConnectionError) as e:
         raise CertError(f"TLS handshake with {host}:{port} failed: {e or type(e).__name__}") from e
     finally:
