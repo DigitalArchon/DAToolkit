@@ -31,7 +31,7 @@ from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
 from .llm.private_mode import (Enclave, ModelRetired, PrivateModeClient, PrivateModeError,
                                list_private_models, offers_private_mode, relay_url)
-from .llm import capabilities, model_prompts, research, textcalls, websearch
+from .llm import capabilities, model_prompts, netguard, research, textcalls, websearch
 from .llm import tee as tee_mod
 from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
@@ -359,6 +359,9 @@ class Engine:
         base_url = str(data.get("base_url", "")).strip().rstrip("/")
         if not name or not base_url:
             raise UserError("Provider needs a name and base URL.")
+        found = None if is_training_url(base_url) else netguard.problem(base_url)
+        if found:
+            raise UserError(f"Provider not saved. {found}")
         overrides = {k.strip(): v.strip() for k, v in (data.get("tier_overrides") or {}).items() if k.strip()}
         vision = {k.strip(): str(v).strip().lower() for k, v in (data.get("vision_overrides") or {}).items() if k.strip()}
         bad = [k for k, v in vision.items() if v not in ("yes", "no")]
@@ -403,10 +406,21 @@ class Engine:
         self._save_config(self.cfg)
         self._changed()
 
+    @staticmethod
+    def _secure(prov: Provider) -> None:
+        """https, or the local network (llm/netguard.py): checked where each request leaves
+        from, so a config file edited by hand sends nothing either. Raises UserError."""
+        if is_training_url(prov.base_url):
+            return                     # scripted: nothing leaves the machine
+        found = netguard.problem(prov.base_url)
+        if found:
+            raise UserError(found)
+
     def _client(self, provider: Provider, model: str = "") -> LLMClient | PrivateModeClient:
-        key = creds.get_secret("provider", provider.name)
         if is_training_url(provider.base_url):
             return TrainingClient(provider.base_url)
+        self._secure(provider)
+        key = creds.get_secret("provider", provider.name)
         if is_private_mode(model):
             enclave = self._enclaves.get(provider.name)
             if enclave is None or enclave.relay != relay_url(provider.base_url):
@@ -457,6 +471,7 @@ class Engine:
             self._caps.setdefault(prov.name, {})
             return
         try:
+            self._secure(prov)
             self._caps[prov.name] = await capabilities.fetch_nanogpt(
                 prov.base_url, self._get_secret_safe("provider", prov.name), http=self._caps_http)
         except Exception as e:  # noqa: BLE001 - models still work; vision is just unknown
@@ -650,6 +665,7 @@ class Engine:
     async def _attest_tee(self, prov: Provider, model: str) -> tee_mod.Attestation:
         """A TEE model's enclave, checked now with a fresh nonce. Raises TeeRefused when it
         doesn't hold; then nothing may be sent to it."""
+        self._secure(prov)
         key = creds.get_secret("provider", prov.name) or ""
         make = self._tee_factory or tee_mod.TeeClient
         client = make(prov.base_url, key, model)
@@ -2060,6 +2076,7 @@ class Engine:
         prov = self._search_provider()
         if not prov:
             raise UserError("Web search needs a NanoGPT provider.")
+        self._secure(prov)
         key = self._get_secret_safe("provider", prov.name)
         if not key:
             raise UserError(f"No API key stored for {prov.name}.")
@@ -2367,6 +2384,7 @@ class Engine:
         sprov = self._search_provider()
         if not sprov:
             raise UserError("Research needs a NanoGPT provider.")
+        self._secure(sprov)
         key = self._get_secret_safe("provider", sprov.name)
         if not key:
             raise UserError(f"No API key stored for {sprov.name}.")

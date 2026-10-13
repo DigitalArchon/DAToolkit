@@ -2828,7 +2828,7 @@ function openSettings(tab = "providers") {
     };
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "row" }, h("label", { class: "field" }, h("span", {}, "Name"), name),
-        h("label", { class: "field", style: "flex:2" }, h("span", {}, "Base URL (OpenAI-compatible)"), url)),
+        h("label", { class: "field", style: "flex:2" }, h("span", {}, "Base URL (OpenAI-compatible; https://, or http:// only on this machine and its local network)"), url)),
       h("label", { class: "field" }, h("span", {}, "API key"), key),
       h("label", { class: "field" }, h("span", {}, "Default model"), def),
       h("label", { class: "field" }, h("span", {}, "Tier overrides"), overrides),

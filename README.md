@@ -28,7 +28,8 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
   [which models work well](docs/model-evaluation.md) for how nine popular models did.
 - **Privacy tiers per case.** Open, Confidential and Sovereign cases limit which models may
   see the data: anything, end-to-end encrypted or local, or local only. End-to-end encrypted
-  and TEE models are attested before anything is sent.
+  and TEE models are attested before anything is sent. Providers are reached over https, or
+  plain http only on this machine and its local network: nothing else is sent to.
 - **An explicit investigation**: a hypothesis board the AI keeps up to date, recipes for
   common checks, baselines and diffs, dry runs, rollbacks and second opinions from a
   reviewer model before risky changes.

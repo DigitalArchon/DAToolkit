@@ -478,11 +478,20 @@ did, the habits that tripped them up, and why each nudge and note exists.
 | **E2EE** | NanoGPT `private/…` ids | Ciphertext only, plus your account, the model, timing, sizes and usage |
 | **Local** | localhost / private-IP base URL | Nothing leaves your network |
 
+**Requests go over https, or not at all.** A base URL that is plain `http://` is accepted
+only for this machine and its local network: `localhost`, `127.x`, `10.x`, `172.16`–`31.x`,
+`192.168.x`, link-local addresses and `.local` names, which is how a model server of your own
+is reached. For any other address, Settings → AI providers will not save it, and a
+`config.toml` edited by hand to hold one sends nothing (chat, model list, attestation, web
+search and research alike): the app says why instead. The address is never rewritten to
+https for you, and certificates are always checked.
+
 **Local trusts your network.** A base URL counts as Local when its host is `localhost`, a
 private or link-local IP, or a name ending `.local` or `.lan`, so Confidential and Sovereign
-cases may use it. With `http://`, prompts (client data included) and the API key cross the
-LAN unencrypted, and a `.lan` name is only as trustworthy as your DNS. Use Local over the
-network only on a LAN you trust, or put the model server behind HTTPS.
+cases may use it. With `http://` to a private IP or a `.local` name, prompts (client data
+included) and the API key cross the LAN unencrypted, and such a name is only as trustworthy
+as your DNS. Use Local over the network only on a LAN you trust, or put the model server
+behind HTTPS (a `.lan` name is reached over https only).
 
 Override any model's tier under **Settings → AI providers → Tier overrides**.
 
