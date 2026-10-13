@@ -31,8 +31,14 @@ dependencies = [
     # Pinned here so the venv never falls back to an older distro copy (Mint/Ubuntu ship 1.1).
     "brotli>=1.2",
     # End-to-end encrypted NanoGPT Private Mode (llm/private_mode.py): Tinfoil's attestation
-    # verifier and EHBP client. Pinned exactly: it holds the plaintext.
+    # verifier and EHBP client. Pinned exactly: it holds the plaintext. tinfoil asks only for
+    # tinfoil-ehbp>=0.3.0, so the library that seals and opens the bodies, and the HPKE under
+    # it, are pinned here too, at the AppImage lock's versions (tests/test_private_mode.py
+    # checks they agree): a source install took 0.4.0 the day it came out, a new request
+    # framing never run against the enclave here.
     "tinfoil==0.14.0",
+    "tinfoil-ehbp==0.3.2",
+    "pyhpke==0.6.5",
 ]
 
 [project.optional-dependencies]

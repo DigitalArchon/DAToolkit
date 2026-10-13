@@ -225,3 +225,27 @@ async def test_engine_routes_private_model_sealed_and_logs_attestation(tmp_path,
         assert "enclave_attested" in log and KEY not in log  # key fingerprint only, never the key
     finally:
         await engine.stop()
+
+
+ENCRYPTION_STACK = ("tinfoil", "tinfoil-ehbp", "pyhpke")
+
+
+def test_the_encryption_stack_is_pinned_exactly_and_alike_everywhere():
+    """A source install (pip install -e .) reads pyproject.toml, not the AppImage lock, and
+    tinfoil accepts any tinfoil-ehbp>=0.3.0: unpinned, a source install took 0.4.0 the day it
+    came out (Oct 6 2026), a new request framing never run against the enclave here. The lock
+    is made from pyproject.toml, so the pin there is what holds a relock to the same version."""
+    import re
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    deps = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+    lock = (root / "packaging/appimage/requirements.lock").read_text()
+    for name in ENCRYPTION_STACK:
+        locked = re.search(rf"^{re.escape(name)}==(\S+) \\$", lock, re.MULTILINE)
+        assert locked, f"{name} is not in the AppImage lock"
+        pin = f"{name}=={locked.group(1)}"
+        assert pin in deps, f"pyproject.toml must pin {pin} exactly"
+        block = re.split(r"(?m)^(?=\S)", lock[locked.end():], 1)[0]     # its hashes and "via" lines
+        assert "datoolkit (./pyproject.toml)" in block, f"the lock must record {name} as pyproject.toml's own pin"
