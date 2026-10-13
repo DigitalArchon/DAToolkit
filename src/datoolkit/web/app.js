@@ -2884,7 +2884,7 @@ function openSettings(tab = "providers") {
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, list,
       h("div", { class: "row" },
         h("button", { class: "primary", onclick: () => pane.replaceChildren(hostForm({ kind: "ssh", auth: "agent", _new: true })) }, "Add SSH host"),
-        h("button", { onclick: () => pane.replaceChildren(hostForm({ kind: "winrm", auth: "ntlm", winrm_ssl: true, winrm_cert_validation: true, _new: true })) }, "Add WinRM host"),
+        h("button", { onclick: () => pane.replaceChildren(hostForm({ kind: "winrm", auth: "ntlm", winrm_ssl: true, winrm_cert_validation: true, winrm_plain_basic: false, _new: true })) }, "Add WinRM host"),
         h("button", { title: "Remote desktop through Apache Guacamole's guacd on this machine; if it's missing, opening the host says how to install it",
           onclick: () => pane.replaceChildren(hostForm({ kind: "rdp", auth: "password", rdp_security: "any", rdp_layout: "en-us-qwerty", _new: true })) }, "Add RDP host")));
   }
@@ -2892,6 +2892,8 @@ function openSettings(tab = "providers") {
   function hostForm(x) {
     const ssh = x.kind === "ssh";
     const rdp = x.kind === "rdp";
+    // the certificate is checked by DA Toolkit and pinned: RDP always, WinRM over HTTPS when the CA check is off
+    const pinnable = rdp || (x.kind === "winrm" && x.winrm_ssl !== false && x.winrm_cert_validation === false);
     const layouts = ["en-us-qwerty", "en-gb-qwerty", "de-de-qwertz", "de-ch-qwertz", "fr-fr-azerty", "fr-be-azerty", "fr-ch-qwertz",
       "it-it-qwerty", "es-es-qwerty", "es-latam-qwerty", "pt-br-qwerty", "sv-se-qwerty", "da-dk-qwerty", "no-no-qwerty", "hu-hu-qwertz", "ja-jp-qwerty", "tr-tr-qwerty", "failsafe"];
     const f = {
@@ -2913,6 +2915,7 @@ function openSettings(tab = "providers") {
         placeholder: "One -o option per line, e.g. KexAlgorithms=+diffie-hellman-group14-sha1" }),
       winrm_ssl: h("input", { type: "checkbox", checked: x.winrm_ssl !== false }),
       winrm_cert_validation: h("input", { type: "checkbox", checked: x.winrm_cert_validation !== false }),
+      winrm_plain_basic: h("input", { type: "checkbox", checked: x.winrm_plain_basic === true }),
       os_hint: h("input", { type: "text", value: x.os_hint || "", placeholder: ssh ? "e.g. Ubuntu 24.04 / Cisco IOS-XE / RouterOS 7" : "e.g. Windows Server 2022" }),
     };
     const field = (label, el, style) => h("label", { class: "field", style }, h("span", {}, label), el);
@@ -2925,12 +2928,15 @@ function openSettings(tab = "providers") {
       ssh ? field("Extra SSH options", f.ssh_options) : null,
       ssh || rdp ? null : h("div", { class: "row" },
         h("label", { class: "check" }, f.winrm_ssl, "HTTPS (5986)"),
-        h("label", { class: "check" }, f.winrm_cert_validation, "Validate certificate")),
+        h("label", { class: "check" }, f.winrm_cert_validation, "Validate certificate (system CA store)"),
+        h("label", { class: "check" }, f.winrm_plain_basic, "Allow Basic over plain HTTP")),
+      ssh || rdp ? null : h("div", { class: "muted small" },
+        "Plain HTTP is accepted only for this machine and its local network, and Basic authentication over it only with the box ticked: the password then crosses the network in the clear (NTLM and Kerberos encrypt it themselves). With \"Validate certificate\" unticked, DA Toolkit checks the certificate itself: you verify it on first connection and it is pinned, as for RDP."),
       field("OS / device hint for the AI", f.os_hint),
-      rdp ? h("div", { class: "muted small" }, x.pinned
+      pinnable ? h("div", { class: "muted small" }, x.pinned
         ? `Pinned certificate SHA-256: ${x.pinned}. A different certificate blocks the connection until you forget this pin.`
         : "No certificate pinned yet: you'll be shown the server's certificate on first connection and asked to trust it.") : null,
-      rdp && x.pinned ? h("button", { class: "small", style: "align-self:flex-start", onclick: () => guarded(async () => {
+      pinnable && x.pinned ? h("button", { class: "small", style: "align-self:flex-start", onclick: () => guarded(async () => {
         if (!(await confirmModal("Forget pinned certificate", `Forget the pinned certificate for ${x.name}? Only do this if you know why it changed (server rebuilt, certificate renewed).`, "Forget", "danger"))) return;
         await api("POST", `/api/hosts/${encodeURIComponent(x.name)}/forget-pin`);
         x.pinned = "";
@@ -2950,7 +2956,8 @@ function openSettings(tab = "providers") {
               user: f.user.value.trim(), auth: rdp ? "password" : f.auth.value, key_file: f.key_file.value.trim(), jump: f.jump.value.trim(),
               rdp_security: f.rdp_security.value, rdp_layout: f.rdp_layout.value,
               ssh_options: f.ssh_options.value.split("\n"), winrm_ssl: f.winrm_ssl.checked,
-              winrm_cert_validation: f.winrm_cert_validation.checked, os_hint: f.os_hint.value.trim(),
+              winrm_cert_validation: f.winrm_cert_validation.checked, winrm_plain_basic: f.winrm_plain_basic.checked,
+              os_hint: f.os_hint.value.trim(),
             },
             password: f.password.value || null, original_name: x._new ? null : x.name,
           });

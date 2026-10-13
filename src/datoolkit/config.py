@@ -82,8 +82,12 @@ class Host:
     key_file: str = ""
     jump: str = ""
     ssh_options: list[str] = field(default_factory=list)
+    # winrm: HTTPS (5986) or plain HTTP (5985; only on the local network, see sessions/winrm.py);
+    # the certificate checked against the system CA store, or else by DA Toolkit (pinned on first
+    # use); Basic auth over plain HTTP only with the technician's say-so (the password is in the clear)
     winrm_ssl: bool = True
     winrm_cert_validation: bool = True
+    winrm_plain_basic: bool = False
     os_hint: str = ""
     # rdp: guacd's "security" (any | nla | nla-ext | tls | rdp) and keyboard layout on the server
     rdp_security: str = "any"

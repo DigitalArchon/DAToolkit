@@ -99,8 +99,31 @@ async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
         writer.close()
 
 
+async def fetch_tls(host: str, port: int) -> dict:
+    """The certificate of a plain TLS server (a WinRM HTTPS listener on 5986), in the shape
+    fetch() returns, verified by pin like an RDP server's rather than by CA."""
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), TIMEOUT)
+    except (OSError, asyncio.TimeoutError) as e:
+        raise CertError(f"cannot reach {host}:{port}: {e or 'timed out'}") from e
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE          # verified by pin, not by CA
+        await asyncio.wait_for(writer.start_tls(ctx), TIMEOUT)
+        der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
+        if not der:
+            raise CertError(f"{host}:{port} sent no certificate")
+        return {"tls": True, "protocol": "tls", "sha256": fingerprint(der), **describe(der)}
+    except (asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError, ConnectionError) as e:
+        raise CertError(f"TLS handshake with {host}:{port} failed: {e or type(e).__name__}") from e
+    finally:
+        writer.close()
+
+
 class PinStore:
-    """host:port -> pinned certificate, in ~/.config/datoolkit/rdp_pins.json (0600)."""
+    """host:port -> pinned certificate (RDP servers and WinRM listeners), in
+    ~/.config/datoolkit/rdp_pins.json (0600)."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or config_dir() / "rdp_pins.json"

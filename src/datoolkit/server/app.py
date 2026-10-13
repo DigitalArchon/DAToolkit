@@ -307,7 +307,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/hosts/{name}/forget-pin")
     async def forget_pin(name: str, e: Engine = Depends(auth)):
-        return {"removed": e.forget_rdp_pin(name)}
+        return {"removed": e.forget_pin(name)}
 
     @app.post("/api/hosts/{name}/forget-password")
     async def forget_password(name: str, e: Engine = Depends(auth)):
@@ -354,6 +354,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def open_session(body: dict, e: Engine = Depends(auth)):
         if body.get("kind") == "rdp":
             return await e.open_rdp(body.get("host", ""))
+        if body.get("kind") == "winrm":
+            return await e.open_winrm(body.get("host", ""))
         if body.get("kind") == "window":
             return await e.open_window(body.get("xid", 0), str(body.get("name", "")), str(body.get("os_hint", "")))
         return e.open_session(body.get("kind", "local"), body.get("host", ""))

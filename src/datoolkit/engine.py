@@ -41,7 +41,7 @@ from .safety import watch as watch_mod
 from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
-from .sessions import guac, rdpcert, xwindow
+from .sessions import guac, rdpcert, winrm, xwindow
 from .sessions.askpass import AskpassBridge
 from .sessions.manager import RdpSession, SessionManager, WindowSession
 from .sessions.ssh import ssh_argv, target_label
@@ -342,10 +342,11 @@ class Engine:
         c = self.cfg.to_dict()
         for p in c["providers"]:
             p["has_key"] = self._has_secret("provider", p["name"])
-        for h in c["hosts"]:
+        for h, host in zip(c["hosts"], self.cfg.hosts):
             h["has_password"] = self._has_secret("host", h["name"])
-            if h["kind"] == "rdp":
-                pin = self.pins.get(h["host"], h.get("port") or 3389)
+            port = self._pin_port(host)
+            if port is not None:
+                pin = self.pins.get(h["host"], port)
                 h["pinned"] = pin["sha256"] if pin else ""
         return c
 
@@ -800,10 +801,15 @@ class Engine:
             ssh_options=[o.strip() for o in data.get("ssh_options", []) if o.strip()],
             winrm_ssl=bool(data.get("winrm_ssl", True)),
             winrm_cert_validation=bool(data.get("winrm_cert_validation", True)),
+            winrm_plain_basic=bool(data.get("winrm_plain_basic", False)),
             os_hint=str(data.get("os_hint", "")).strip(),
             rdp_security=str(data.get("rdp_security", "any") or "any"),
             rdp_layout=str(data.get("rdp_layout", "") or "en-us-qwerty").strip(),
         )
+        if host.kind == "winrm":
+            found = winrm.problem(host)
+            if found:
+                raise UserError(f"Host not saved. {found}")
         old = self.cfg.host(original_name or name)
         if original_name and original_name != name and old:
             pw = creds.get_secret("host", original_name)
@@ -1064,7 +1070,9 @@ class Engine:
 
     # ---------------------------------------------------------------- sessions
 
-    def open_session(self, kind: str, host_name: str = "") -> dict:
+    def open_session(self, kind: str, host_name: str = "", _cert_checked: bool = False) -> dict:
+        """Open a local, SSH or WinRM session. A WinRM host whose certificate DA Toolkit pins
+        comes through open_winrm, which checks it first (`_cert_checked`)."""
         if not self.case:
             raise UserError("Start a case first.")
         if kind == "local":
@@ -1085,9 +1093,14 @@ class Engine:
                                            target=target_label(host), shell="remote shell/CLI",
                                            os_hint=host.os_hint, host_name=host.name, address=host.host)
             else:
-                env["DATOOLKIT_PSRP"] = json.dumps({
-                    "host": host.host, "port": host.port, "user": host.user, "auth": host.auth,
-                    "ssl": host.winrm_ssl, "cert_validation": host.winrm_cert_validation})
+                # checked again where the connection is made, so a config edited by hand sends nothing
+                found = winrm.problem(host)
+                if found:
+                    raise UserError(found)
+                if winrm.pins(host) and not _cert_checked:
+                    raise UserError(f"{host.name}'s certificate is checked before every connection: open it "
+                                    "from the session menu.")
+                env["DATOOLKIT_PSRP"] = winrm.console_config(host)
                 src_root = str(Path(__file__).resolve().parents[1])
                 env["PYTHONPATH"] = src_root + (":" + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")
                 sess = self.sessions.spawn(sid, [sys.executable, "-m", "datoolkit.sessions.psrp_console"], env,
@@ -1097,6 +1110,27 @@ class Engine:
                                            address=host.host)
         self.log("session_opened", **sess.roster())
         return sess.roster()
+
+    async def open_winrm(self, host_name: str) -> dict:
+        """Open a WinRM session. A host whose certificate the system CA store doesn't vouch
+        for (validation turned off) has it checked here instead, against the pin saved the
+        first time the technician accepted it, as for RDP; then the console starts."""
+        self._need_case()
+        host = self.cfg.host(host_name)
+        if not host or host.kind != "winrm":
+            raise UserError(f"Unknown WinRM host {host_name}")
+        found = winrm.problem(host)
+        if found:
+            raise UserError(found)
+        if winrm.pins(host):
+            sid = self.sessions.unique_id(host.name)
+            port = winrm.port(host)
+            try:
+                cert = await rdpcert.fetch_tls(host.host, port)
+            except rdpcert.CertError as e:
+                raise UserError(str(e)) from e
+            await self._trust_cert(sid, host.host, port, cert, "winrm")
+        return self.open_session("winrm", host_name, _cert_checked=True)
 
     # ---------------------------------------------------------------- RDP
 
@@ -1165,7 +1199,7 @@ class Engine:
             cert = await rdpcert.fetch(host.host, port, host.user.split("\\")[-1].split("@")[0])
         except rdpcert.CertError as e:
             raise UserError(str(e)) from e
-        await self._trust_rdp_cert(sid, host.host, port, cert)
+        await self._trust_cert(sid, host.host, port, cert, "rdp")
         user, domain = host.user, ""
         if "\\" in user:
             domain, user = user.split("\\", 1)
@@ -1185,7 +1219,10 @@ class Engine:
         self.log("session_opened", **sess.roster())
         return sess.roster()
 
-    async def _trust_rdp_cert(self, sid: str, host: str, port: int, cert: dict) -> None:
+    async def _trust_cert(self, sid: str, host: str, port: int, cert: dict, kind: str) -> None:
+        """Trust on first use: the certificate `rdpcert.fetch` or `fetch_tls` read from `host`
+        must match the pin for it, or, the first time, be accepted by the technician and pinned.
+        `kind` ("rdp" | "winrm") names the audit events and the hint for finding the certificate."""
         where = f"{host}:{port}"
         if not cert["tls"]:
             answer = await self.ask_user(sid, (
@@ -1203,29 +1240,42 @@ class Engine:
                    f"{' (self-signed)' if cert['self_signed'] else ''}\nValid until: {cert['not_after']}\n"
                    f"SHA-256: {cert['sha256']}")
         if pinned:
-            self.log("rdp_cert_mismatch", target=where, pinned=pinned["sha256"], got=cert["sha256"])
+            self.log(f"{kind}_cert_mismatch", target=where, pinned=pinned["sha256"], got=cert["sha256"])
             raise UserError(f"The certificate of {where} has CHANGED since it was pinned on {pinned.get('pinned', '?')}. "
                             f"Pinned SHA-256: {pinned['sha256']}. Presented: {cert['sha256']}. This can mean the server "
                             "was rebuilt or its certificate renewed, or that someone is intercepting the connection. "
                             "Verify with the device owner; if the change is legitimate, remove the pin under "
                             "Settings → Hosts and connect again.")
+        hint = ("for Windows: the Remote Desktop certificate in certlm.msc" if kind == "rdp"
+                else "on Windows, `winrm enumerate winrm/config/listener` names the listener's certificate; "
+                     "open it in certlm.msc")
         answer = await self.ask_user(sid, (
             f"First connection to {where}. It presented this certificate:\n{details}\n\n"
-            "Verify the fingerprint with the device owner or at the console (for Windows: the Remote Desktop "
-            "certificate in certlm.msc). Trust it and pin it for future connections? (yes/no)"),
-            secret=False, can_save=False)
+            f"Verify the fingerprint with the device owner or at the console ({hint}). Trust it and pin it for "
+            "future connections? (yes/no)"), secret=False, can_save=False)
         if answer != "yes":
-            self.log("rdp_cert_rejected", target=where, sha256=cert["sha256"])
-            raise UserError(f"Certificate of {where} not trusted; RDP session not opened.")
+            self.log(f"{kind}_cert_rejected", target=where, sha256=cert["sha256"])
+            raise UserError(f"Certificate of {where} not trusted; {kind.upper()} session not opened.")
         self.pins.pin(host, port, cert)
-        self.log("rdp_cert_pinned", target=where, sha256=cert["sha256"])
+        self.log(f"{kind}_cert_pinned", target=where, sha256=cert["sha256"])
 
-    def forget_rdp_pin(self, host_name: str) -> bool:
+    @staticmethod
+    def _pin_port(host: Host) -> int | None:
+        """The port a host's pinned certificate is kept under, or None for a host whose
+        certificate isn't pinned (SSH, or WinRM checked by the system CA store or over HTTP)."""
+        if host.kind == "rdp":
+            return host.port or 3389
+        if host.kind == "winrm" and winrm.pins(host):
+            return winrm.port(host)
+        return None
+
+    def forget_pin(self, host_name: str) -> bool:
         host = self.cfg.host(host_name)
         if not host:
             raise UserError(f"Unknown host {host_name}")
-        removed = self.pins.forget(host.host, host.port or 3389)
-        self.log("rdp_pin_forgotten", host=host_name, removed=removed)
+        port = self._pin_port(host)
+        removed = port is not None and self.pins.forget(host.host, port)
+        self.log("pin_forgotten", host=host_name, removed=removed)
         self._changed()
         return removed
 

@@ -597,6 +597,18 @@ collateral and NVIDIA's keys are cached for an hour.
   - Commands are single-line. `Read-Host` and `Get-Credential` prompts and tab completion are
     not supported.
   - Variables persist between commands.
+  - **HTTPS, or the local network.** Plain HTTP (5985) is accepted only for this machine and
+    its local network (localhost, 10.x, 172.16-31.x, 192.168.x, `.local`), as for model
+    providers; a host further away must use HTTPS. Basic authentication over plain HTTP sends
+    the password in the clear, so it also needs **Allow Basic over plain HTTP** ticked on the
+    host; NTLM and Kerberos encrypt the exchange themselves. Both rules are checked when the
+    host is saved and again when a session opens.
+  - **The certificate is always checked.** Over HTTPS it is verified against the system's CA
+    store, or, with **Validate certificate** unticked (a self-signed listener), by DA Toolkit
+    itself: on first connection you are shown its fingerprint to verify (on Windows,
+    `winrm enumerate winrm/config/listener` names the listener's certificate), and it is
+    pinned; a different certificate then blocks the connection until you forget the pin under
+    Settings → Hosts, as for RDP.
 - **RDP** opens the remote desktop in a tab, through Apache Guacamole's `guacd` on
   127.0.0.1:4822 (see the install table in the README: `sudo apt install guacd` on Ubuntu
   and Mint, and upstream's container on Debian, Arch and CachyOS). If guacd isn't there,
@@ -684,7 +696,7 @@ collateral and NVIDIA's keys are cached for an hour.
 | What | Where |
 |---|---|
 | Config (no secrets) | `~/.config/datoolkit/config.toml` |
-| Pinned RDP certificates | `~/.config/datoolkit/rdp_pins.json` |
+| Pinned RDP and WinRM certificates | `~/.config/datoolkit/rdp_pins.json` |
 | Companion certificate and key | `~/.config/datoolkit/companion-cert.pem`, `companion-key.pem` (0600) |
 | Secrets | OS keyring, service `datoolkit` |
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |

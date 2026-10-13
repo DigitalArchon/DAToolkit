@@ -226,7 +226,7 @@ async def test_tofu_pins_then_trusts_then_blocks_a_change(rdp_env):
         with pytest.raises(UserError, match="CHANGED"):
             await engine.open_rdp("dc01")
         assert "rdp_cert_mismatch" in (engine.case.dir / "events.jsonl").read_text()
-        assert engine.forget_rdp_pin("dc01") is True
+        assert engine.forget_pin("dc01") is True
         opener = asyncio.create_task(engine.open_rdp("dc01"))
         await answer_prompts(engine, ["no"])                 # technician declines the new certificate
         with pytest.raises(UserError, match="not trusted"):
