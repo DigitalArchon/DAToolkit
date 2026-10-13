@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -20,6 +21,40 @@ def config_dir() -> Path:
 def data_dir() -> Path:
     base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     return Path(base) / "datoolkit"
+
+
+def _within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def private_dir(path: Path) -> Path:
+    """Make `path`, readable by this user alone: every directory from DA Toolkit's own root (the
+    config or data directory) down to it is created or tightened to 0700 (Path.mkdir applies
+    its mode to the last directory only, so parents made on the way would take the umask's,
+    and the names under them, cases and hosts, are the technician's clients'). Directories
+    above that root (~/.config, ~/.local/share) are left as they are; a path outside both is
+    made private from itself down."""
+    path = Path(path)
+    root = next((r for r in (config_dir(), data_dir()) if _within(path, r)), path)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    below = path.relative_to(root).parts
+    for d in [root] + [root.joinpath(*below[:i + 1]) for i in range(len(below))]:
+        d.mkdir(mode=0o700, exist_ok=True)
+        if stat.S_IMODE(d.stat().st_mode) != 0o700:
+            os.chmod(d, 0o700)
+    return path
+
+
+def tighten_dirs() -> None:
+    """At start: make the config and data directories, and the directories in them (cases,
+    baselines, research, tools, recipes), private; earlier versions made them with the
+    umask's permissions. Symbolic links are left alone: what they point to isn't ours."""
+    for d in (config_dir(), data_dir()):
+        if d.is_dir() and not d.is_symlink():
+            private_dir(d)
+            for child in d.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    private_dir(child)
 
 
 @dataclass
@@ -150,7 +185,7 @@ def load(path: Path | None = None) -> Config:
 
 def save(cfg: Config, path: Path | None = None) -> None:
     path = path or config_dir() / "config.toml"
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private_dir(path.parent)
     tmp = path.with_suffix(".tmp")
     with tmp.open("wb") as f:
         tomli_w.dump(cfg.to_dict(), f)

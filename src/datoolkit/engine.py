@@ -26,7 +26,7 @@ from . import config as config_mod
 from . import creds, recipes, search, tools_cache
 from . import export as export_mod
 from .case import Case, _slug, fence
-from .config import Config, Host, Provider, data_dir
+from .config import Config, Host, Provider, data_dir, private_dir
 from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
 from .llm.private_mode import (Enclave, ModelRetired, PrivateModeClient, PrivateModeError,
@@ -277,6 +277,7 @@ class Engine:
     # ---------------------------------------------------------------- lifecycle
 
     async def start(self) -> None:
+        config_mod.tighten_dirs()
         await self.bridge.start()
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov:
@@ -1627,8 +1628,7 @@ class Engine:
         if not items:
             raise UserError("No ran baseline-recipe items for that session. Queue the Baseline snapshot recipe and run it first.")
         key = self._host_key(sid)
-        d = self._baseline_root() / key
-        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        d = private_dir(self._baseline_root() / key)
         path = d / f"{datetime.now():%Y%m%d-%H%M%S}.json"
         data = {"host": key, "taken": datetime.now().isoformat(timespec="seconds"), "case": self.case.id,
                 "sections": {k: {"command": c, "text": t} for k, (c, t) in items.items()}}

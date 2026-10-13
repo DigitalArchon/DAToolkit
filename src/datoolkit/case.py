@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .config import data_dir
+from .config import data_dir, private_dir
 
 SENSITIVITIES = ("open", "confidential", "sovereign")
 
@@ -34,8 +34,7 @@ class Case:
             raise ValueError(f"Unknown sensitivity {sensitivity}")
         now = datetime.now()
         case_id = f"{now:%Y%m%d-%H%M%S}-{_slug(name)}"
-        d = (root or data_dir() / "cases") / case_id
-        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        d = private_dir((root or data_dir() / "cases") / case_id)
         case = cls(name=name, sensitivity=sensitivity, notes=notes, id=case_id, dir=d,
                    started=now.isoformat(timespec="seconds"))
         case.log("case_started", name=name, sensitivity=sensitivity, notes=notes)

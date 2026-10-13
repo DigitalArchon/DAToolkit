@@ -24,7 +24,7 @@ from pathlib import Path
 
 from cryptography import x509
 
-from ..config import config_dir
+from ..config import config_dir, private_dir
 
 TIMEOUT = 10
 PROTOCOL_TLS, PROTOCOL_HYBRID = 0x1, 0x2
@@ -118,7 +118,7 @@ class PinStore:
         data = self._load()
         data[f"{host.lower()}:{port}"] = {k: cert[k] for k in ("sha256", "subject", "issuer", "not_after")} | {
             "pinned": datetime.now().isoformat(timespec="seconds")}
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private_dir(self.path.parent)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
         os.chmod(tmp, 0o600)

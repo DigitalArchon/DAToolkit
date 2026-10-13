@@ -24,6 +24,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 import httpx
 
+from ..config import private_dir
 from ..safety.inject import suspicious
 from .websearch import clean_date, clean_sites, format_for_model
 
@@ -517,7 +518,7 @@ class ReportCache:
         return best if score >= CACHE_OVERLAP else None
 
     def save(self, brief: str, report: str, sources: list[str], model: str) -> None:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private_dir(self.root)
         rec = {"ts": time.time(), "brief": brief, "report": report, "sources": sources, "model": model}
         name = sha256(" ".join(sorted(terms(brief))).encode()).hexdigest()[:24] + ".json"
         tmp = self.root / (name + ".tmp")

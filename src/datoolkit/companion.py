@@ -35,6 +35,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from .config import private_dir
 from .engine import UserError
 
 CERT_FILE = "companion-cert.pem"
@@ -82,7 +83,7 @@ def _make_cert(cert_path: Path, key_path: Path, ip: str) -> None:
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
             .sign(key, hashes.SHA256()))
-    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(cert_path.parent)
     key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                 serialization.NoEncryption())
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

@@ -1,3 +1,6 @@
+import os
+import stat
+
 from datoolkit import config, creds
 from datoolkit.config import Config, Host, Provider
 from datoolkit.llm.client import detect_tier, is_local_url
@@ -17,6 +20,31 @@ def test_config_round_trip(tmp_path):
     assert loaded == cfg
     text = path.read_text()
     assert "api_key" not in text and "password =" not in text
+
+
+def test_private_dir_makes_every_level_private(tmp_path, monkeypatch):
+    share = tmp_path / "share"
+    share.mkdir()
+    os.chmod(share, 0o755)
+    monkeypatch.setenv("XDG_DATA_HOME", str(share))
+    loose = config.data_dir()
+    loose.mkdir()
+    os.chmod(loose, 0o755)                                   # as an earlier version left it
+    case_dir = config.private_dir(config.data_dir() / "cases" / "20260101-000000-x")
+    for d in (config.data_dir(), config.data_dir() / "cases", case_dir):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700, d
+    assert stat.S_IMODE(share.stat().st_mode) == 0o755    # above DA Toolkit's root: not ours
+    # outside both roots (a case root given by hand): private from that directory down
+    other = config.private_dir(tmp_path / "elsewhere" / "c1")
+    assert stat.S_IMODE(other.stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "elsewhere").stat().st_mode) != 0o700
+    # at start, what earlier versions made loosely is tightened; links are left alone
+    (config.data_dir() / "baselines").mkdir()
+    os.chmod(config.data_dir() / "baselines", 0o755)
+    (config.data_dir() / "linked").symlink_to(tmp_path / "elsewhere")
+    config.tighten_dirs()
+    assert stat.S_IMODE((config.data_dir() / "baselines").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "elsewhere").stat().st_mode) != 0o700
 
 
 def test_load_ignores_unknown_fields(tmp_path):

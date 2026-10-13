@@ -17,7 +17,7 @@ from pathlib import Path
 
 import tomli_w
 
-from .config import Host, data_dir
+from .config import Host, data_dir, private_dir
 
 
 def cache_dir() -> Path:
@@ -51,8 +51,7 @@ def load(root: Path | None = None) -> list[Tool]:
 
 
 def save(tools: list[Tool], root: Path | None = None) -> None:
-    root = root or cache_dir()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = private_dir(root or cache_dir())
     with _manifest_path(root).open("wb") as f:
         tomli_w.dump({"tool": [asdict(t) for t in tools]}, f)
 
@@ -67,8 +66,7 @@ def sha256_of(path: Path) -> str:
 
 def add(source: Path, name: str, os_: str, notes: str = "", run: str = "", root: Path | None = None) -> Tool:
     """Copy a file into the cache and record its hash."""
-    root = root or cache_dir()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = private_dir(root or cache_dir())
     source = Path(source).expanduser()
     if not source.is_file():
         raise FileNotFoundError(f"{source} is not a file")
