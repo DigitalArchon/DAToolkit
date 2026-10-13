@@ -211,11 +211,30 @@ async def test_askpass_jump_host_prompt_not_answered_from_keyring(env):
     engine.new_case("x", "open")
     creds.set_secret("host", "web01", "pw1")
     engine.sessions.spawn("web01", ["/bin/cat"], {}, name="web01", kind="ssh", host_name="web01")
-    task = asyncio.create_task(engine._askpass("web01", "me@bastion's password: ", "askpass"))
-    await asyncio.sleep(0.05)
-    prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
-    engine.answer_prompt(prompt["id"], None)
-    assert await task is None
+    # a jump host's prompt: not answered from the keyring, and not offered for saving under web01
+    # (a bastion's password saved as web01's would be sent to web01 next time)
+    for text in ("me@bastion's password: ", "(me@web01.lan-bastion) Password: ", "Password for me@web01.lan.evil:"):
+        events.clear()
+        task = asyncio.create_task(engine._askpass("web01", text, "askpass"))
+        await asyncio.sleep(0.05)
+        prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+        assert prompt["can_save"] is False, text
+        engine.answer_prompt(prompt["id"], None)
+        assert await task is None
+    # the host itself, however the prompt is phrased
+    for text in ("bob@web01.lan's password: ", "(bob@WEB01.LAN) Password: ", "Password:"):
+        engine.sessions.sessions["web01"].used_stored_password = False
+        assert await engine._askpass("web01", text, "askpass") == "pw1", text
+
+
+def test_prompt_host():
+    from datoolkit.engine import prompt_host
+
+    assert prompt_host("bob@web01.lan's password: ") == "web01.lan"
+    assert prompt_host("(bob@jump) Password: ") == "jump"
+    assert prompt_host("Password for me@10.0.0.5:") == "10.0.0.5"
+    assert prompt_host("me@[fe80::1]'s password:") == "fe80::1"
+    assert prompt_host("Password:") == ""
 
 
 async def test_missing_session_id_defaults_to_only_open_session(env):

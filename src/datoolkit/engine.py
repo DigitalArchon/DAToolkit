@@ -148,6 +148,16 @@ def _turn_summary(entry: dict) -> str:
     return "; ".join(parts) or "tool calls recorded"
 
 
+# the host a credential prompt names: "bob@web01.lan's password:", "(bob@jump) Password:", "me@[::1]'s password:"
+_PROMPT_HOST = re.compile(r"@(\[[^\]]+\]|[^\s'):]+)")
+
+
+def prompt_host(prompt: str) -> str:
+    """The host named in a credential prompt, lower-cased, or "" when it names none."""
+    m = _PROMPT_HOST.search(prompt)
+    return m.group(1).strip("[]").lower().rstrip(".") if m else ""
+
+
 class UserError(Exception):
     """An error to show the technician as-is, with any commands that fix it (shown so they can
     be copied, not as a passing notice)."""
@@ -1313,15 +1323,18 @@ class Engine:
         host = self.cfg.host(sess.host_name) if sess and sess.host_name else None
         secret = kind == "password" or bool(re.search(r"password|passphrase|passcode|\bpin\b|secret", prompt, re.I))
         is_password = secret and "passphrase" not in prompt.lower()
-        if sess and host and is_password and not sess.used_stored_password:
-            # A prompt naming some other user@host (e.g. a jump host) is not ours to answer.
-            other_host = "@" in prompt and host.host.lower() not in prompt.lower()
-            stored = None if other_host else self._get_secret_safe("host", host.name)
+        # A prompt naming some other host (a jump host on the way, judged by the whole name,
+        # not a part of it) is not ours to answer from the keyring, and what the technician
+        # types for it is not this host's password: it is never offered for saving under it.
+        named = prompt_host(prompt)
+        other_host = bool(host and named and named != host.host.strip().lower().rstrip("."))
+        if sess and host and is_password and not other_host and not sess.used_stored_password:
+            stored = self._get_secret_safe("host", host.name)
             if stored:
                 sess.used_stored_password = True
                 self.log("credential_supplied", session_id=sid, source="keyring")
                 return stored
-        answer = await self.ask_user(sid, prompt, secret=secret, can_save=bool(host and is_password))
+        answer = await self.ask_user(sid, prompt, secret=secret, can_save=bool(host and is_password and not other_host))
         self.log("credential_prompt", session_id=sid, prompt=prompt, answered=answer is not None)
         return answer
 
