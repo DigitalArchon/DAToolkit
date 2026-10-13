@@ -159,6 +159,10 @@ the system's own; in the browser they're the browser's.
   told which of its commands were flagged.
 - **Run** types the command and presses Enter. **Insert** types it without Enter, so you can
   finish editing it in the shell. You can edit the command text in the queue before either.
+  A command with several lines is pasted as one block: shells with bracketed paste (bash 5.1
+  and later, zsh, fish, PowerShell 7) hold it for you to edit, but a device CLI or an older
+  shell runs each line as its line break arrives, so there use **Run**, or **Insert** only
+  single-line commands.
 - **What you see is what runs.** Characters the queue can't show faithfully are taken out of
   every command before it is queued: control characters (an escape sequence can end the
   shell's bracketed paste), bidi overrides that reorder text, zero-width and Unicode tag
@@ -257,9 +261,10 @@ host, not the case: deleting a case leaves them. They live under
   backup before a firewall change), the **Dry run** button queues the rehearsal before the
   real item; its tooltip shows the rehearsal. Commands with no known rehearsal have no button,
   and each item is rehearsed once at a time.
-- **Second opinion.** **2nd opinion** on any state-changing or sensitive item, or from the
-  disruptive confirmation, asks a reviewer model what could go wrong, whether it exposes
-  sensitive data, and for a verdict (proceed / proceed with care / do not run). Set a
+- **Second opinion.** **2nd opinion** on any pending item (read-only ones too, when you want
+  to know what a command does before running it), or from the disruptive confirmation, asks a
+  reviewer model what it does, what could go wrong, whether it exposes sensitive data, and for
+  a verdict (proceed / proceed with care / do not run). Set a
   different model under **Settings → Model** (it must be allowed by the case sensitivity);
   the reviewer sees only the command and the case notes, never the proposer's reasoning.
   **Automatic review** (off / disruptive commands / everything flagged) asks it in the
@@ -685,6 +690,13 @@ collateral and NVIDIA's keys are cached for an hour.
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |
 | Research reports (reused for 30 days) | `~/.local/share/datoolkit/research/` |
 
+Every directory DA Toolkit makes under these two is readable by you alone (0700), and ones
+made by earlier versions are tightened on the next start. The askpass socket and helper
+script live in `$XDG_RUNTIME_DIR/datoolkit-<pid>` (every desktop session sets that); without
+it they fall back to `/tmp/datoolkit-<pid>`, where on a machine shared with other users
+someone who creates that name first stops DA Toolkit from starting, so keep
+`XDG_RUNTIME_DIR` set there.
+
 Inside a case directory: `case.json` (name, sensitivity, notes), `events.jsonl` (audit log),
 `state.json` (conversation, chat and queue, rewritten on every change so the case can be
 resumed), `requests.jsonl` (every model request: prompt, messages, reasoning, reply),
@@ -703,7 +715,9 @@ meant to steer the model. Three layers deal with that:
   it was shown, and a page returned whole has first been checked by the agent;
 - the model's reply is rendered with no remote resources at all (no images, media or
   embeds, and a Content-Security-Policy that only allows this origin), so a steered model
-  cannot leak data by making the page fetch a URL. Links open in your browser.
+  cannot leak data by making the page fetch a URL. Links open in your browser, and only when
+  you click them: a steered model could still write a link whose address carries case data,
+  so look at where a link goes before you follow it.
 
 Local risk rules raise a command to **disruptive** when it fetches and runs code
 (`curl … | sh`, `bash <(wget …)`, `base64 -d | sh`, `Invoke-Expression`, `-EncodedCommand`,

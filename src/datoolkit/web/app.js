@@ -1802,7 +1802,7 @@ function updateRow(row, item) {
     if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
     if (item.dry_run) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", `Queue the rehearsal first (${item.dry_run.description}): ${item.dry_run.command}`));
     if (item.risk === "read_only" && !item.watch && !item.dry_run_of) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
-    if (item.risk !== "read_only" || item.sensitive?.length) btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what could go wrong"));
+    btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what this command does and what could go wrong"));
     btns.push(btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
       btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"),
       btn("↑", () => api("POST", `/api/queue/${item.num}/move`, { delta: -1 }), "ghost", "Move up"),
