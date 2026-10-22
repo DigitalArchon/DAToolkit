@@ -10,9 +10,9 @@ meson==1.12.1 \
     # via
     #   -r build-requirements.in
     #   meson-python
-meson-python==0.22.0 \
-    --hash=sha256:0ce9fa40bb8bfaecccba97347063970e1a18cca2730d6e68a341dc0b73b284a4 \
-    --hash=sha256:9c819d0d4efa746edadfaae4663c0e9c75659186ef7e5bab12330bfe22964dfc
+meson-python==0.22.1 \
+    --hash=sha256:258fde948cf45aab5df23fcc9e17a9050ee73d4e1002fe6cf86519f61c414778 \
+    --hash=sha256:52c88628b0e5671592dc2306613fb5f6f3615fd24def059b9894f143b7f9a139
     # via -r build-requirements.in
 ninja==1.13.2 \
     --hash=sha256:09de9ab04f7352f51570c73fd4913acb1e6c24be0a72cd8b80243d4d3ed04925 \
@@ -48,7 +48,7 @@ pyproject-metadata==0.12.1 \
     # via meson-python
 
 # The following packages are considered to be unsafe in a requirements file:
-setuptools==84.0.0 \
-    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670 \
-    --hash=sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73
+setuptools==84.2.1 \
+    --hash=sha256:3ff8b3b5492a0aa66960f4419365a86b84e013070d4313e4d4a6894f5d64d6bc \
+    --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2
     # via -r build-requirements.in

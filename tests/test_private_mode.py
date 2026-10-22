@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -9,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from datoolkit.llm.client import LLMClient, detect_tier
+from datoolkit.llm import private_mode as _private_mode
 from datoolkit.llm.private_mode import (
     Attestation, Enclave, ModelRetired, PrivateModeClient, PrivateModeError, Verified, _NonEmptyBodyTransport,
     offered, offers_private_mode, relay_url, sealing_transport)
@@ -375,3 +377,37 @@ def test_the_encryption_stack_is_pinned_exactly_and_alike_everywhere():
         assert pin in deps, f"pyproject.toml must pin {pin} exactly"
         block = re.split(r"(?m)^(?=\S)", lock[locked.end():], 1)[0]     # its hashes and "via" lines
         assert "datoolkit (./pyproject.toml)" in block, f"the lock must record {name} as pyproject.toml's own pin"
+
+MODULE = _private_mode
+
+PROXY_CONTRACT = Path(__file__).resolve().parent / "data" / "nanogpt_private_mode_proxy.json"
+
+
+def test_the_client_stays_within_the_reviewed_proxys_contract():
+    """NanoGPT's own client, @nanogpt/private-mode on npm, is the reference for the relay's
+    contract, and tests/data/nanogpt_private_mode_proxy.json records the release last read
+    (SealedLoreDocs/tools/private_mode_check compares it with npm's latest and refreshes the
+    record). This holds our side to it: every field we may seal is one the proxy lets through,
+    every x-nanogpt header we name is one it sends or reads, the preflight's fields and the
+    relay's paths are its."""
+    import inspect
+    import re
+
+    proxy = json.loads(PROXY_CONTRACT.read_text())
+    assert re.fullmatch(r"\d+\.\d+\.\d+", proxy["reviewed_version"])
+    fields = set(proxy["body_fields"])
+    assert MODULE.ALLOWED_FIELDS <= fields, MODULE.ALLOWED_FIELDS - fields
+    # The router-only cache field goes inside the sealed body (Tinfoil's SDK puts it there for
+    # the proxy, we put it there ourselves); it is not a field NanoGPT's filter sees.
+    assert MODULE.CACHE_SECRET_FIELD not in proxy["body_fields"]
+    source = inspect.getsource(MODULE)
+    headers = set(re.findall(r'"(x-nanogpt-[a-z-]+)"', source))
+    assert headers, "the client names no x-nanogpt header"
+    assert headers <= set(proxy["request_headers"]) | set(proxy["reply_headers"]), headers
+    assert f'"{proxy["reply_header_private_mode_value"]}"' in source
+    preflight = set(re.findall(r'"(cacheScope|upstreamModel|requestBodyBytes|operation)"', source))
+    known = set(proxy["preflight_request_fields"]) | set(proxy["preflight_reply_fields"])
+    assert preflight <= known
+    assert proxy["relay_paths"]["preflight"] == MODULE.RELAY_PATH + "/preflight"
+    assert proxy["relay_paths"]["chat"] == MODULE.RELAY_PATH + "/v1/chat/completions"
+
