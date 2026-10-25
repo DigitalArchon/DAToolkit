@@ -326,6 +326,25 @@ function renderTop() {
   sb.className = `badge clickable ${st.case?.sensitivity || ""}`;
   sb.title = st.case ? "Raise this case's sensitivity" : "";
   $("#model-name").textContent = st.config.active_model || "Choose model";
+  // which provider the chat model is reached through, the API it speaks, and its route
+  const act = st.active;
+  const pc = $("#model-prov");
+  pc.classList.toggle("hidden", !act);
+  pc.textContent = act ? act.provider : "";
+  pc.className = `prov-chip k-${act?.kind || ""}${act ? "" : " hidden"}`;
+  $("#model-btn").title = act ? `${act.provider}: ${act.kind_label}, ${act.api === "anthropic" ? "Anthropic Messages API" : "OpenAI-compatible API"}\n${act.base_url}\nModel: ${act.model || "none chosen"}\nClick to choose another model.` : "Choose model";
+  const rb = $("#route-btn");
+  rb.classList.toggle("hidden", !act?.routable);
+  if (act?.routable) {
+    rb.textContent = act.route ? `⚡ ${act.route_label}` : "route: default";
+    rb.title = act.route ? `${act.model} is routed: ${act.route_label}. Click to change.` : `${act.model} is served by ${act.kind_label}'s own routing. Click to choose a host, or the fastest or cheapest.`;
+    rb.classList.toggle("on", !!act.route);
+  }
+  const sc = $("#search-chip");
+  const sst = st.search || {};
+  sc.classList.toggle("hidden", !sst.native);
+  sc.textContent = sst.native ? "🔎 Anthropic search" : "";
+  sc.title = sst.native ? "Claude searches the web on Anthropic's side as it works: queries aren't approved one by one (Settings → General). Research, if offered, is still gated." : "";
   const tb = $("#tier-badge");
   tb.textContent = st.active_tier || "";
   tb.className = `badge ${st.active_tier || ""}`;
@@ -406,6 +425,19 @@ function needVision() {
     S.helperNoticeShown = true;
     toast(`${v.model} can't see images, so ${v.helper} will describe them first. Replies with images take longer.`, "info", 9000);
   }
+}
+
+function hostOf(u) { try { return new URL(u).hostname.toLowerCase(); } catch { return ""; } }
+function kindOf(u) {
+  const host = hostOf(u);
+  return /(^|\.)nano-gpt\.com$/.test(host) ? "nanogpt" : /(^|\.)openrouter\.ai$/.test(host) ? "openrouter" : "";
+}
+// A token count as typed (engine.parse_tokens): 32768, 32k, 1.5M; 0 when it isn't one.
+function parseTokens(v) {
+  let t = String(v || "").trim().toLowerCase().replace(/[,_\s]/g, "");
+  const scale = { k: 1000, m: 1000000 }[t.slice(-1)] || 1;
+  if (scale > 1) t = t.slice(0, -1);
+  return /^\d+(\.\d+)?$/.test(t) ? Math.floor(parseFloat(t) * scale) : 0;
 }
 
 function fmtTokens(n) { return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n); }
@@ -515,6 +547,9 @@ function renderEntry(e, live = false) {
   // assistant (final or streaming)
   const who = h("div", { class: "who" }, "AI", e.model ? ` · ${e.model}` : "",
     e.tier ? h("span", { class: `badge ${e.tier}` }, e.tier) : null,
+    e.served_by ? h("span", { class: "small warn", title: `${e.model} declined part of this request, so Anthropic had ${e.served_by} answer it (the refusal fallback).` }, ` answered by ${e.served_by}`) : null,
+    e.route ? h("span", { class: `route-badge ${e.route.met === false ? "bad" : e.route.met ? "ok" : ""}`, title: `Route: ${e.route.label}.${e.route.why ? `\n${e.route.why}` : ""}` },
+      e.route.met === false ? "⚠ route not followed" : "⚡ routed") : null,
     e.sealed ? h("span", { class: "sealed", title: e.sealed }, "🔐 end-to-end encrypted") : null,
     e.tee_attested ? teeBadge(e) : null,
     !e.streaming && e.text ? h("button", { type: "button", class: "small ghost copy", title: "Copy this message (Markdown)",
@@ -526,7 +561,12 @@ function renderEntry(e, live = false) {
       h("summary", {}, noMessage ? "Reasoning (the AI wrote no message this turn)" : "Reasoning"), h("div", { class: "reasoning" }, e.reasoning)));
   }
   box.append(h("div", { class: "body", html: md(e.text) }));
+  if (e.refusal) box.append(h("div", { class: "warnbox small" },
+    `${e.model || "The model"} declined this request${e.refusal.category ? ` (Anthropic's ${e.refusal.category} safeguard)` : ""}. Nothing it began was queued. Rephrase it, add context about the system you are working on, or switch model.`,
+    e.refusal.explanation ? h("div", { class: "muted" }, e.refusal.explanation) : null));
   if (e.searches?.length) box.append(h("div", { class: "scards" }, e.searches.map((r) => searchCard(r))));
+  if (e.citations?.length) box.append(h("div", { class: "citations small" }, h("span", { class: "muted" }, "Sources: "),
+    e.citations.map((c, i) => [i ? " · " : "", h("a", { href: c.url, target: "_blank", rel: "noopener noreferrer", title: c.url }, c.title || c.url)])));
   if (e.research?.length) box.append(h("div", { class: "scards" }, e.research.map((r) => researchCard(r))));
   if (e.withdrawn?.length || e.reordered?.length) {
     box.append(h("div", { class: "revisions small" },
@@ -592,7 +632,7 @@ function searchCard(rec) {
   const state = rec.status === "done" ? `${rec.results.length} result${rec.results.length === 1 ? "" : "s"}${typeof rec.cost === "number" ? ` · $${rec.cost.toFixed(3)}` : ""}${rec.edited_by_technician ? " · query edited by you" : ""}`
     : rec.status === "failed" || rec.status === "unavailable" ? `not run: ${rec.error}` : SEARCH_STATE[rec.status] || rec.status;
   const el = h("div", { class: `scard s-${rec.status}` },
-    h("div", { class: "phead" }, h("span", {}, "🔎 Web search"), h("span", { class: "muted small" }, rec.provider),
+    h("div", { class: "phead" }, h("span", {}, "🔎 Web search"), h("span", { class: "muted small", title: rec.native ? "Run on Anthropic's side as Claude worked, without asking (Settings → General)" : "" }, rec.native ? "Anthropic (unasked)" : rec.provider),
       h("span", { class: "spacer" }), h("span", { class: "small sstate" }, state)));
   if (rec.status === "awaiting") {
     const q = h("input", { type: "text", value: rec.query, spellcheck: "false" });
@@ -2740,6 +2780,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
         await guarded(async () => { await onPick(prov, x.id); m.close(); });
       },
     }, h("span", { class: "id" }, x.id), recent.includes(x.id) ? h("span", { class: "muted small" }, "recent") : null,
+    x.route ? h("span", { class: "cap", title: `Routed: ${x.route} (change it with the route button in the top bar, or under Settings → AI providers)` }, "⚡") : null,
     x.reasoning ? h("span", { class: "cap", title: `Reasoning model${x.efforts?.length ? `: effort ${x.efforts.join(" / ")}` : ""}` }, "🧠") : null,
     x.tested ? h("span", { class: "cap tested", title: `DA Toolkit's prompts were tested with this model (evaluation of ${S.state.model_notes?.evaluated || "2026-10-10"}). ${x.tested}` }, "✓ tested") : null,
     h("span", { class: `cap${x.vision ? "" : " off"}`, title: x.vision === true ? "Reads images" : x.vision === false ? "Text only: can't read images" : "Unknown whether it reads images (set it under Settings → Providers)" },
@@ -2774,6 +2815,68 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
   setTimeout(() => search.focus(), 40);
   load(false);
   return m;
+}
+
+// ------------------------------------------------------------------ routes
+
+// Which host serves a model (llm/routing.py): the provider's own routing, the fastest first word,
+// fastest overall, cheapest, or (NanoGPT) a host from its table. Any NanoGPT route but its own is
+// billed pay-as-you-go, even for a model the subscription includes.
+const ROUTE_LABELS = { "": "Provider's own routing", latency: "Fastest first word", speed: "Fastest overall", price: "Cheapest", host: "A specific host" };
+function openRouteDialog(provName, model, onSaved) {
+  const prov = S.state.config.providers.find((p) => p.name === provName);
+  const nano = prov?.kind === "nanogpt";
+  const cur = prov?.routes?.[model] || null;
+  let priority = cur?.priority || "";
+  let chosen = cur?.priority === "host" ? { id: cur.host, name: cur.host_name || cur.host, price: cur.price } : null;
+  let hosts = null;
+  const fp8 = h("input", { type: "checkbox", checked: cur ? cur.fp8 !== false : true });
+  const table = h("div", { class: "host-table" });
+  const opts = h("div", { class: "route-opts" });
+  const kinds = nano ? ["", "latency", "speed", "price", "host"] : ["", "latency", "speed", "price"];
+  const own = nano ? "NanoGPT's own routing (subscription)" : "OpenRouter's own routing";
+  const ms = (v) => (typeof v === "number" ? `${(v / 1000).toFixed(1)} s` : "–");
+  const num = (v, d = 1) => (typeof v === "number" ? v.toFixed(d) : "–");
+  const renderOpts = () => opts.replaceChildren(...kinds.map((k) => h("label", { class: "check" },
+    h("input", { type: "radio", name: "route", checked: priority === k, onchange: () => { priority = k; render(); } }),
+    k ? ROUTE_LABELS[k] : own)));
+  const renderHosts = () => {
+    if (priority !== "host") { table.replaceChildren(); return; }
+    if (!hosts) { table.replaceChildren(h("div", { class: "muted small" }, "Loading NanoGPT's hosts for this model…")); return; }
+    if (!hosts.supported || !hosts.hosts.length) { table.replaceChildren(h("div", { class: "muted small" }, "NanoGPT offers no choice of hosts for this model: its own routing serves it.")); return; }
+    const rows = hosts.hosts.filter((x) => !fp8.checked || x.fp8_or_better);
+    table.replaceChildren(h("table", { class: "hosts" },
+      h("tr", {}, ["Host", "Precision", "Privacy", "First token", "Tokens/s", "$ in / out per M", "Cache"].map((t) => h("th", {}, t))),
+      ...rows.map((x) => h("tr", { class: `${chosen?.id === x.id ? "current" : ""}${x.available ? "" : " blocked"}`,
+        title: x.available ? "Prefer this host" : "Not available now",
+        onclick: () => { if (!x.available) return; chosen = { id: x.id, name: x.name, price: { input: x.input_price, output: x.output_price, cache_read: x.cache_read_price } }; renderHosts(); } },
+        h("td", {}, x.name, hosts.official === x.id ? h("span", { class: "muted small" }, " (maker)") : null),
+        h("td", {}, x.quantization || "?"), h("td", {}, x.privacy_label), h("td", {}, ms(x.first_token_ms)),
+        h("td", {}, num(x.tokens_per_second, 0)), h("td", {}, `${num(x.input_price, 2)} / ${num(x.output_price, 2)}`),
+        h("td", {}, x.caching === true ? "yes" : x.caching === false ? "no" : "?")))),
+      fp8.checked && rows.length < hosts.hosts.length ? h("div", { class: "muted small" }, `${hosts.hosts.length - rows.length} host(s) below FP8, or not saying, are hidden.`) : null,
+      typeof hosts.auto_first_token_ms === "number" ? h("div", { class: "muted small" }, `NanoGPT's own routing measures ${ms(hosts.auto_first_token_ms)} to the first token, ${num(hosts.auto_tokens_per_second, 0)} tokens/s.`) : null);
+  };
+  const render = () => { renderOpts(); renderHosts(); };
+  fp8.addEventListener("change", renderHosts);
+  if (nano) api("GET", `/api/route/hosts?provider=${encodeURIComponent(provName)}&model=${encodeURIComponent(model)}`)
+    .then((r) => { hosts = r; renderHosts(); }).catch((e) => { hosts = { hosts: [] }; table.replaceChildren(h("div", { class: "warnbox" }, e.message)); });
+  render();
+  modal({ title: `Route for ${model}`, wide: true,
+    body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
+      h("div", { class: "muted small" }, nano
+        ? "NanoGPT runs most open models on several hosts and picks one. A route asks for another. A host is a preference, not a pin: if it is down, another serves the call. Any route but NanoGPT's own is billed pay-as-you-go, even for a model your subscription includes. Each reply's bill shows whether the route held (on the AI's message)."
+        : "OpenRouter serves most models from several hosts. A route asks it to prefer the fastest or cheapest."),
+      opts, h("label", { class: "check" }, fp8, " FP8 or better (leaves out hosts at lower precision, or that don't say: they measured worse)"),
+      table,
+      h("div", { class: "muted small" }, "The route applies to this model wherever it is used: chat, research, reviews, the vision helper. Private (end-to-end encrypted) and TEE models are never routed.")),
+    buttons: [{ label: "Save", kind: "primary", onClick: async () => {
+      if (priority === "host" && !chosen) throw new Error("Choose a host from the table.");
+      const route = priority ? { priority, fp8: fp8.checked, ...(priority === "host" ? { host: chosen.id, host_name: chosen.name, price: chosen.price } : {}) } : null;
+      await api("POST", "/api/route", { provider: provName, model, route });
+      toast(route ? `Route saved: ${ROUTE_LABELS[priority]}.` : "Back to the provider's own routing.", "ok");
+      onSaved?.(route);
+    } }, { label: "Cancel" }] });
 }
 
 function openModelPicker() {
@@ -2821,8 +2924,11 @@ function openSettings(tab = "providers") {
 
   function providersPane() {
     const provs = S.state.config.providers;
+    const activeName = S.state.config.active_provider;
     const list = h("div", { class: "list" }, provs.length ? provs.map((p) => h("div", { class: "list-item" },
-      h("div", { class: "grow" }, h("b", {}, p.name), "  ", h("span", { class: "muted small" }, p.base_url)),
+      h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: `prov-chip k-${p.kind}`, title: p.api_effective === "anthropic" ? "Anthropic Messages API" : "OpenAI-compatible API" }, p.kind_label),
+        p.name === activeName ? h("span", { class: "small", title: "The chat model is on this provider" }, " · in use") : null,
+        "  ", h("span", { class: "muted small" }, p.base_url)),
       h("span", { class: "small " + (p.has_key ? "" : "muted") }, p.has_key ? "🔑 key in keyring" : "no key"),
       h("button", { class: "small", onclick: () => pane.replaceChildren(providerForm(p)) }, "Edit"),
       h("button", { class: "small danger", onclick: async () => {
@@ -2833,66 +2939,142 @@ function openSettings(tab = "providers") {
           });
         }
       } }, "Delete"))) : h("div", { class: "muted" }, "No providers yet."));
+    const taken = (name) => provs.some((p) => p.name === name);
+    const fresh = (name) => { let n = name, i = 2; while (taken(n)) n = `${name} ${i++}`; return n; };
+    const preset = (label, name, base_url, api, extra = {}) => h("button", { ...extra,
+      onclick: () => pane.replaceChildren(providerForm({ name: name ? fresh(name) : "", base_url, api, _new: true })) }, label);
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, list,
-      h("div", { class: "row" },
-        h("button", { class: "primary", onclick: () => pane.replaceChildren(providerForm({ name: "NanoGPT", base_url: "https://nano-gpt.com/api/v1", _new: true })) }, "Add NanoGPT"),
-        h("button", { onclick: () => pane.replaceChildren(providerForm({ name: "Local", base_url: "http://localhost:11434/v1", _new: true })) }, "Add local (Ollama / LM Studio / vLLM)"),
-        h("button", { onclick: () => pane.replaceChildren(providerForm({ name: "", base_url: "", _new: true })) }, "Add other"),
-        h("button", { title: "A scripted fake model for practising the workflow. Nothing leaves this machine.",
-          onclick: () => pane.replaceChildren(providerForm({ name: "Training", base_url: "training://disk-full", _new: true })) }, "Add training provider")));
+      h("div", { class: "muted small" }, "Add as many as you like: the model picker lists each provider's models, and the top bar always shows which provider the chat model is on."),
+      h("div", { class: "row wrap" },
+        preset("Add NanoGPT", "NanoGPT", "https://nano-gpt.com/api/v1", "", { class: "primary" }),
+        preset("Add Anthropic", "Anthropic", "https://api.anthropic.com", "anthropic", { title: "Anthropic's own API: Claude with its reasoning shown, prompt caching, and Anthropic's own web search if you choose it (Settings → General)" }),
+        preset("Add OpenRouter", "OpenRouter", "https://openrouter.ai/api/v1", ""),
+        preset("Add WaveSpeed", "WaveSpeed", "https://llm.wavespeed.ai/v1", ""),
+        preset("Add local (Ollama / LM Studio / vLLM)", "Local", "http://localhost:11434/v1", "")),
+      h("div", { class: "row wrap" },
+        preset("Add other OpenAI-compatible", "", "", "openai"),
+        preset("Add other Anthropic-compatible", "", "", "anthropic", { title: "A service that speaks Anthropic's Messages API (/v1/messages) at its own address" }),
+        preset("Add training provider", "Training", "training://disk-full", "", { title: "A scripted fake model for practising the workflow. Nothing leaves this machine." })));
   }
 
   function providerForm(p) {
-    const name = h("input", { type: "text", value: p.name });
-    const url = h("input", { type: "text", value: p.base_url });
+    const name = h("input", { type: "text", value: p.name, placeholder: "A name you'll recognise, e.g. Anthropic" });
+    const url = h("input", { type: "text", value: p.base_url, placeholder: "https://…" });
+    const apiSel = h("select", {}, [["", "Worked out from the address"], ["openai", "OpenAI-compatible (chat completions)"],
+      ["anthropic", "Anthropic Messages API"]].map(([v, l]) => h("option", { value: v, selected: v === (p.api || "") }, l)));
     const key = h("input", { type: "password", autocomplete: "off",
       placeholder: p.has_key ? "Stored in keyring — leave blank to keep" : "Paste API key (stored in the OS keyring)" });
-    const def = h("input", { type: "text", value: p.default_model || "", placeholder: "Filled automatically on Test (Claude Opus 5.5 if available)" });
-    const overrides = h("textarea", { rows: 3, class: "mono",
-      value: Object.entries(p.tier_overrides || {}).map(([k, v]) => `${k} = ${v}`).join("\n"),
-      placeholder: "One per line: model-id = standard | tee | local" });
-    const visionOv = h("textarea", { rows: 2, class: "mono",
-      value: Object.entries(p.vision_overrides || {}).map(([k, v]) => `${k} = ${v}`).join("\n"),
-      placeholder: "One per line: model-id = yes | no   (for providers that don't report it, e.g. local models)" });
-    const contextOv = h("textarea", { rows: 2, class: "mono",
-      value: Object.entries(p.context_overrides || {}).map(([k, v]) => `${k} = ${v}`).join("\n"),
-      placeholder: "One per line: model-id = tokens, e.g. qwen3:32b = 32k   (for providers that don't report it; match the server's setting, such as Ollama's num_ctx)" });
+    const models = [];                              // from the provider's model list, once loaded
+    const datalist = h("datalist", { id: `models-${Math.random().toString(36).slice(2)}` });
+    const def = h("input", { type: "text", value: p.default_model || "", list: datalist.id, placeholder: "Filled automatically on Test (Claude Opus 5.5 if available)" });
     const status = h("div", { class: "muted small" });
+    const apiNote = h("div", { class: "muted small" });
+    const showApi = () => {
+      const anth = apiSel.value === "anthropic" || (!apiSel.value && /(^|\.)anthropic\.com$/.test(hostOf(url.value)));
+      const official = /(^|\.)anthropic\.com$/.test(hostOf(url.value));
+      apiNote.textContent = anth ? (official
+        ? "Anthropic's own API: Claude's reasoning is shown, the conversation is cached, and Claude can search the web itself if you choose that under Settings → General."
+        : "Anthropic-compatible: sent as Anthropic's Messages API, without Anthropic's own extras (thinking display, its web search, betas). If the service has no model list, set the default model.")
+        : "Sent as OpenAI chat completions.";
+    };
+    url.addEventListener("input", showApi);
+    apiSel.addEventListener("change", showApi);
+    showApi();
+
+    // overrides, one row per model: tier, whether it reads images, its context window, its route
+    const rows = h("tbody");
+    const routable = () => ["nanogpt", "openrouter"].includes(p.kind || kindOf(url.value));
+    const routes = { ...(p.routes || {}) };
+    const models_ = new Set([...Object.keys(p.tier_overrides || {}), ...Object.keys(p.vision_overrides || {}),
+      ...Object.keys(p.context_overrides || {}), ...Object.keys(routes)]);
+    const info = (id) => models.find((m) => m.id === id);
+    const addRow = (id = "") => {
+      const model = h("input", { type: "text", value: id, list: datalist.id, placeholder: "model id", class: "mono" });
+      const tier = h("select", {});
+      const vision = h("select", {});
+      const ctx = h("input", { type: "text", value: p.context_overrides?.[id] ? String(p.context_overrides[id]) : "", placeholder: "auto",
+        list: "ctx-sizes", class: "ctx", title: "Tokens: 32768, 32k or 1M. Match the server's setting (e.g. Ollama's num_ctx)." });
+      const ctxNote = h("span", { class: "muted small" });
+      const routeBtn = h("button", { type: "button", class: "small" });
+      const fill = () => {
+        const m = info(model.value.trim());
+        const t = tier.options.length ? tier.value : (p.tier_overrides?.[id] || "");
+        tier.replaceChildren(...[["", `Auto${m ? ` (${m.tier_auto})` : ""}`], ["standard", "Standard"], ["tee", "TEE (attested)"], ["local", "Local (own hardware)"]]
+          .map(([v, l]) => h("option", { value: v, selected: v === t }, l)));
+        const vv = vision.options.length ? vision.value : (p.vision_overrides?.[id] || "");
+        const auto = m ? (m.vision_auto === true ? "yes" : m.vision_auto === false ? "no" : "unknown") : "";
+        vision.replaceChildren(...[["", `Auto${auto ? ` (${auto})` : ""}`], ["yes", "Yes"], ["no", "No"]]
+          .map(([v, l]) => h("option", { value: v, selected: v === vv }, l)));
+        ctx.placeholder = "auto";
+        const n = parseTokens(ctx.value);
+        ctxNote.textContent = ctx.value.trim() ? (n >= 1024 ? `= ${n.toLocaleString()} tokens` : "⚠ not a token count")
+          : m ? (m.context_auto ? `detected: ${fmtTokens(m.context_auto)}` : "not reported") : "";
+        const r = routes[model.value.trim()];
+        routeBtn.textContent = r ? `⚡ ${ROUTE_LABELS[r.priority]}` : "Route…";
+        routeBtn.disabled = !routable() || !model.value.trim() || /^(private|TEE)\//i.test(model.value.trim());
+        routeBtn.title = routeBtn.disabled ? "Routes apply to NanoGPT and OpenRouter models, never to private/ or TEE ones" : "Choose which host serves this model";
+      };
+      model.addEventListener("input", fill);
+      ctx.addEventListener("input", fill);
+      routeBtn.addEventListener("click", async () => {
+        const m = model.value.trim();
+        if (p._new) { toast("Save the provider first.", "info"); return; }
+        openRouteDialog(p.name, m, (r) => { if (r) routes[m] = r; else delete routes[m]; fill(); });
+      });
+      const tr = h("tr", {}, h("td", {}, model), h("td", {}, tier), h("td", {}, vision), h("td", {}, ctx, " ", ctxNote),
+        h("td", {}, routeBtn), h("td", {}, h("button", { type: "button", class: "small ghost", title: "Remove this row", onclick: () => tr.remove() }, "✕")));
+      tr._get = () => ({ model: model.value.trim(), tier: tier.value, vision: vision.value, context: ctx.value.trim() });
+      tr._fill = fill;
+      fill();
+      rows.append(tr);
+      return model;
+    };
+    for (const id of models_) addRow(id);
+    const loadBtn = h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
+      if (p._new) throw new Error("Save & test the provider first.");
+      status.textContent = "Loading models…";
+      const got = (await api("GET", `/api/models?provider=${encodeURIComponent(p.name)}&refresh=false`)).models;
+      models.splice(0, models.length, ...got);
+      datalist.replaceChildren(...got.map((m) => h("option", { value: m.id })));
+      for (const tr of rows.children) tr._fill();
+      status.textContent = `${got.length} models listed: pick one in a row's model box.`;
+    }) }, "Load the model list");
+    const table = h("table", { class: "overrides" },
+      h("thead", {}, h("tr", {}, ["Model", "Tier", "Reads images", "Context window", "Route", ""].map((t) => h("th", {}, t)))), rows);
+    const sizes = h("datalist", { id: "ctx-sizes" }, ["8k", "16k", "32k", "64k", "128k", "200k", "256k", "1M"].map((v) => h("option", { value: v })));
+
     const payload = () => {
-      const tier_overrides = {};
-      for (const line of overrides.value.split("\n")) {
-        const [k, v] = line.split("=").map((s) => (s || "").trim());
-        if (k && v) tier_overrides[k] = v.toLowerCase();
+      const tier_overrides = {}, vision_overrides = {}, context_overrides = {}, keptRoutes = {};
+      for (const tr of rows.children) {
+        const r = tr._get();
+        if (!r.model) continue;
+        if (r.tier) tier_overrides[r.model] = r.tier;
+        if (r.vision) vision_overrides[r.model] = r.vision;
+        if (r.context) context_overrides[r.model] = r.context;
+        if (routes[r.model]) keptRoutes[r.model] = routes[r.model];
       }
-      const vision_overrides = {};
-      for (const line of visionOv.value.split("\n")) {
-        const [k, v] = line.split("=").map((s) => (s || "").trim());
-        if (k && v) vision_overrides[k] = v.toLowerCase();
-      }
-      const context_overrides = {};
-      for (const line of contextOv.value.split("\n")) {
-        const [k, v] = line.split("=").map((s) => (s || "").trim());
-        if (k && v) context_overrides[k] = v;
-      }
-      return { provider: { name: name.value.trim(), base_url: url.value.trim(), default_model: def.value.trim(), tier_overrides, vision_overrides, context_overrides },
+      return { provider: { name: name.value.trim(), base_url: url.value.trim(), api: apiSel.value, default_model: def.value.trim(),
+        tier_overrides, vision_overrides, context_overrides, routes: keptRoutes },
         api_key: key.value.trim() || null, original_name: p._new ? null : p.name };
     };
     const save = async () => {
       const body = payload();
       await api("POST", "/api/providers", body);
-      p = { ...body.provider, has_key: p.has_key || !!body.api_key };
+      p = { ...p, ...body.provider, has_key: p.has_key || !!body.api_key, _new: false };
       key.value = "";
       return body.provider.name;
     };
-    return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
+    return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, datalist, sizes,
       h("div", { class: "row" }, h("label", { class: "field" }, h("span", {}, "Name"), name),
-        h("label", { class: "field", style: "flex:2" }, h("span", {}, "Base URL (OpenAI-compatible; https://, or http:// only on this machine and its local network)"), url)),
+        h("label", { class: "field", style: "flex:2" }, h("span", {}, "Base URL (https://, or http:// only on this machine and its local network)"), url)),
+      h("div", { class: "row" }, h("label", { class: "field" }, h("span", {}, "API"), apiSel), h("div", { class: "field", style: "flex:2" }, apiNote)),
       h("label", { class: "field" }, h("span", {}, "API key"), key),
       h("label", { class: "field" }, h("span", {}, "Default model"), def),
-      h("label", { class: "field" }, h("span", {}, "Tier overrides"), overrides),
-      h("label", { class: "field" }, h("span", {}, "Reads images (overrides)"), visionOv),
-      h("label", { class: "field" }, h("span", {}, "Context window (overrides)"), contextOv),
-      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave, attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict) and each reply's signature checked, but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models, attested with Tinfoil's verifier); LOCAL = your own hardware (localhost/private IP URLs)."),
+      h("h3", {}, "Model overrides"),
+      h("div", { class: "muted small" }, "For a model whose tier, image support or context window DA Toolkit gets wrong, or that the provider doesn't report (local models, mostly). Leave a column on Auto to keep what is detected (shown in brackets once the model list is loaded)."),
+      table,
+      h("div", { class: "row" }, h("button", { type: "button", class: "small", onclick: () => addRow().focus() }, "Add a model"), loadBtn),
+      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave, attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict) and each reply's signature checked, but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models only, attested with Tinfoil's verifier; never set by hand); LOCAL = your own hardware (localhost/private IP URLs). Marking a cloud model Local lets Confidential and Sovereign cases use it: only do so for a model that really runs on your own hardware."),
       status,
       h("div", { class: "row" },
         h("button", { onclick: () => guarded(() => reshow("providers")) }, "Back"),
@@ -2901,11 +3083,14 @@ function openSettings(tab = "providers") {
           const n = await save();
           status.textContent = "Testing…";
           try {
-            const models = (await api("GET", `/api/models?provider=${encodeURIComponent(n)}&refresh=true`)).models;
-            const fresh = S.state.config.providers.find((x) => x.name === n);
-            if (fresh?.default_model && !def.value) def.value = fresh.default_model;
-            status.textContent = `✓ Connected: ${models.length} models available.` + (def.value ? ` Default: ${def.value}` : "");
-            p._new = false;
+            const got = (await api("GET", `/api/models?provider=${encodeURIComponent(n)}&refresh=true`)).models;
+            models.splice(0, models.length, ...got);
+            datalist.replaceChildren(...got.map((m) => h("option", { value: m.id })));
+            for (const tr of rows.children) tr._fill();
+            const freshP = S.state.config.providers.find((x) => x.name === n);
+            if (freshP?.default_model && !def.value) def.value = freshP.default_model;
+            if (freshP) p = { ...p, kind: freshP.kind };
+            status.textContent = `✓ Connected: ${got.length} models available.` + (def.value ? ` Default: ${def.value}` : "");
           } catch (e) { status.textContent = `✗ ${e.message}`; }
         }) }, "Save & test"),
         h("button", { class: "primary", onclick: () => guarded(async () => {
@@ -3104,7 +3289,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" }, field("Frequency penalty", f.frequency_penalty), field("Presence penalty", f.presence_penalty), field("Seed", f.seed)),
       h("div", { class: "row" }, h("span", { class: "spacer" }),
         h("button", { type: "button", onclick: () => { for (const [k, el] of Object.entries(f)) el.value = { temperature: 0.3, reasoning_effort: "low" }[k] ?? ""; } }, "Reset to defaults")),
-      field("Prompt caching", promptCache, "For Claude models through NanoGPT (Open cases): each request reuses the conversation the previous one sent, at a tenth of the input price. Writing the cache costs extra (1.25× for 5 minutes, 2× for 1 hour), so 1 hour suits the minutes spent running commands between replies. Other models cache automatically where their provider does."),
+      field("Prompt caching", promptCache, "For Claude models through NanoGPT or Anthropic (Open cases): each request reuses the conversation the previous one sent, at a tenth of the input price. Writing the cache costs extra (1.25× for 5 minutes, 2× for 1 hour), so 1 hour suits the minutes spent running commands between replies. Other models cache automatically where their provider does."),
       h("h3", {}, "Model-specific instructions"),
       modelNotes(),
       h("h3", {}, "Images"),
@@ -3216,6 +3401,8 @@ function openSettings(tab = "providers") {
         ["brave", "brave: fast links, $0.005"], ["perplexity", "perplexity"], ["valyu", "valyu"], ["tavily", "tavily"],
         ["linkup", "linkup"], ["sofya", "sofya"], ["firecrawl", "firecrawl"], ["exa", "exa: titles only"]]),
       search_via: sel(s.search_via || "", [["", nanos.length ? `First NanoGPT provider (${nanos[0].name})` : "No NanoGPT provider configured"], ...nanos.map((p) => [p.name, p.name])]),
+      search_engine: sel(s.search_engine || "nanogpt", [["nanogpt", "NanoGPT: the AI asks, you approve each query (gated)"],
+        ["native", "Anthropic's own search, for Claude on an Anthropic provider (no approval per query)"]]),
     };
     const uiMode = sel(s.ui_mode || "window", [["window", "The app window (needs WebKitGTK)"], ["browser", "My default web browser"]]);
     const testQ = h("input", { type: "text", placeholder: "Test query, e.g. OPNsense 25.1 release notes" });
@@ -3235,6 +3422,8 @@ function openSettings(tab = "providers") {
         h("label", { class: "field" }, h("span", {}, "Open DA Toolkit in"), uiMode), h("span", { class: "field" })),
       h("div", { class: "muted small" }, "Takes effect the next time DA Toolkit starts. Without WebKitGTK it uses the browser anyway and says what to install. From a terminal, --browser or --window overrides this for one run."),
       h("h3", {}, "Web search"),
+      h("div", { class: "row" }, h("label", { class: "field", style: "flex:2" }, h("span", {}, "Searches for the chat model"), search.search_engine), h("span", { class: "field" })),
+      h("div", { class: "muted small" }, "Anthropic's own search runs inside Claude's request on Anthropic's side: Claude searches as it works and reads the results itself, so no query can be shown to you first. It is used only when the chat model is a Claude model on an Anthropic provider (https://api.anthropic.com), and only for Open cases, up to 4 searches a request; each search is billed by Anthropic. Otherwise, and for Confidential cases, the gated NanoGPT search below is used (Sovereign cases never search). Research (reading whole pages) always goes through the gated research agent."),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "AI web searches and research"), search.search_mode),
         h("label", { class: "field" }, h("span", {}, "Search provider (answers)"), search.search_provider),
@@ -3523,6 +3712,10 @@ function init() {
     $(sel).addEventListener("click", () => S.state.case && guarded(() => editCaseModal(S.state.case)));
   }
   $("#model-btn").addEventListener("click", openModelPicker);
+  $("#route-btn").addEventListener("click", () => {
+    const act = S.state.active;
+    if (act?.routable) openRouteDialog(act.provider, act.model);
+  });
   $("#attest-btn").addEventListener("click", () => guarded(async () => {
     const r = await api("POST", "/api/attest");
     toast(r.status === "verified" ? `${r.kind === "tee" ? "TEE" : "Enclave"} attested: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);

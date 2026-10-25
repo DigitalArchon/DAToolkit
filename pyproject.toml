@@ -12,6 +12,10 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.50",
+    # Anthropic's Messages API (llm/anthropic_api.py): the official endpoint and compatible ones.
+    # 1.x, the line its streaming, model-list and pass-through fields were checked against;
+    # 1.13.0 was the newest that had been out for two weeks when it was adopted (Oct 2026)
+    "anthropic>=1.13,<2",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "pywebview>=5",

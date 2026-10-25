@@ -68,6 +68,12 @@ class Provider:
     vision_overrides: dict[str, str] = field(default_factory=dict)
     # model id -> context window in tokens (for providers that don't report it, e.g. local models)
     context_overrides: dict[str, int] = field(default_factory=dict)
+    # which API it speaks: "openai" (chat completions) or "anthropic" (Messages API); "" = from
+    # the address (api.anthropic.com speaks Anthropic's, everything else OpenAI's): llm/providers.py
+    api: str = ""
+    # model id -> route, which of the provider's hosts serves it (NanoGPT, OpenRouter):
+    # {"priority": "latency" | "speed" | "price" | "host", "fp8": bool, "host": "..."}; llm/routing.py
+    routes: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -112,6 +118,10 @@ class Settings:
     search_provider: str = "perplexity"
     # the research agent's "links" searches: the best pages fast, which it then reads itself
     search_links_provider: str = "kagi"
+    # who searches for the chat model: "nanogpt" (the web_search tool, gated as above) or "native"
+    # (Anthropic's own web search, when the chat model is on Anthropic's API; Open cases only,
+    # since it can't ask before each query: Engine.search_status)
+    search_engine: str = "nanogpt"
     # name of the NanoGPT provider whose key pays for searches; empty = the first NanoGPT one
     search_via: str = ""
     # "provider|model" of the research agent (research tool); empty = Claude Sonnet 5.5 on the

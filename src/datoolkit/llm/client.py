@@ -48,7 +48,8 @@ def is_local_url(base_url: str) -> bool:
 
 
 def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None = None) -> str:
-    if overrides and model_id in overrides and overrides[model_id] in TIERS:
+    # e2ee is never taken from an override: only a private/ model is sealed (Engine.save_provider)
+    if overrides and model_id in overrides and overrides[model_id] in ("standard", "tee", "local"):
         return overrides[model_id]
     if is_local_url(base_url):
         return "local"
@@ -58,6 +59,18 @@ def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None =
     if "tee" in parts or parts[0] == "phala" or model_id.lower().endswith(("-tee", ":tee")):
         return "tee"
     return "standard"
+
+
+# The fields of a chat completions message. A message in the conversation may carry more for
+# another API (an Anthropic turn's own content blocks, "native"; the state it was answered
+# under, "state_before": llm/anthropic_api.py), which an OpenAI-compatible provider never sees.
+OPENAI_MESSAGE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
+
+
+def openai_messages(messages: list[dict]) -> list[dict]:
+    """`messages` as chat completions takes them: anything another API keeps on them left out."""
+    return [m if all(k in OPENAI_MESSAGE_KEYS for k in m) else {k: v for k, v in m.items() if k in OPENAI_MESSAGE_KEYS}
+            for m in messages]
 
 
 @dataclass
@@ -78,6 +91,17 @@ class TurnResult:
     finish_reason: str | None = None
     usage: dict | None = None
     id: str | None = None  # the completion's id: a TEE model's reply signature is looked up by it
+    # Anthropic's Messages API (llm/anthropic_api.py): the turn's own content blocks, kept so they
+    # go back unchanged (thinking signatures, search results); the state rendered before it as a
+    # turn-scoped system message; its prefix fingerprint; the searches Anthropic ran, the sources
+    # it cited, the model that answered when another stepped in, and why a reply was declined
+    native: list | None = None
+    state_sent: str = ""
+    prefix_sha: str = ""
+    searches: list = field(default_factory=list)
+    citations: list = field(default_factory=list)
+    served_by: str = ""
+    refusal: dict | None = None
 
 
 class LLMClient:
@@ -97,7 +121,7 @@ class LLMClient:
         then ("done", TurnResult)."""
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
-        kwargs: dict = {"model": model, "messages": messages, "stream": True,
+        kwargs: dict = {"model": model, "messages": openai_messages(messages), "stream": True,
                         "stream_options": {"include_usage": True}}
         if tools:
             kwargs["tools"] = tools
@@ -116,13 +140,15 @@ class LLMClient:
     async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
-        resp = await self._client.chat.completions.create(model=model, messages=messages, **_split_params(params))
+        resp = await self._client.chat.completions.create(model=model, messages=openai_messages(messages),
+                                                          **_split_params(params))
         return resp.choices[0].message.content or ""
 
 
 # provider extensions sent in the request body, whatever the SDK version knows about:
-# reasoning_effort, and NanoGPT's prompt_caching (Claude cache boundary and lifetime)
-_EXTRA_BODY = ("reasoning_effort", "prompt_caching")
+# reasoning_effort, NanoGPT's prompt_caching (Claude cache boundary and lifetime), and the
+# route NanoGPT or OpenRouter is asked to follow (llm/routing.py)
+_EXTRA_BODY = ("reasoning_effort", "prompt_caching", "provider")
 
 
 def _split_params(params: dict | None) -> dict:
@@ -142,6 +168,7 @@ class StreamAccumulator:
     def __init__(self) -> None:
         self.result = TurnResult()
         self._calls: dict[int, ToolCall] = {}
+        self._pricing: dict | None = None
 
     def feed(self, chunk) -> list[tuple[str, str]]:
         events: list[tuple[str, str]] = []
@@ -149,6 +176,11 @@ class StreamAccumulator:
             self.result.id = chunk.id
         if chunk.usage:
             self.result.usage = chunk.usage.model_dump()
+        # NanoGPT's own record of the charge: its usage.cost comes and goes between replies
+        # (as SealedLore found), and a routed call's bill is the evidence that the route held
+        pricing = (getattr(chunk, "model_extra", None) or {}).get("x_nanogpt_pricing")
+        if isinstance(pricing, dict):
+            self._pricing = pricing
         if not chunk.choices:
             return events
         choice = chunk.choices[0]
@@ -180,6 +212,10 @@ class StreamAccumulator:
         return events
 
     def finish(self) -> TurnResult:
+        cost = (self._pricing or {}).get("cost", (self._pricing or {}).get("amount"))
+        if self.result.usage is not None and not isinstance(self.result.usage.get("cost"), (int, float)) \
+                and isinstance(cost, (int, float)):
+            self.result.usage["cost"] = cost
         self.result.tool_calls = [self._calls[i] for i in sorted(self._calls)]
         for i, call in enumerate(self.result.tool_calls):
             if not call.id:

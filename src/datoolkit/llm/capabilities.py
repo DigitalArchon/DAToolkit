@@ -2,8 +2,9 @@
 
 NanoGPT reports this in its detailed model list (GET /models?detailed=true). Private Mode
 models (private/kimi-k3) are not in that list, so they are matched to their public
-counterpart by name (moonshotai/kimi-k3, TEE/kimi-k3). Other OpenAI-compatible providers
-report nothing, so their capabilities are unknown unless the technician sets an override."""
+counterpart by name (moonshotai/kimi-k3, TEE/kimi-k3). OpenRouter's model list and Anthropic's
+(llm/anthropic_api.py) say much the same. Other providers report nothing, so their
+capabilities are unknown unless the technician sets an override."""
 
 from __future__ import annotations
 
@@ -43,6 +44,38 @@ async def fetch_nanogpt(base_url: str, api_key: str | None, http: httpx.AsyncCli
                              headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
         r.raise_for_status()
         return parse(r.json().get("data", []))
+    finally:
+        if http is None:
+            await client.aclose()
+
+
+def parse_openrouter(items: list[dict]) -> dict[str, dict]:
+    """OpenRouter's model list (GET /models): modalities, parameters and limits per model."""
+    out = {}
+    for m in items:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        arch = m.get("architecture") or {}
+        params = m.get("supported_parameters") or []
+        top = m.get("top_provider") or {}
+        out[m["id"]] = {
+            "vision": "image" in (arch.get("input_modalities") or []),
+            "reasoning": "reasoning" in params or "include_reasoning" in params,
+            "efforts": [],
+            "tools": "tools" in params,
+            "context": m.get("context_length") or top.get("context_length"),
+            "max_output": top.get("max_completion_tokens"),
+        }
+    return out
+
+
+async def fetch_openrouter(base_url: str, api_key: str | None, http: httpx.AsyncClient | None = None) -> dict[str, dict]:
+    client = http or httpx.AsyncClient(timeout=30)
+    try:
+        r = await client.get(base_url.rstrip("/") + "/models",
+                             headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
+        r.raise_for_status()
+        return parse_openrouter(r.json().get("data", []))
     finally:
         if http is None:
             await client.aclose()

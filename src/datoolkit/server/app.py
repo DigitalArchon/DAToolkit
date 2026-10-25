@@ -20,6 +20,7 @@ from starlette.datastructures import Headers
 from .. import config
 from ..companion import CompanionServer
 from ..hostenv import host_env
+from ..llm import providers as providers_mod
 from ..engine import Engine, UserError
 from ..sessions import guac
 
@@ -284,6 +285,20 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.get("/api/models")
     async def models(provider: str, refresh: bool = False, e: Engine = Depends(auth)):
         return {"models": await e.list_models(provider, refresh)}
+
+    @app.post("/api/route")
+    async def set_route(body: dict, e: Engine = Depends(auth)):
+        e.set_route(str(body.get("provider", "")), str(body.get("model", "")), body.get("route") or None)
+        return {"ok": True}
+
+    @app.get("/api/route/hosts")
+    async def route_hosts(provider: str, model: str, refresh: bool = False, e: Engine = Depends(auth)):
+        return await e.model_hosts(provider, model, refresh)
+
+    @app.get("/api/provider-presets")
+    async def provider_presets(e: Engine = Depends(auth)):
+        return {"presets": [{"kind": k, "label": label, "name": n, "base_url": u, "api": a}
+                            for k, label, n, u, a in providers_mod.PRESETS]}
 
     @app.post("/api/model")
     async def select_model(body: dict, e: Engine = Depends(auth)):

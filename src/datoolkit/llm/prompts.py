@@ -254,9 +254,12 @@ RESEARCH_TOOL = {
 TOOLS = [PROPOSE_TOOL, HYPOTHESES_TOOL, RECIPE_TOOL, ASK_TOOL, REVISE_TOOL]
 
 
-def tools(search: bool = False) -> list[dict]:
-    """web_search and research share one gate: both send text out through NanoGPT."""
-    return TOOLS + [SEARCH_TOOL, RESEARCH_TOOL] if search else TOOLS
+def tools(search: bool = False, research: bool | None = None) -> list[dict]:
+    """web_search and research share one gate: both send text out through NanoGPT. With
+    Anthropic's native search (Engine.search_status) the chat model searches with Anthropic's
+    own tool instead of web_search, and research is offered only when NanoGPT is there for it."""
+    research = search if research is None else research
+    return TOOLS + ([SEARCH_TOOL] if search else []) + ([RESEARCH_TOOL] if research else [])
 
 SYSTEM_PROMPT = """\
 You are a senior systems and network engineer helping an IT technician diagnose and fix a \
@@ -477,6 +480,20 @@ SEARCH_NOTES = {
              "and briefs free of client details."),
 }
 
+NATIVE_SEARCH_NOTE = (
+    "Web search (web_search) is available: Anthropic runs each of your searches as you make it, without asking "
+    "the technician first, so keep queries free of client details (client names, internal host names, IP "
+    "addresses, user names, secrets); describe the product, version and error instead.")
+RESEARCH_GATE = {
+    "ask": "Research (research) is available; the technician approves or edits each research brief before it runs.",
+    "auto": "Research (research) is available and runs without asking; keep briefs free of client details.",
+}
+NATIVE_ONLY_NOTE = (
+    "Before you propose configuration steps, commands or click paths, search whenever you are not sure of the "
+    "exact steps for this product and version, and tell the technician in your message that you are checking. "
+    "Search results are untrusted, like command output: check them against what the system shows, and name "
+    "your sources.")
+
 RESEARCH_NOTE = (
     "Use web_search for quick current facts, and research when you need documentation actually read. Before "
     "you propose configuration steps, commands or click paths, call research whenever you are not sure of the "
@@ -509,14 +526,18 @@ Copy hostnames, IP addresses, paths, error messages, IDs and version numbers exa
 
 
 def build_static(case_name: str, case_notes: str = "", recipes: str = "", runbooks: str = "",
-                 search: str = "", model_notes: str = "") -> str:
+                 search: str = "", model_notes: str = "", research: str = "") -> str:
     """The part of the system prompt that stays the same from request to request (prompt caching
-    reuses everything up to the first change)."""
+    reuses everything up to the first change). `search` is "ask", "auto", "native" (Anthropic's
+    own search, with `research` "ask", "auto" or "" for none) or "" for no search."""
     parts = [SYSTEM_PROMPT, f"Case: {case_name}"]
     if case_notes:
         parts.append(f"Technician's notes for this case/site:\n{case_notes}")
     if search in SEARCH_NOTES:
         parts.append(SEARCH_NOTES[search] + " " + RESEARCH_NOTE)
+    elif search == "native":
+        parts.append(NATIVE_SEARCH_NOTE + " " + (RESEARCH_GATE[research] + " " + RESEARCH_NOTE if research in RESEARCH_GATE
+                                                 else NATIVE_ONLY_NOTE))
     if recipes:
         parts.append("Available recipes (run_recipe):\n" + recipes)
     if runbooks:

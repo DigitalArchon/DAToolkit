@@ -52,7 +52,7 @@ import httpx
 from openai.types.chat import ChatCompletionChunk
 
 from .capabilities import norm_id
-from .client import StreamAccumulator, is_private_mode
+from .client import StreamAccumulator, is_private_mode, openai_messages
 
 RELAY_PATH = "/api/v1/private/tinfoil"
 ROUTER_REPO = "tinfoilsh/confidential-model-router"
@@ -277,7 +277,7 @@ def shape_body(model: str, upstream: str, messages: list[dict], tools: list[dict
                cache_secret: str, params: dict | None = None) -> dict:
     """The body Tinfoil's router takes, shaped as the proxy does for the fields we send."""
     msgs = []
-    for m in messages:
+    for m in openai_messages(messages):
         if m.get("role") == "assistant":
             m = {k: v for k, v in m.items() if k not in _ASSISTANT_REASONING_FIELDS}
         msgs.append(m)

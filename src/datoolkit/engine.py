@@ -31,7 +31,10 @@ from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
 from .llm.private_mode import (Enclave, ModelRetired, PrivateModeClient, PrivateModeError,
                                list_private_models, offers_private_mode, relay_url)
-from .llm import capabilities, model_prompts, netguard, research, textcalls, websearch
+from .llm import capabilities, model_prompts, netguard, research, routing, textcalls, websearch
+from .llm import anthropic_api
+from .llm import providers as providers_mod
+from .llm.anthropic_api import AnthropicClient
 from .llm import tee as tee_mod
 from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
@@ -167,6 +170,33 @@ class UserError(Exception):
         self.commands = list(commands or [])
 
 
+def parse_tokens(value) -> int:
+    """A token count as typed: 32768, 32,768, 32k, 1.5M. 0 when it isn't one."""
+    v = str(value).strip().lower().replace(",", "").replace("_", "").replace(" ", "")
+    scale = {"k": 1000, "m": 1_000_000}.get(v[-1:], 1)
+    if scale > 1:
+        v = v[:-1]
+    try:
+        return int(float(v) * scale) if v and v.replace(".", "", 1).isdigit() else 0
+    except ValueError:
+        return 0
+
+
+def _for_estimate(m):
+    """A message as its size is estimated: an Anthropic turn by its own blocks, less their
+    signatures and encrypted search payloads; a state already answered renders nothing."""
+    if not isinstance(m, dict):
+        return m
+    native = m.get("native")
+    m = {k: v for k, v in m.items() if k not in ("native", "state_before")}
+    if isinstance(native, dict):
+        drop = ("signature", "encrypted_content", "encrypted_index")
+        blocks = native.get("content") or []
+        m = {"role": m.get("role"), "content": [{k: v for k, v in b.items() if k not in drop} for b in blocks
+                                                if isinstance(b, dict)]}
+    return m
+
+
 def _local_os() -> str:
     try:
         for line in Path("/etc/os-release").read_text().splitlines():
@@ -255,6 +285,8 @@ class Engine:
         self._caps: dict[str, dict[str, dict]] = {}   # provider -> model id -> capabilities
         self._caps_tasks: dict[str, asyncio.Task] = {}
         self._caps_http = None                         # httpx client override (tests)
+        self._anthropic_http = None                    # the Anthropic SDK's http client override (tests)
+        self._hosts: dict[tuple[str, str], tuple[float, dict]] = {}   # NanoGPT's hosts of a model, when fetched
         self._img_desc: dict[str, dict] = {}           # image file -> {"model", "text"} from the vision helper
         self._last_turn_error: str | None = None
         self._unsupported: dict[tuple[str, str], set[str]] = {}   # generation settings a model's route refused
@@ -324,6 +356,7 @@ class Engine:
             "search_requests": [info for _, info in self._search_reqs.values()],
             "research_requests": [info for _, info in self._research_reqs.values()],
             "search": self.search_status(),
+            "active": self._active_view(),
             "vision": self.vision_status(),
             "can_retry": self.can_retry,
             "last_error": self._last_turn_error,
@@ -342,6 +375,8 @@ class Engine:
         c = self.cfg.to_dict()
         for p in c["providers"]:
             p["has_key"] = self._has_secret("provider", p["name"])
+            info = providers_mod.describe(p["base_url"], p.get("api", ""))
+            p.update(kind=info["kind"], kind_label=info["kind_label"], api_effective=info["api"])
         for h, host in zip(c["hosts"], self.cfg.hosts):
             h["has_password"] = self._has_secret("host", h["name"])
             port = self._pin_port(host)
@@ -349,6 +384,58 @@ class Engine:
                 pin = self.pins.get(h["host"], port)
                 h["pinned"] = pin["sha256"] if pin else ""
         return c
+
+    def _active_view(self) -> dict | None:
+        """The chat model's provider as the top bar shows it: who it is, the API it speaks, the
+        route its model follows."""
+        prov = self.cfg.provider(self.cfg.active_provider)
+        if not prov:
+            return None
+        model = self.cfg.active_model
+        info = providers_mod.describe(prov.base_url, prov.api)
+        kind = info["kind"]
+        tier = detect_tier(model, prov.base_url, prov.tier_overrides) if model else ""
+        routable = bool(model) and routing.routable(kind, model, tier)
+        return {"provider": prov.name, "base_url": prov.base_url, **info, "model": model, "routable": routable,
+                "route": prov.routes.get(model) if routable else None,
+                "route_label": routing.label(kind, prov.routes.get(model)) if routable else ""}
+
+    def set_route(self, provider_name: str, model: str, route: dict | None) -> None:
+        """Choose which host serves `model` (llm/routing.py); None for the provider's own routing."""
+        prov = self.cfg.provider(provider_name)
+        if not prov:
+            raise UserError(f"Unknown provider {provider_name}")
+        kind = self._kind(prov)
+        if not routing.routable(kind, model, detect_tier(model, prov.base_url, prov.tier_overrides)):
+            raise UserError("Routes apply only to NanoGPT and OpenRouter models, and never to private/ or TEE ones: "
+                            "their protection is the enclave they were attested on.")
+        try:
+            found = routing.validate(route, kind)
+        except ValueError as e:
+            raise UserError(str(e)) from e
+        if found:
+            prov.routes[model] = found
+        else:
+            prov.routes.pop(model, None)
+        self.log("route_set", provider=provider_name, model=model, route=found)
+        self._save_config(self.cfg)
+        self._changed()
+
+    async def model_hosts(self, provider_name: str, model: str, refresh: bool = False) -> dict:
+        """NanoGPT's hosts for a model, with its figures for each (kept ten minutes)."""
+        prov = self.cfg.provider(provider_name)
+        if not prov or self._kind(prov) != "nanogpt":
+            raise UserError("Only NanoGPT lists the hosts of a model.")
+        self._secure(prov)
+        hit = self._hosts.get((prov.name, model))
+        if hit and not refresh and time.monotonic() - hit[0] < 600:
+            return hit[1]
+        try:
+            found = (await routing.fetch_hosts(prov.base_url, model, http=self._search_http)).to_dict()
+        except Exception as e:  # noqa: BLE001
+            raise UserError(f"Couldn't list the hosts for {model}: {e}") from e
+        self._hosts[(prov.name, model)] = (time.monotonic(), found)
+        return found
 
     def _has_secret(self, kind: str, name: str) -> bool:
         key = (kind, name)
@@ -385,21 +472,43 @@ class Engine:
         found = None if is_training_url(base_url) else netguard.problem(base_url)
         if found:
             raise UserError(f"Provider not saved. {found}")
-        overrides = {k.strip(): v.strip() for k, v in (data.get("tier_overrides") or {}).items() if k.strip()}
-        vision = {k.strip(): str(v).strip().lower() for k, v in (data.get("vision_overrides") or {}).items() if k.strip()}
+        api = str(data.get("api") or "").strip()
+        if api and api not in providers_mod.APIS:
+            raise UserError(f"The API must be one of {', '.join(providers_mod.APIS)}.")
+        if api == providers_mod.api_of(base_url):
+            api = ""                      # what the address says anyway: follows the address if it changes
+        overrides = {k.strip(): str(v).strip().lower() for k, v in (data.get("tier_overrides") or {}).items()
+                     if k.strip() and str(v).strip()}
+        # e2ee only ever comes from the model itself (private/): a tier marked by hand would send
+        # a plaintext model's requests as though they were sealed
+        bad = [k for k, v in overrides.items() if v not in ("standard", "tee", "local")]
+        if bad:
+            raise UserError(f"A tier override must be standard, tee or local ({', '.join(bad)}).")
+        vision = {k.strip(): str(v).strip().lower() for k, v in (data.get("vision_overrides") or {}).items()
+                  if k.strip() and str(v).strip()}
         bad = [k for k, v in vision.items() if v not in ("yes", "no")]
         if bad:
             raise UserError(f"Vision overrides must be yes or no ({', '.join(bad)}).")
         context = {}
         for k, v in (data.get("context_overrides") or {}).items():
-            v = str(v).strip().lower().replace(",", "").replace("_", "")
-            n = int(float(v[:-1]) * 1000) if v.endswith("k") and v[:-1].replace(".", "", 1).isdigit() else (int(v) if v.isdigit() else 0)
-            if k.strip() and n < 1024:
-                raise UserError(f"Context window for {k.strip()} must be a number of tokens, such as 32768 or 32k.")
-            if k.strip():
-                context[k.strip()] = n
+            if not k.strip() or not str(v).strip():
+                continue
+            n = parse_tokens(v)
+            if n < 1024:
+                raise UserError(f"Context window for {k.strip()} must be a number of tokens, such as 32768, 32k or 1M.")
+            context[k.strip()] = n
+        kind = providers_mod.kind_of(base_url, api)
+        routes = {}
+        for k, v in (data.get("routes") or {}).items():
+            try:
+                r = routing.validate(v, kind)
+            except ValueError as e:
+                raise UserError(f"Route for {k}: {e}") from e
+            if k.strip() and r:
+                routes[k.strip()] = r
         prov = Provider(name=name, base_url=base_url, default_model=str(data.get("default_model", "")).strip(),
-                        tier_overrides=overrides, vision_overrides=vision, context_overrides=context)
+                        tier_overrides=overrides, vision_overrides=vision, context_overrides=context, api=api,
+                        routes=routes)
         old = self.cfg.provider(original_name or name)
         if original_name and original_name != name and old:
             key = creds.get_secret("provider", original_name)
@@ -441,11 +550,22 @@ class Engine:
         if found:
             raise UserError(found)
 
-    def _client(self, provider: Provider, model: str = "") -> LLMClient | PrivateModeClient:
+    @staticmethod
+    def _api(prov: Provider) -> str:
+        return "openai" if is_training_url(prov.base_url) else providers_mod.api_of(prov.base_url, prov.api)
+
+    @staticmethod
+    def _kind(prov: Provider) -> str:
+        return providers_mod.kind_of(prov.base_url, prov.api)
+
+    def _client(self, provider: Provider, model: str = "") -> LLMClient | PrivateModeClient | AnthropicClient:
         if is_training_url(provider.base_url):
             return TrainingClient(provider.base_url)
         self._secure(provider)
         key = creds.get_secret("provider", provider.name)
+        if self._api(provider) == "anthropic":
+            return AnthropicClient(provider.base_url, key, caps=self._caps.get(provider.name),
+                                   http_client=self._anthropic_http)
         if is_private_mode(model):
             enclave = self._enclaves.get(provider.name)
             if enclave is None or enclave.relay != relay_url(provider.base_url):
@@ -458,17 +578,28 @@ class Engine:
         if not prov:
             raise UserError(f"Unknown provider {provider_name}")
         if refresh or provider_name not in self._models:
+            client = None
             try:
-                ids = await self._client(prov).list_models()
+                client = self._client(prov)
+                if isinstance(client, AnthropicClient):
+                    ids, caps = await client.list_models_detailed()
+                    if caps:
+                        self._caps[prov.name] = caps
+                else:
+                    ids = await client.list_models()
             except Exception as e:  # noqa: BLE001
-                raise UserError(f"Could not list models from {prov.base_url}: {e}") from e
+                if not (isinstance(client, AnthropicClient) and not client.official and prov.default_model):
+                    raise UserError(f"Could not list models from {prov.base_url}: {e}") from e
+                # an Anthropic-compatible endpoint without a model list: its default model is the one
+                ids = [prov.default_model]
             if offers_private_mode(prov.base_url):
                 try:
                     ids = sorted(set(ids) | set(await list_private_models(prov.base_url)))
                 except Exception as e:  # noqa: BLE001 - the plain models are still usable
                     self.emit("toast", level="error", text=f"Could not list Private Mode models: {e}")
             self._models[provider_name] = ids
-            await self._load_caps(prov)
+            if not isinstance(client, AnthropicClient):      # its model list carried them
+                await self._load_caps(prov)
             if not prov.default_model:
                 ids = self._models[provider_name]
                 prov.default_model = next((m for m in ids if re.search(r"claude-opus-5[.-]5", m)), "")
@@ -481,25 +612,42 @@ class Engine:
             self._save_config(self.cfg)
             self._changed()
         allowed = SENSITIVITY_TIERS[self.case.sensitivity] if self.case else set(SENSITIVITY_TIERS["open"])
+        kind = self._kind(prov)
         out = []
         for m in self._models[provider_name]:
             tier = detect_tier(m, prov.base_url, prov.tier_overrides)
             caps = self.caps_for(prov, m) or {}
+            auto_vision = self._auto_vision(prov, m)
+            limit = self.context_limit(prov, m)
+            route = prov.routes.get(m) if routing.routable(kind, m, tier) else None
             out.append({"id": m, "tier": tier, "allowed": tier in allowed, "vision": self.vision_of(prov, m),
                         "reasoning": caps.get("reasoning", False), "efforts": caps.get("efforts", []),
-                        "tested": model_prompts.tested(m)})
+                        "tested": model_prompts.tested(m),
+                        # what DA Toolkit would decide without the technician's overrides (Settings → Providers)
+                        "tier_auto": detect_tier(m, prov.base_url), "vision_auto": auto_vision,
+                        "context": limit["tokens"] if limit else None, "context_source": limit["source"] if limit else "",
+                        "context_auto": caps.get("context") or self._learned_ctx.get((prov.name, m)),
+                        "routable": routing.routable(kind, m, tier),
+                        "route": routing.label(kind, route) if route else ""})
         return out
 
     # ---------------------------------------------------------------- capabilities, vision, generation
 
     async def _load_caps(self, prov: Provider) -> None:
-        if not websearch.is_nanogpt(prov.base_url):
+        kind = self._kind(prov)
+        if kind not in ("nanogpt", "openrouter", "anthropic"):
             self._caps.setdefault(prov.name, {})
             return
         try:
             self._secure(prov)
-            self._caps[prov.name] = await capabilities.fetch_nanogpt(
-                prov.base_url, self._get_secret_safe("provider", prov.name), http=self._caps_http)
+            key = self._get_secret_safe("provider", prov.name)
+            if kind == "anthropic":
+                self._caps[prov.name] = (await AnthropicClient(prov.base_url, key, http_client=self._anthropic_http)
+                                         .list_models_detailed())[1]
+            elif kind == "openrouter":
+                self._caps[prov.name] = await capabilities.fetch_openrouter(prov.base_url, key, http=self._caps_http)
+            else:
+                self._caps[prov.name] = await capabilities.fetch_nanogpt(prov.base_url, key, http=self._caps_http)
         except Exception as e:  # noqa: BLE001 - models still work; vision is just unknown
             self._caps.setdefault(prov.name, {})
             self.emit("toast", level="error", text=f"Could not read model capabilities from {prov.name}: {e}")
@@ -549,10 +697,14 @@ class Engine:
                 "larger window.")
 
     def vision_of(self, prov: Provider, model: str) -> bool | None:
-        """True/False, or None when nobody knows (non-NanoGPT providers without an override)."""
+        """True/False, or None when nobody knows (providers that don't say, without an override)."""
         override = (prov.vision_overrides or {}).get(model)
         if override in ("yes", "no"):
             return override == "yes"
+        return self._auto_vision(prov, model)
+
+    def _auto_vision(self, prov: Provider, model: str) -> bool | None:
+        """What the provider says about a model's vision, without the technician's override."""
         if is_training_url(prov.base_url):
             return False
         caps = self.caps_for(prov, model)
@@ -596,9 +748,17 @@ class Engine:
 
     def _params(self, prov: Provider, model: str) -> dict:
         out = params_mod.for_model(self.cfg.settings.generation or {}, self.caps_for(prov, model))
+        out.update(routing.body(self._kind(prov), self._route(prov, model)))
         for key in self._unsupported.get((prov.name, model), ()):
             out.pop(key, None)
         return out
+
+    def _route(self, prov: Provider, model: str) -> dict | None:
+        """The route chosen for this model (llm/routing.py), when it can have one."""
+        route = (prov.routes or {}).get(model)
+        if not route or not routing.routable(self._kind(prov), model, detect_tier(model, prov.base_url, prov.tier_overrides)):
+            return None
+        return route
 
     def _learn_unsupported(self, prov: Provider, model: str, params: dict, err: Exception) -> str | None:
         """A provider that refuses one of the generation settings for this model (live: "Kimi K3
@@ -878,6 +1038,10 @@ class Engine:
             s.search_links_provider = data["search_links_provider"]
         if "search_via" in data:
             s.search_via = str(data["search_via"] or "").strip()
+        if "search_engine" in data:
+            if data["search_engine"] not in ("nanogpt", "native"):
+                raise UserError("Search with must be nanogpt or native.")
+            s.search_engine = data["search_engine"]
         if "prompt_cache" in data:
             if data["prompt_cache"] not in PROMPT_CACHE_TTLS:
                 raise UserError(f"Prompt caching must be one of {', '.join(PROMPT_CACHE_TTLS)}.")
@@ -1907,7 +2071,7 @@ class Engine:
 
     def context_view(self) -> dict:
         """What the model will receive on the next turn, grouped by technician turn, with size estimates."""
-        est = lambda m: (len(json.dumps(m, ensure_ascii=False)) + 3) // 4  # noqa: E731 - rough tokens
+        est = lambda m: (len(json.dumps(_for_estimate(m), ensure_ascii=False)) + 3) // 4  # noqa: E731 - rough tokens
         system = self._system_prompt() if self.case else ""
         groups, cur = [], None
         for i, m in enumerate(self.conv):
@@ -2019,7 +2183,7 @@ class Engine:
         conv = await self._conv_for_model(self.vision_status())
         ttl = self._cache_ttl(prov, model, tier) if whole else ""
         static, state = self._prompt_parts()
-        messages, extra = self._chat_request(static, state, conv if whole else conv[:end + 1], ttl)
+        messages, extra = self._chat_request(static, state, conv if whole else conv[:end + 1], ttl, prov)
         if whole:
             nxt = groups[upto + 1]["summary"][:80]
             scope = f'everything in this conversation before the technician\'s message that begins "{nxt}"'
@@ -2027,11 +2191,12 @@ class Engine:
         else:
             scope, keep = "the conversation above", ""
         instruction = prompts.COMPACT_PROMPT.format(scope=scope, keep=keep, words=int(budget * 0.75))
-        if ttl:      # after the state message, past the cache boundary
+        if ttl and self._api(prov) != "anthropic":      # after the state message, past the cache boundary
             messages[-1] = {**messages[-1], "content": messages[-1]["content"] + "\n\n" + instruction}
         else:
             messages.append({"role": "user", "content": instruction})
-        tools = prompts.tools(search=self.search_status()["mode"] != "off")   # as the chat sends them: cached with it
+        tools, tool_extra = self._chat_tools()       # as the chat sends them: cached with it
+        extra = {**extra, **tool_extra}
         self.log("sent_to_ai", purpose="compact", provider=prov.name, model=model, tier=tier,
                  exchanges=upto + 1, whole_conversation=whole)
         start = self._req_conv_len if whole and self._req_conv_len <= len(self.conv) else 0
@@ -2217,24 +2382,56 @@ class Engine:
         cands = [p for p in self.cfg.providers if websearch.is_nanogpt(p.base_url)]
         return next((p for p in cands if p.name == want), None) if want else (cands[0] if cands else None)
 
+    def _native_search(self) -> str:
+        """Why Anthropic's own search can't be the chat model's, or "" when it is. It runs inside the
+        request, so no query can be approved first: chosen only by the technician (Settings →
+        General), and only for Open cases."""
+        if self.cfg.settings.search_engine != "native":
+            return "off"
+        prov = self.cfg.provider(self.cfg.active_provider)
+        model = self.cfg.active_model
+        if not prov or not model or providers_mod.kind_of(prov.base_url, prov.api) != "anthropic" \
+                or not anthropic_api.is_claude(model):
+            return "Anthropic's own search needs a Claude model on Anthropic's API (an Anthropic provider)."
+        if self.case and self.case.sensitivity != "open":
+            return f"{self.case.sensitivity.capitalize()} case: Anthropic's search can't ask before each query."
+        return ""
+
     def search_status(self) -> dict:
         """Effective search mode for the current case, and why. Queries go to a third-party
         search provider in the clear, so Sovereign cases never search and Confidential cases
-        always ask."""
+        always ask. With Anthropic's native search ("native": True) the chat model searches with
+        Anthropic's tool, unasked, and "mode" gates research alone ("research": whether NanoGPT
+        is there for it)."""
         mode = self.cfg.settings.search_mode
         prov = self._search_provider()
         if mode == "off":
             return {"mode": "off", "why": "Web search is off (Settings → General)."}
-        if not prov:
-            return {"mode": "off", "why": "Web search needs a NanoGPT provider."}
         if self.case and self.case.sensitivity == "sovereign":
             return {"mode": "off", "why": "Sovereign case: search queries would leave the network."}
+        native = self._native_search()
+        if not native:
+            chat = self.cfg.provider(self.cfg.active_provider)
+            return {"mode": mode, "why": "", "provider": "anthropic", "private": False, "via": chat.name, "native": True,
+                    "research": bool(prov)}
+        if not prov:
+            why = "Web search needs a NanoGPT provider"
+            return {"mode": "off", "why": f"{why}. {native}" if native != "off" else why + "."}
         private = bool(self.case and self.case.sensitivity == "confidential")
         provider = websearch.PRIVATE if private else self.cfg.settings.search_provider
+        fallback = {"native_unavailable": native} if native != "off" else {}
         if private and mode == "auto":
             return {"mode": "ask", "why": "Confidential case: every search needs your approval.",
-                    "provider": provider, "private": True, "via": prov.name}
-        return {"mode": mode, "why": "", "provider": provider, "private": private, "via": prov.name}
+                    "provider": provider, "private": True, "via": prov.name, "research": True, **fallback}
+        return {"mode": mode, "why": "", "provider": provider, "private": private, "via": prov.name, "research": True,
+                **fallback}
+
+    def _chat_tools(self) -> tuple[list[dict], dict]:
+        """The chat model's tools, and what its request needs for them (Anthropic's own search)."""
+        st = self.search_status()
+        if st.get("native"):
+            return prompts.tools(search=False, research=st["research"]), {"native_search": MAX_SEARCHES_PER_TURN}
+        return prompts.tools(search=st["mode"] != "off"), {}
 
     async def _run_search(self, query: str, use: str = "answer", sites: list[str] | None = None,
                           after: str = "", before: str = "") -> dict:
@@ -2842,8 +3039,11 @@ class Engine:
         # every recipe, whatever is open: each line names its OS, and a list that followed the open
         # sessions changed the system prompt (and lost the whole cached conversation) when one opened
         st = self.cfg.settings
+        search_st = self.search_status()
+        native = search_st.get("native")
         static = prompts.build_static(self.case.name, self.case.notes, recipes=recipes.roster_text(recipes.load_all()),
-                                      runbooks=self._runbooks, search=self.search_status()["mode"],
+                                      runbooks=self._runbooks, search="native" if native else search_st["mode"],
+                                      research=search_st["mode"] if native and search_st["research"] else "",
                                       model_notes=model_prompts.notes_for(self.cfg.active_model, st.model_prompts,
                                                                           st.builtin_model_prompts))
         return static, prompts.build_state(roster, self.hypotheses, self.queue.to_list())
@@ -2857,20 +3057,28 @@ class Engine:
         Claude feature, asked for through NanoGPT; other providers and models cache implicitly
         or not at all, and a private/ or TEE model never goes to Anthropic."""
         ttl = self.cfg.settings.prompt_cache
-        if ttl not in ("5m", "1h") or tier != "standard" or not websearch.is_nanogpt(prov.base_url):
+        if ttl not in ("5m", "1h") or tier != "standard":
+            return ""
+        if not (websearch.is_nanogpt(prov.base_url) or self._api(prov) == "anthropic"):
             return ""
         return ttl if "claude" in model.lower() else ""
 
-    def _chat_request(self, static: str, state: str, conv: list[dict], ttl: str) -> tuple[list[dict], dict]:
+    def _chat_request(self, static: str, state: str, conv: list[dict], ttl: str,
+                      prov: Provider | None = None) -> tuple[list[dict], dict]:
         """(messages, extra request fields). Without caching, the state ends the system prompt as
         it always has. With caching, the state goes in a message after the conversation, so the
         system prompt and every earlier message stay byte-identical from request to request, and
         the cache boundary is set on the last conversation message: each request reads what the
-        one before it wrote, and writes only what is new."""
+        one before it wrote, and writes only what is new. On Anthropic's API the state always goes
+        after the conversation (llm/anthropic_api.py keeps that history append-only)."""
+        if prov is not None and self._api(prov) == "anthropic":
+            messages = [{"role": "system", "content": static}] + conv + [
+                {"role": "system", "content": prompts.STATE_HEADER + "\n\n" + state, "_state": True}]
+            return messages, ({"cache_ttl": ttl} if ttl else {})
         if not ttl:
             return [{"role": "system", "content": static + "\n\n" + state}] + conv, {}
         messages = [{"role": "system", "content": static}] + conv + [
-            {"role": "user", "content": prompts.STATE_HEADER + "\n\n" + state}]
+            {"role": "user", "content": prompts.STATE_HEADER + "\n\n" + state, "_state": True}]
         return messages, {"prompt_caching": {"enabled": True, "ttl": ttl, "cut_after_message_index": len(messages) - 2}}
 
     async def _run_turn(self, prov: Provider, model: str, tier: str, similar_for: str = "") -> None:
@@ -2904,11 +3112,12 @@ class Engine:
             ttl = self._cache_ttl(prov, model, tier)
             for _ in range(MAX_TOOL_ROUNDS):
                 static, state = self._prompt_parts()
-                messages, extra = self._chat_request(static, state, await self._conv_for_model(vision), ttl)
+                messages, extra = self._chat_request(static, state, await self._conv_for_model(vision), ttl, prov)
                 system = messages[0]["content"]
-                tools = prompts.tools(search=self.search_status()["mode"] != "off")
+                tools, tool_extra = self._chat_tools()
+                extra = {**extra, **tool_extra}
                 start = self._req_conv_len if self._req_conv_len <= len(self.conv) else 0   # 0: context was trimmed
-                sent = self.conv[start:] + (messages[-1:] if ttl else [])
+                sent = self.conv[start:] + (messages[-1:] if messages[-1].get("_state") else [])
                 round_reasoning, round_text = len(entry["reasoning"]), len(entry["text"])
                 in_flight = (system, sent, start, round_reasoning, round_text)
                 result = None
@@ -2928,6 +3137,8 @@ class Engine:
                             self.emit("delta", kind="reasoning", text=val)
                         elif kind == "tool":
                             self.emit("delta", kind="tool", name=val)
+                        elif kind == "search":
+                            self._native_search_event(entry, val)
                         else:
                             result = val
                 except Exception as e:  # noqa: BLE001
@@ -2953,6 +3164,7 @@ class Engine:
                         result.tool_calls, result.content = calls, clean
                         entry["text"] = entry["text"][:round_text] + clean
                 usage = result.usage
+                self._turn_extras(entry, prov, model, result)
                 if tee and result.id:
                     reply_ids.append(result.id)
                 self._log_request("chat", model, tier, system, sent, {
@@ -2962,6 +3174,8 @@ class Engine:
                 self._req_conv_len = len(self.conv)
                 in_flight = None
                 retry = await self._record_assistant(result, entry, turn)
+                if result.finish_reason == "refusal":
+                    break              # declined: nothing to nudge or continue
                 said = entry["text"][round_text:].strip()
                 if (not retry and not hyp_continued and result.tool_calls
                         and all(c.name == HYPOTHESES_TOOL for c in result.tool_calls)
@@ -3025,7 +3239,7 @@ class Engine:
                 self._overflowed = True
         entry["text"] = entry["text"].strip()
         if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches",
-                                      "research")):
+                                      "research", "refusal")):
             self.chat.append(entry)
             self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"],
                      questions=entry.get("questions", []))
@@ -3049,11 +3263,58 @@ class Engine:
         self._queue_changed()
         self._persist()
 
+    def _native_search_event(self, entry: dict, found: dict) -> None:
+        """A search Anthropic ran for the chat model (native search), shown on its message like the
+        gated ones. It ran unasked: the technician chose that (Settings → General)."""
+        rid = "a-" + str(found.get("id", ""))
+        rec = next((r for r in entry.setdefault("searches", []) if r["id"] == rid), None)
+        if rec is None:
+            rec = {"id": rid, "query": "", "reason": "", "provider": "Anthropic", "native": True, "status": "running",
+                   "results": []}
+            entry["searches"].append(rec)
+        rec.update(query=found.get("query") or rec["query"], status=found.get("status", rec["status"]),
+                   results=(found.get("results") or [])[:8])
+        if found.get("error"):
+            rec["error"] = found["error"]
+        self.emit("search", search=dict(rec))
+        if rec["status"] in ("done", "failed"):
+            self.log("web_search", query=rec["query"], provider="anthropic", native=True, results=len(rec["results"]),
+                     **({"error": rec["error"]} if rec.get("error") else {}))
+
+    def _turn_extras(self, entry: dict, prov: Provider, model: str, result) -> None:
+        """What a reply says besides its text: the sources Anthropic's search cited, the model that
+        answered when another stepped in (the refusal fallback), a declined request, and whether
+        the route held (llm/routing.py)."""
+        cited = entry.setdefault("citations", [])
+        for c in getattr(result, "citations", None) or []:
+            if all(x["url"] != c["url"] for x in cited):
+                cited.append(c)
+        if not cited:
+            entry.pop("citations")
+        if getattr(result, "served_by", ""):
+            entry["served_by"] = result.served_by
+            self.log("served_by", requested=model, model=result.served_by)
+        if getattr(result, "refusal", None) is not None or result.finish_reason == "refusal":
+            entry["refusal"] = result.refusal or {"category": None, "explanation": ""}
+            self.log("refusal", model=model, **entry["refusal"])
+        route = self._route(prov, model)
+        if route:
+            found = routing.check(self._kind(prov), route, result.usage)
+            entry["route"] = {"label": routing.label(self._kind(prov), route), **(found or {})}
+            if found:
+                self.log("route_check", model=model, route=route, **found)
+
     async def _record_assistant(self, result, entry: dict, turn: dict | None = None) -> bool:
         """Append the assistant turn to history. Returns True if the model should be asked again
         (a malformed call, or a search whose results it needs to read)."""
         turn = {} if turn is None else turn
         msg: dict = {"role": "assistant", "content": result.content or None}
+        if getattr(result, "native", None) is not None:
+            # Anthropic's own blocks for this turn go back unchanged (llm/anthropic_api.py)
+            msg["native"] = {"api": "anthropic", "model": entry.get("model", ""), "content": result.native,
+                             "prefix_sha": result.prefix_sha}
+        if getattr(result, "state_sent", ""):
+            msg["state_before"] = result.state_sent
         if result.tool_calls:
             msg["tool_calls"] = [{"id": c.id, "type": "function",
                                   "function": {"name": c.name, "arguments": c.arguments or "{}"}}

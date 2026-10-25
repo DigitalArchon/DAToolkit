@@ -487,3 +487,30 @@ button[data-needs-vision]:disabled { opacity: .35; }
 @media (max-width: 700px) { .phone-step { flex-direction: column; align-items: center; } }
 
 .quit-note { padding: 40px; text-align: center; }
+
+/* providers: which one the chat model is on, routes, overrides */
+.prov-chip { display: inline-block; font-size: 11px; padding: 0 6px; margin-right: 6px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); vertical-align: 1px; }
+.prov-chip.hidden { display: none; }
+.prov-chip.k-anthropic { color: #e0a07a; border-color: #8a5a3c; }
+.prov-chip.k-nanogpt { color: #7fb4f0; border-color: #35577f; }
+.prov-chip.k-openrouter { color: #b9a2f0; border-color: #5b4a86; }
+.prov-chip.k-local { color: var(--local); border-color: #2c6e50; }
+.prov-chip.k-training { color: var(--muted); }
+#route-btn.on { color: var(--accent); }
+#search-chip { color: var(--warn); }
+.route-badge { font-size: 11px; color: var(--accent); margin-left: 6px; }
+.route-badge.ok { color: var(--ok); }
+.route-badge.bad { color: var(--danger); font-weight: 600; }
+.route-opts { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+table.hosts, table.overrides { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.hosts th, table.overrides th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 6px; border-bottom: 1px solid var(--border); }
+table.hosts td, table.overrides td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.hosts tr { cursor: pointer; }
+table.hosts tr:hover td { background: var(--panel-2); }
+table.hosts tr.current td { background: #1c2a3d; }
+table.hosts tr.blocked { opacity: .45; cursor: not-allowed; }
+table.overrides input.mono { width: 100%; min-width: 14em; }
+table.overrides input.ctx { width: 7em; }
+.row.wrap { flex-wrap: wrap; }
+.citations { margin-top: 6px; }
+.citations a { color: var(--accent); }

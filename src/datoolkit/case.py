@@ -173,6 +173,8 @@ class Case:
                     out += [f"![photo]({img})", ""]
             elif kind == "assistant":
                 out += [f"### AI ({entry.get('model', '')}, {entry.get('tier', '')})", "", entry.get("text", ""), ""]
+                if entry.get("citations"):     # Anthropic's search: the sources go with the text
+                    out += ["Sources: " + " · ".join(f"[{c.get('title') or c['url']}]({c['url']})" for c in entry["citations"]), ""]
                 for q in entry.get("questions", []):
                     opts = f" ({' / '.join(q['options'])})" if q.get("options") else ""
                     out += [f"> **Question:** {q['question']}{opts}", ""]
