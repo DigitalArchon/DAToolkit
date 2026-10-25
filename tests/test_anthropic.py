@@ -140,7 +140,8 @@ async def test_a_turn_is_sent_append_only_and_thinking_goes_back_unchanged(aenv)
     first = fake.requests[0]
     assert first["model"] == OPUS and first["thinking"]["type"] == "adaptive"
     assert first["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
-    assert first["output_config"] == {"effort": "low"} and "temperature" not in first
+    assert first["output_config"] == {"effort": engine.cfg.settings.generation["reasoning_effort"]}
+    assert "temperature" not in first
     assert first["fallbacks"] == "default"
     assert first["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert prompts.STATE_HEADER not in first["system"][0]["text"]
