@@ -102,6 +102,9 @@ class TurnResult:
     citations: list = field(default_factory=list)
     served_by: str = ""
     refusal: dict | None = None
+    # the reply's text after Anthropic's last server-side search, when it searched: what it wrote
+    # before ("I'll look that up") was done by the search, not left as a promise
+    text_after_search: str | None = None
 
 
 class LLMClient:

@@ -3196,6 +3196,8 @@ class Engine:
                 if (not retry and not promise_nudged
                         and all(c.name == HYPOTHESES_TOOL for c in result.tool_calls)):
                     said = entry["text"][round_text:]      # this round's words; earlier rounds made their calls
+                    if getattr(result, "text_after_search", None) is not None:
+                        said = result.text_after_search    # "I'll look that up" before a search was kept
                     stale = stale_run_refs(said, {p.num for p in self.queue.items if p.status == "pending"})
                     if stale or (promises_commands(said)
                                  and not any(entry.get(k) for k in ("proposals", "questions", "withdrawn"))):

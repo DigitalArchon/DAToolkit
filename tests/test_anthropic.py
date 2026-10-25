@@ -347,3 +347,43 @@ def test_the_appimage_lock_carries_the_sdk_in_range():
     version = tuple(int(x) for x in re.search(r"^anthropic==([\d.]+)", lock, re.M).group(1).split("."))
     assert (1, 13) <= version < (2,)
     assert re.search(r"^docstring-parser==", lock, re.M)
+
+
+def test_only_append_only_models_are_opted_into_the_history_check():
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"},
+            {"role": "system", "content": prompts.STATE_HEADER + "\n\nstate", "_state": True}]
+    client = anthropic_api.AnthropicClient(OFFICIAL, "k")
+    new, extra_new, _ = client.request(OPUS, msgs, params={"reasoning_effort": "low"})
+    old, extra_old, _ = client.request("claude-opus-4-6", msgs, params={"reasoning_effort": "low"})
+    assert new["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
+    assert anthropic_api.THINKING_BETA in extra_new["extra_headers"]["anthropic-beta"]
+    assert old["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert anthropic_api.THINKING_BETA not in extra_old["extra_headers"].get("anthropic-beta", "")
+    assert old["messages"][-1]["role"] == "user"          # its state is a trailing user message
+
+
+def test_stored_turn_scoped_states_carry_their_beta_even_when_this_requests_state_isnt_one():
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello", "state_before": "old state"},
+            {"role": "user", "content": "go on"},
+            {"role": "system", "content": "state", "_state": True},
+            {"role": "user", "content": "now summarise"}]          # compaction: the state isn't last
+    kwargs, extra, info = anthropic_api.AnthropicClient(OFFICIAL, "k").request(OPUS, msgs)
+    assert info["state_sent"] == "" and kwargs["messages"][1]["clear_at"] == "next_user_message"
+    assert anthropic_api.CLEAR_AT_BETA in extra["extra_headers"]["anthropic-beta"]
+
+
+async def test_saying_it_will_look_something_up_before_a_native_search_is_no_promise(aenv):
+    engine, fake = aenv
+    engine.cfg.settings.search_engine = "native"
+    await start(engine)
+    fake.replies.append(_sse([
+        {"type": "text", "text": "I'll look up the current release."},
+        {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "opnsense release"}},
+        {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []},
+        {"type": "thinking", "thinking": "Found it.", "signature": "S"},       # live, Haiku 5.5 thinks here
+        {"type": "text", "text": "The newest release is 26.7.7."}]))
+    engine.send("latest opnsense?")
+    await wait_turn(engine)
+    assert len(fake.requests) == 1                     # no "you promised commands" nudge
+    assert engine.chat[-1]["text"] == "I'll look up the current release.\n\nThe newest release is 26.7.7."

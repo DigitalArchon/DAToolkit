@@ -26,7 +26,8 @@ an edit to that history invalidates every later block. So:
   exchange, an edited system prompt) is left out, as the API's own check would: each turn
   records a fingerprint of what came before it (prefix_sha), compared on every request. And the
   request asks the API to drop, not refuse, any block that still fails its check
-  (prefix_mismatch_behavior "drop_block").
+  (prefix_mismatch_behavior "drop_block"). Models without turn-scoped messages get neither: they
+  don't run the check, and opting them into it would drop their reasoning every request.
 """
 
 from __future__ import annotations
@@ -44,6 +45,9 @@ from .params import nearest_effort
 from .providers import is_official_anthropic
 
 THINKING_BETA = "thinking-binding-controls-2026-08-01"
+# What the API does with a thinking block whose history changed anyway: drop it and carry on.
+# ("error" makes any such change fail the request: the end-to-end check uses it.)
+PREFIX_MISMATCH = "drop_block"
 CLEAR_AT_BETA = "mid-conversation-system-clear-at-2026-08-21"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 DEFAULT_MAX_TOKENS = 64000
@@ -417,9 +421,13 @@ class AnthropicClient:
         betas: set[str] = set()
         thinking = official and _adaptive(model, caps)
         if thinking:
-            kwargs["thinking"] = {"type": "adaptive", "display": "summarized",
-                                  "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
-            betas.add(THINKING_BETA)
+            kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
+            if state_mode(model, official) == "clear_at":
+                # setting it at all opts the request into the history check: only where the history is
+                # kept append-only. A model that gets the state as a rebuilt trailing message doesn't
+                # run the check, and with it would lose its earlier reasoning on every request.
+                kwargs["thinking"]["block_binding"] = {"prefix_mismatch_behavior": PREFIX_MISMATCH}
+                betas.add(THINKING_BETA)
         effort = params.get("reasoning_effort")
         levels = _efforts(model, caps) if official else []
         if effort and levels:
@@ -431,7 +439,7 @@ class AnthropicClient:
         if official and _model_is(model, *FALLBACK_MODELS):
             extra["fallbacks"] = "default"
             betas.add(FALLBACK_BETA)
-        if state_sent:
+        if any(m.get("clear_at") for m in msgs):     # this turn's state, or earlier ones kept in the history
             betas.add(CLEAR_AT_BETA)
         headers = {"anthropic-beta": ",".join(sorted(betas))} if betas else {}
         return kwargs, {"extra_body": extra, "extra_headers": headers}, {"state_sent": state_sent, "prefix_sha": prefix_sha}
@@ -450,6 +458,8 @@ class AnthropicClient:
         stop = None
         msg = None
         last_kind = ""
+        search_tail = None
+        searched = False
         for _ in range(MAX_CONTINUATIONS + 1):
             async with self._client.messages.stream(**kwargs, **extra) as s:
                 async for ev in s:
@@ -460,6 +470,10 @@ class AnthropicClient:
                         if b.type == "text" and last_kind and last_kind != "text" and result.content:
                             result.content += "\n\n"
                             yield "text", "\n\n"
+                        if b.type in ("server_tool_use", "web_search_tool_result"):
+                            searched = True        # a thinking block may come between it and the text
+                        elif b.type == "text" and searched:
+                            search_tail, searched = len(result.content), False
                         last_kind = b.type
                     elif ev.type == "content_block_delta":
                         d = ev.delta
@@ -498,6 +512,8 @@ class AnthropicClient:
             kwargs["messages"] = kwargs["messages"] + [{"role": "assistant", "content": list(blocks_all)}]
         native = after_fallback(blocks_all)
         result.native = native
+        if search_tail is not None:
+            result.text_after_search = result.content[search_tail:]
         result.id = msg.id if msg else None
         result.finish_reason = _STOPS.get(stop or "", stop)
         result.usage = openai_usage(usage)
