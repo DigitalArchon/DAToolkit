@@ -64,6 +64,7 @@ def make_engine() -> Engine:
     provs = [Provider("Anthropic", "https://api.anthropic.com"), Provider("NanoGPT", "https://nano-gpt.com/api/v1")]
     cfg = Config(providers=provs)
     cfg.settings.search_mode = "auto"
+    cfg.settings.generation = {"temperature": 0.3, "reasoning_effort": "medium"}     # the default since Oct 2026
     eng = Engine(cfg, lambda e: None, HERE / "rt", save_config=lambda c: None)
     eng._anthropic_http = anthropic.DefaultAsyncHttpxClient(event_hooks={"request": [on_request], "response": [on_response]})
     return eng
@@ -318,4 +319,5 @@ async def main():
         print("  FAILED:", name, "-", detail)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
