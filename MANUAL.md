@@ -545,7 +545,7 @@ keep nothing, for every route.
 ## Generation settings
 
 Settings → Model sets what goes with every request: temperature (default 0.3), reasoning
-effort (default low), max output tokens, top-p, frequency and presence penalty, and seed.
+effort (default medium), max output tokens, top-p, frequency and presence penalty, and seed.
 Blank means the model's own default. Reasoning effort is sent only to reasoning models and is
 moved to the nearest level each model accepts (Kimi and GLM take low / high / max; Opus low to
 max). The same settings apply through NanoGPT Private Mode. On Anthropic's API, effort goes as

@@ -10,6 +10,8 @@ from pathlib import Path
 
 import tomli_w
 
+from .llm import params
+
 NANOGPT_BASE_URL = "https://nano-gpt.com/api/v1"
 
 
@@ -131,7 +133,7 @@ class Settings:
     # lifetime; 1h outlasts the minutes a technician spends running commands between turns)
     prompt_cache: str = "1h"
     # generation parameters sent with every request; a missing key means "the model's default"
-    generation: dict = field(default_factory=lambda: {"temperature": 0.3, "reasoning_effort": "low"})
+    generation: dict = field(default_factory=lambda: dict(params.DEFAULTS))
     # "provider|model" that describes images for a chat model without vision; empty = none
     vision_model: str = ""
     # extra system-prompt instructions for particular chat models: [{"match": "glm", "text": "..."}],
@@ -189,6 +191,8 @@ def from_dict(data: dict) -> Config:
     cfg.providers = [_build(Provider, p) for p in data.get("providers", [])]
     cfg.hosts = [_build(Host, h) for h in data.get("hosts", [])]
     cfg.settings = _build(Settings, data.get("settings", {}))
+    if cfg.settings.generation in params.OLD_DEFAULTS:
+        cfg.settings.generation = dict(params.DEFAULTS)     # untouched old defaults: the new ones
     return cfg
 
 

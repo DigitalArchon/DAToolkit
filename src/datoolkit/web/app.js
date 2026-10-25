@@ -3288,7 +3288,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" }, field("Max output tokens", f.max_tokens), field("Top-p", f.top_p)),
       h("div", { class: "row" }, field("Frequency penalty", f.frequency_penalty), field("Presence penalty", f.presence_penalty), field("Seed", f.seed)),
       h("div", { class: "row" }, h("span", { class: "spacer" }),
-        h("button", { type: "button", onclick: () => { for (const [k, el] of Object.entries(f)) el.value = { temperature: 0.3, reasoning_effort: "low" }[k] ?? ""; } }, "Reset to defaults")),
+        h("button", { type: "button", onclick: () => { for (const [k, el] of Object.entries(f)) el.value = { temperature: 0.3, reasoning_effort: "medium" }[k] ?? ""; } }, "Reset to defaults")),
       field("Prompt caching", promptCache, "For Claude models through NanoGPT or Anthropic (Open cases): each request reuses the conversation the previous one sent, at a tenth of the input price. Writing the cache costs extra (1.25× for 5 minutes, 2× for 1 hour), so 1 hour suits the minutes spent running commands between replies. Other models cache automatically where their provider does."),
       h("h3", {}, "Model-specific instructions"),
       modelNotes(),

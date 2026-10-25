@@ -1,6 +1,7 @@
 """Generation parameters: the technician's settings, validated, and shaped per model.
 
-Settings hold what the technician chose; a missing key means "use the model's default".
+Settings hold what the technician chose; a missing key means "use the model's default". The
+default effort is medium (low until Oct 2026).
 Per request, reasoning effort is sent only to models that reason, and moved to the nearest
 level the model accepts (Kimi and GLM take low/high/max; Opus takes low..max)."""
 
@@ -8,7 +9,10 @@ from __future__ import annotations
 
 from .capabilities import EFFORTS
 
-DEFAULTS = {"temperature": 0.3, "reasoning_effort": "low"}
+DEFAULTS = {"temperature": 0.3, "reasoning_effort": "medium"}
+# what the defaults were until Oct 2026: a config still holding exactly these was never changed by
+# the technician, so it moves to the new defaults (config.from_dict)
+OLD_DEFAULTS = ({"temperature": 0.3, "reasoning_effort": "low"},)
 
 _RANGES = {
     "temperature": (float, 0.0, 2.0),

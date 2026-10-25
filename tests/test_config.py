@@ -97,3 +97,14 @@ def test_old_guacd_address_keys_are_ignored():
     assert cfg.settings.font_size == 14
     assert "guacd_host" not in cfg.to_dict()["settings"]           # dropped on the next save
     assert guac.GUACD == ("127.0.0.1", 4822)                       # always this machine
+
+
+def test_reasoning_effort_defaults_to_medium_and_untouched_old_defaults_move_with_it():
+    from datoolkit.config import Settings, from_dict
+    assert Settings().generation == {"temperature": 0.3, "reasoning_effort": "medium"}
+    old = from_dict({"settings": {"generation": {"temperature": 0.3, "reasoning_effort": "low"}}})
+    assert old.settings.generation["reasoning_effort"] == "medium"
+    chosen = from_dict({"settings": {"generation": {"temperature": 0.5, "reasoning_effort": "low"}}})
+    assert chosen.settings.generation == {"temperature": 0.5, "reasoning_effort": "low"}      # the technician's choice
+    high = from_dict({"settings": {"generation": {"temperature": 0.3, "reasoning_effort": "high"}}})
+    assert high.settings.generation["reasoning_effort"] == "high"
