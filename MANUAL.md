@@ -10,6 +10,7 @@ This is the full reference. For what DA Toolkit is and how to install it, see th
 
 - [First run](#first-run)
 - [Workflow](#workflow)
+- [AI providers](#ai-providers)
 - [Generation settings](#generation-settings)
 - [Model tiers and end-to-end encryption](#model-tiers-and-end-to-end-encryption)
 - [SSH, WinRM, RDP and windows](#ssh-winrm-rdp-and-windows)
@@ -42,9 +43,12 @@ the system's own; in the browser they're the browser's.
    A case's sensitivity can only go up: what was already sent stays with the models it went
    to, and a lower level would let more models see the conversation so far.
 
-2. **Settings → AI providers → Add NanoGPT.** Paste your API key (it goes to the keyring),
-   then click **Save & test**. If Claude Opus 5.5 is available it becomes the default model.
-   NanoGPT's end-to-end encrypted `private/…` models (e.g. `private/glm-5-3`) are listed too.
+2. **Settings → AI providers → Add NanoGPT** (or Anthropic, OpenRouter, WaveSpeed, a local
+   server, or any other OpenAI- or Anthropic-compatible service: see [AI providers](#ai-providers)).
+   Paste your API key (it goes to the keyring), then click **Save & test**. If Claude Opus 5.5
+   is available it becomes the default model. NanoGPT's end-to-end encrypted `private/…`
+   models (e.g. `private/glm-5-3`) are listed too. Web search and the research agent go
+   through NanoGPT, so add it even when the chat model is elsewhere.
 3. **+ Session** opens a local shell or a saved host (add hosts under **Settings → Hosts**).
 4. Describe the problem in the chat.
 
@@ -95,6 +99,16 @@ the system's own; in the browser they're the browser's.
   (Perplexity was down in early October 2026), the search is made again with Valyu; when the
   account has Zero Data Retention required, which only Linkup is allowed under, with Linkup.
   The card says which ran.
+- **Anthropic's own search** (Settings → General → Searches for the chat model): when the chat
+  model is a Claude model on an Anthropic provider, Claude can search with Anthropic's web
+  search instead. It runs inside Claude's request, on Anthropic's side, so **no query can be
+  shown to you first**: Claude searches as it works, up to 4 searches a request, billed by
+  Anthropic. It is used only for Open cases; Confidential cases use the gated NanoGPT search
+  (or none, without NanoGPT), and Sovereign cases never search. Its searches still show on the
+  AI's message ("Anthropic (unasked)"), with their results, and the sources Claude cites are
+  listed under its reply (and in the exported transcript). The top bar shows **🔎 Anthropic
+  search** while it is in use. Research, which reads whole pages, still goes through the gated
+  research agent on NanoGPT; without a NanoGPT provider the AI isn't offered research.
 - **Confidential cases search only with Linkup**, which keeps no data (zero data retention),
   whatever provider is chosen, for the AI and the research agent alike, and never fall back to
   another provider: if Linkup fails, the search fails.
@@ -206,13 +220,14 @@ the system's own; in the browser they're the browser's.
   context window when that is known. It turns amber past the threshold in **Settings →
   General** (default 100k) or at 75% of the window, whichever comes first, which is the cue to
   export a ticket summary and start a fresh case; red at 90% of the window means the next
-  request may not fit. The window comes from NanoGPT's model details, from Settings →
-  Providers → "Context window" (set it for local models to match the server, such as Ollama's
-  `num_ctx`), or from the error the first time a request is too long.
+  request may not fit. The window comes from the provider's model details (NanoGPT, Anthropic,
+  OpenRouter), from the provider's Model overrides → Context window (set it for local models
+  to match the server, such as Ollama's `num_ctx`), or from the error the first time a request
+  is too long.
 - When a request is too long for the model, the chat says so with **What the AI knows…** and
   **Retry**: compact or remove earlier exchanges, then retry, or pick a model with a larger
   window. Some local servers (Ollama) cut an over-long prompt silently instead of refusing it;
-  set their context window override so the figure warns in time.
+  set their context window in the provider's Model overrides so the figure warns in time.
 - Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V.
 
 ### Hypothesis board
@@ -294,8 +309,9 @@ host, not the case: deleting a case leaves them. They live under
   RDP session. Use it when a login lands on an appliance menu (OPNsense, pfSense, Sophos)
   rather than a shell: the layout makes that obvious where plain text may not.
 - **Vision.** The model picker marks models that read images (👁), text-only ones, and
-  reasoning models (🧠), from NanoGPT's model details (Private Mode models borrow their public
-  twin's; other providers can be marked under Settings → Providers → "Reads images"). It also
+  reasoning models (🧠), from the provider's model details (NanoGPT, Anthropic, OpenRouter;
+  Private Mode models borrow their public twin's; others can be marked in the provider's Model
+  overrides → Reads images), and routed models (⚡). It also
   marks **✓ tested** the models DA Toolkit's prompts were evaluated with (hover for the verdict,
   or type "tested" in the filter): see [which models work well](docs/model-evaluation.md). A
   variant of a tested model (a flash or thinking edition) is another model and isn't marked.
@@ -455,16 +471,90 @@ the rules. From the AppImage, run `DAToolkit-<version>-x86_64.AppImage replay`.
 | Enter / Shift+Enter | Send / newline |
 | Ctrl+Shift+C / V | Copy / paste in the terminal |
 
+## AI providers
+
+Settings → AI providers holds as many providers as you like, each an address, an API key (in
+the keyring) and the API it speaks. The model picker lists each one's models, and the top bar
+always shows the provider the chat model is on, beside the model (hover it for the kind, the
+API and the address).
+
+| Add… | Address | Speaks | What it brings |
+|---|---|---|---|
+| NanoGPT | `https://nano-gpt.com/api/v1` | OpenAI's API | Most models, `private/` (E2EE) and `TEE/` models, web search and the research agent, routes |
+| Anthropic | `https://api.anthropic.com` | Anthropic's Messages API | Claude directly: its reasoning shown, prompt caching, Anthropic's own web search (optional), the refusal fallback |
+| OpenRouter | `https://openrouter.ai/api/v1` | OpenAI's API | Many models, with their image support and context windows reported; routes by priority |
+| WaveSpeed | `https://llm.wavespeed.ai/v1` | OpenAI's API | Open models |
+| Local | `http://localhost:11434/v1` | OpenAI's API | Ollama, LM Studio, vLLM: the Local tier |
+| Other OpenAI- or Anthropic-compatible | yours | either | Anything else that speaks one of the two |
+
+The **API** is worked out from the address (Anthropic's for `api.anthropic.com`, OpenAI's for
+everything else) unless you choose it. An Anthropic-compatible service gets the plain Messages
+API request (messages, tools, system prompt, temperature) without Anthropic's own extras; if
+it has no model list, the provider's default model is the one offered.
+
+**On Anthropic's own API** the request uses what only it has:
+
+- Claude thinks adaptively, at the reasoning effort in Settings → Model, and its reasoning
+  summary is shown as it works. Temperature isn't sent: Anthropic's newer models don't take it.
+- The conversation is cached (Prompt caching, Settings → Model), as through NanoGPT.
+- The conversation is kept **append-only**, which Anthropic's newer models check: each reply's
+  own content (its reasoning, with the signature that binds it to the conversation, search
+  results, citations) is sent back unchanged, and the case's state (sessions, queue,
+  hypotheses) goes after the conversation as a system message that applies to that request
+  only and is sent again, word for word, every time after (it then costs nothing). After a
+  compaction, a removed exchange or an edited case note, Claude's earlier reasoning is left
+  out of what follows the change (it was written for a conversation that no longer exists),
+  and the conversation carries on.
+- When one of Anthropic's safeguards declines a request (security work can trip the cyber
+  classifier), Anthropic retries it on another Claude model where it can, and the AI's message
+  says which model answered. When nothing could, the message says so, and nothing the declined
+  reply began is queued.
+
+**Model overrides** (in the provider's form) correct what DA Toolkit detects about a model, or
+fill in what the provider doesn't report (local models, mostly): one row per model, with its
+**tier**, whether it **reads images**, its **context window** (32768, 32k or 1M; match the
+server's own setting, such as Ollama's `num_ctx`) and, on NanoGPT and OpenRouter, its **route**.
+**Load the model list** fills the model boxes' suggestions and shows what is detected for each
+column (on Auto). A tier can be set to Standard, TEE or Local, never E2EE: only NanoGPT's
+`private/` models are sealed. Marking a cloud model Local lets Confidential and Sovereign
+cases use it, so do that only for a model on your own hardware.
+
+**Routes: which host serves a model** (NanoGPT and OpenRouter). Most open models (GLM,
+DeepSeek, Kimi, Qwen) run on several hosts, and the provider picks one. The route button in
+the top bar (or **Route…** in a model's override row) asks for another:
+
+- **Provider's own routing**: the default. On NanoGPT's subscription, usually the cheapest
+  host at FP8 or better.
+- **Fastest first word**, **Fastest overall** or **Cheapest**.
+- **A specific host** (NanoGPT), from a table of each host's precision, privacy terms, NanoGPT's
+  measured first token and speed, prices and caching. It is a preference, not a pin: if that
+  host is down, another serves the call.
+
+**FP8 or better**, ticked by default, leaves out hosts that run the model at lower precision
+or don't say (SealedLore measured FP4 hosts slower and less accurate). A route belongs to the
+model wherever it is used (chat, research, reviews, the vision helper) and never applies to
+`private/` or `TEE/` models, whose enclave is their host. **Any NanoGPT route but its own is
+billed pay-as-you-go, even for a model the subscription includes.** NanoGPT's replies don't
+name their host, so each routed reply's bill is the evidence: the AI's message shows **⚡
+routed** when it was billed as routed (at the chosen host's price, for a host), and **⚠ route
+not followed** when NanoGPT billed nothing (it served the call on its own routing, as it does
+without a word when the host is down) or at a clearly different price (another host served
+it). Each host's privacy terms are its own; NanoGPT's account settings can require hosts that
+keep nothing, for every route.
+
 ## Generation settings
 
 Settings → Model sets what goes with every request: temperature (default 0.3), reasoning
 effort (default low), max output tokens, top-p, frequency and presence penalty, and seed.
 Blank means the model's own default. Reasoning effort is sent only to reasoning models and is
 moved to the nearest level each model accepts (Kimi and GLM take low / high / max; Opus low to
-max). The same settings apply through NanoGPT Private Mode.
+max). The same settings apply through NanoGPT Private Mode. On Anthropic's API, effort goes as
+Anthropic's own (none and minimal become low: its newer models always think), and temperature
+and top-p go only to models that take them; frequency and presence penalty and seed aren't
+Anthropic settings.
 
 **Prompt caching** (Settings → Model, default on for 1 hour): Claude models through NanoGPT
-(Open cases) reuse the conversation each request already sent, so later requests in a case
+or Anthropic (Open cases) reuse the conversation each request already sent, so later requests in a case
 pay a tenth of the input price for everything before the newest message, and answer sooner.
 Writing the cache costs extra (2× the input price for the 1-hour cache, 1.25× for 5 minutes);
 1 hour outlasts the minutes spent running commands between replies, where a 5-minute cache
@@ -514,7 +604,8 @@ included) and the API key cross the LAN unencrypted, and such a name is only as 
 as your DNS. Use Local over the network only on a LAN you trust, or put the model server
 behind HTTPS (a `.lan` name is reached over https only).
 
-Override any model's tier under **Settings → AI providers → Tier overrides**.
+Override a model's tier (Standard, TEE or Local; never E2EE) under **Settings → AI providers →
+the provider → Model overrides**.
 
 **Web search and the research agent are gated by approval, not by tier.** Search queries reach
 the search provider in the clear whatever the chat model's tier. The research model works

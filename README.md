@@ -24,8 +24,10 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
 - **Works through ScreenConnect.** A window session follows a ScreenConnect (or TeamViewer,
   AnyDesk, VM console) window on your screen (X11 or XWayland): the AI sees it through
   screenshots you send, and you paste the commands it proposes. No setup or API needed.
-- **Any OpenAI-compatible model**: NanoGPT, Ollama, LM Studio, vLLM and others. See
-  [which models work well](docs/model-evaluation.md) for how nine popular models did.
+- **Any OpenAI- or Anthropic-compatible model**: NanoGPT, Anthropic, OpenRouter, WaveSpeed,
+  Ollama, LM Studio, vLLM and others, side by side, with NanoGPT and OpenRouter routes to choose
+  which host serves a model. See [which models work well](docs/model-evaluation.md) for how
+  nine popular models did.
 - **Privacy tiers per case.** Open, Confidential and Sovereign cases limit which models may
   see the data: anything, end-to-end encrypted or local, or local only. End-to-end encrypted
   and TEE models are attested before anything is sent. Providers are reached over https, or
