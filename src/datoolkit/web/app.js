@@ -997,8 +997,10 @@ function ensureTerm(sess) {
     if (e.type !== "keydown") return true;
     if (isGlobalShortcut(e)) return false;   // let it bubble to the document handler
     if (!e.ctrlKey || !e.shiftKey) return true;
-    if (e.code === "KeyC") { clipWrite(term.getSelection()); return false; }
-    if (e.code === "KeyV") { clipRead().then((txt) => txt && term.paste(txt)).catch(() => toast("Clipboard not available", "error")); return false; }
+    // Returning false only stops xterm; preventDefault also stops the browser's own
+    // Ctrl+Shift+V paste, which xterm would otherwise paste a second time.
+    if (e.code === "KeyC") { e.preventDefault(); clipWrite(term.getSelection()); return false; }
+    if (e.code === "KeyV") { e.preventDefault(); clipRead().then((txt) => txt && term.paste(txt)).catch(() => toast("Clipboard not available", "error")); return false; }
     return true;
   });
   const ws = new WebSocket(`ws://${location.host}/ws/term/${encodeURIComponent(sess.id)}?t=${encodeURIComponent(TOKEN)}`);

@@ -116,6 +116,14 @@ def test_dialogs_stack_above_the_terminal():
     assert re.search(r"#terms\s*\{[^}]*isolation:\s*isolate", css)
 
 
+def test_terminal_paste_shortcut_pastes_once():
+    """Ctrl+Shift+V pastes through clipRead; the browser's own paste for that key must not
+    reach xterm too, or every paste goes in twice."""
+    js = (WEB / "app.js").read_text()
+    for key in ("KeyC", "KeyV"):
+        assert re.search(rf'e\.code === "{key}"\) \{{ e\.preventDefault\(\);', js)
+
+
 def test_force_skip_is_one_click_in_queue_and_chat():
     js = (WEB / "app.js").read_text()
     assert 'status: "skipped", note: ""' in js
