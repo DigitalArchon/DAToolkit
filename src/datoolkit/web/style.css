@@ -238,14 +238,17 @@ body.rdp-max .term-host { inset: 0; }
   box-shadow: 0 20px 50px rgba(0,0,0,.5);
 }
 .modal:focus { outline: none; }
-.modal.wide { width: min(1000px, 100%); }
+/* wide dialogs can be dragged bigger or smaller by their bottom-right corner */
+.modal.wide { width: min(1000px, 100%); resize: both; overflow: hidden; min-width: min(420px, 100%); min-height: 200px; max-width: 100%; }
 .modal h2 { font-size: 16px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .modal .content { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .modal .buttons { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 16px; border-top: 1px solid var(--border); }
 .field { display: flex; flex-direction: column; gap: 3px; }
 .field > span { font-size: 12px; color: var(--muted); }
 .row { display: flex; gap: 10px; }
-.row > .field { flex: 1; }
+/* min-width 0: a select is as wide as its longest option, which would push the row (and the
+   dialog) into scrolling sideways */
+.row > .field { flex: 1; min-width: 0; }
 .check { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .radio-card { display: flex; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .radio-card:has(input:checked) { border-color: var(--accent); background: var(--panel-2); }
@@ -512,5 +515,8 @@ table.hosts tr.blocked { opacity: .45; cursor: not-allowed; }
 table.overrides input.mono { width: 100%; min-width: 14em; }
 table.overrides input.ctx { width: 7em; }
 .row.wrap { flex-wrap: wrap; }
+/* fields two to a line, one when the dialog is narrow */
+.grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(max(260px, calc(50% - 5px)), 1fr)); gap: 10px; }
+.grid2 > .field { min-width: 0; }
 .citations { margin-top: 6px; }
 .citations a { color: var(--accent); }

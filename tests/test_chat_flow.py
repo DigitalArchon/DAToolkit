@@ -124,6 +124,16 @@ def test_terminal_paste_shortcut_pastes_once():
         assert re.search(rf'e\.code === "{key}"\) \{{ e\.preventDefault\(\);', js)
 
 
+def test_settings_fit_their_dialog_and_wide_dialogs_resize():
+    """Selects are as wide as their longest option: fields in a row must be allowed to shrink,
+    or Settings → General scrolls sideways."""
+    css, js = (WEB / "style.css").read_text(), (WEB / "app.js").read_text()
+    assert re.search(r"\.row > \.field\s*\{[^}]*min-width:\s*0", css)
+    assert re.search(r"\.grid2 > \.field\s*\{[^}]*min-width:\s*0", css)
+    assert re.search(r'class: "grid2" \},\s*h\("label", \{ class: "field" \}, h\("span", \{\}, "AI web searches', js)
+    assert re.search(r"\.modal\.wide\s*\{[^}]*resize:\s*both[^}]*overflow:\s*hidden", css)
+
+
 def test_force_skip_is_one_click_in_queue_and_chat():
     js = (WEB / "app.js").read_text()
     assert 'status: "skipped", note: ""' in js

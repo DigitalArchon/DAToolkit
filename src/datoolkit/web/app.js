@@ -152,6 +152,16 @@ function modal({ title, body, buttons = [], wide = false, onClose, dismissable =
   }
   box.append(h("h2", {}, title), content);
   if (buttons.length) box.append(btnBar);
+  // Wide dialogs can be resized from their corner (CSS resize). Centred, a dialog grows on both
+  // sides and its corner trails the pointer, so a drag there pins the left edge where it is.
+  if (wide) box.addEventListener("mousedown", (e) => {
+    const r = box.getBoundingClientRect();
+    if (e.clientX < r.right - 20 || e.clientY < r.bottom - 20 || box.style.marginLeft) return;
+    const left = r.left - overlay.getBoundingClientRect().left - parseFloat(getComputedStyle(overlay).paddingLeft);
+    overlay.style.justifyContent = "flex-start";
+    box.style.marginLeft = `${left}px`;
+    box.style.maxWidth = `calc(100% - ${left}px)`;
+  });
   if (dismissable) {
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
     overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
@@ -3426,7 +3436,7 @@ function openSettings(tab = "providers") {
       h("h3", {}, "Web search"),
       h("div", { class: "row" }, h("label", { class: "field", style: "flex:2" }, h("span", {}, "Searches for the chat model"), search.search_engine), h("span", { class: "field" })),
       h("div", { class: "muted small" }, "Anthropic's own search runs inside Claude's request on Anthropic's side: Claude searches as it works and reads the results itself, so no query can be shown to you first. It is used only when the chat model is a Claude model on an Anthropic provider (https://api.anthropic.com), and only for Open cases, up to 4 searches a request; each search is billed by Anthropic. Otherwise, and for Confidential cases, the gated NanoGPT search below is used (Sovereign cases never search). Research (reading whole pages) always goes through the gated research agent."),
-      h("div", { class: "row" },
+      h("div", { class: "grid2" },
         h("label", { class: "field" }, h("span", {}, "AI web searches and research"), search.search_mode),
         h("label", { class: "field" }, h("span", {}, "Search provider (answers)"), search.search_provider),
         h("label", { class: "field" }, h("span", {}, "Link finder (research agent)"), search.search_links_provider),
