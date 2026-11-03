@@ -100,9 +100,10 @@ class Queue:
     @staticmethod
     def _classify(p: Proposal, session_kinds: dict[str, str] | None) -> None:
         p.risk, p.risk_reasons = risk.effective(p.model_risk, p.command)
-        if p.dry_run_of is not None and p.risk != "disruptive":
+        if p.dry_run_of is not None and p.risk != "disruptive" and p.command == p.original_command:
             # a rehearsal (apt -s, rsync -n, -WhatIf, plan) trips the same local rules as the
-            # real command; it is read-only by construction, but never below disruptive
+            # real command; it is read-only by construction (safety/dryrun.py), but never below
+            # disruptive, and only as made: an edited one is judged like any other command
             p.risk, p.risk_reasons = "read_only", []
         p.sensitive = sensitive(p.command)
         p.review = {}                    # a review was of the old command or target

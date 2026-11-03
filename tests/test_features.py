@@ -62,6 +62,46 @@ def test_dry_run_forms():
     assert dry_run("cp -a /a /b")[0] == "ls -ld /a /b"
 
 
+@pytest.mark.parametrize("command", [
+    "mv a.conf a.conf.bak; mv b.conf a.conf", "rm -f old.log; mv new.log old.log",
+    "kubectl apply -f a.yaml && kubectl apply -f b.yaml", "git clean -fdx && git status",
+    "chmod -R 755 /srv | tee log", "systemctl restart nginx;reboot", "net stop svc&del x",
+    "del foo; Remove-Item x", "Set-Content a b | Remove-Item", "rsync -a src/ dst/ > /tmp/log",
+    "cp a b\nrm -rf /srv", "rm -rf $(cat list)"])
+def test_a_chained_line_gets_no_rehearsal_that_would_run_the_rest(command):
+    """A rehearsal is labelled read-only, but one that keeps the line's text rehearses only its
+    first command: `ls -ld a b; mv c d` still moved c."""
+    assert dry_run(command) is None
+
+
+def test_rehearsals_that_keep_none_of_a_chained_line_are_still_offered():
+    assert dry_run("net stop Spooler && net start Spooler")[0] == "sc queryex Spooler && sc enumdepend Spooler"
+    assert dry_run("systemctl restart nginx && systemctl status nginx")[0] == (
+        "systemctl list-dependencies --reverse nginx --no-pager")
+    assert dry_run("crontab -r && echo gone")[0] == "crontab -l"
+    assert dry_run("git reset --hard && git clean -fd")[0] == "git status --short && git log --oneline -5"
+    assert dry_run("sed -i 's/a;b/c|d/' /etc/x.conf")[0] == "sed  's/a;b/c|d/' /etc/x.conf | diff - /etc/x.conf"
+    assert dry_run("find . -name '*.pyc' -exec rm {} \\;")[0] == "find . -name '*.pyc'"
+
+
+def test_a_rehearsal_flag_goes_where_it_cannot_be_passed_on():
+    # on the end, -n followed `--` and became a path: the "dry run" cleaned build/ for real
+    assert dry_run("git clean -fdx -- build")[0] == "git clean -n -fdx -- build"
+    assert dry_run("kubectl create job x --image=busybox -- sh -c 'echo hi'")[0] == (
+        "kubectl create --dry-run=server job x --image=busybox -- sh -c 'echo hi'")
+    assert dry_run("ansible-playbook site.yml")[0] == "ansible-playbook --check --diff site.yml"
+
+
+def test_an_edited_rehearsal_is_judged_like_any_command():
+    from datoolkit.queue import Queue
+    q = Queue()
+    q.add("c", [{"session_id": "s", "command": "sudo chown -R nobody /srv", "risk": "modifying"}])
+    (r,) = q.add("d", [{"session_id": "s", "command": "ls -ld /srv", "risk": "read_only"}], dry_run_of=1)
+    assert r.risk == "read_only"
+    q.update(r.num, command="mv /srv /srv.old")
+    assert q.get(r.num).risk == "modifying"
+
+
 def test_model_cannot_mark_a_rehearsal():
     """A rehearsal is classed read-only, so only the Dry run button may mark one."""
     from datoolkit.queue import Queue

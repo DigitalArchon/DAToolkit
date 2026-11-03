@@ -281,7 +281,10 @@ host, not the case: deleting a case leaves them. They live under
   `terraform plan`, `kubectl --dry-run`, `ansible --check`, `ls` before `rm`, a firewall
   backup before a firewall change), the **Dry run** button queues the rehearsal before the
   real item; its tooltip shows the rehearsal. Commands with no known rehearsal have no button,
-  and each item is rehearsed once at a time.
+  and each item is rehearsed once at a time. A rehearsal counts as read-only, so a line that
+  chains, pipes or redirects (`;`, `&&`, `|`, `>`) gets one only if it keeps none of the line's
+  own commands (a firewall backup, `crontab -l`, a service's dependents): the rest would run for
+  real. Edit a rehearsal and it is judged like any other command.
 - **Second opinion.** **2nd opinion** on any pending item (read-only ones too, when you want
   to know what a command does before running it), or from the disruptive confirmation, asks a
   reviewer model what it does, what could go wrong, whether it exposes sensitive data, and for
