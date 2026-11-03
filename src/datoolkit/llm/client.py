@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+
+from . import netguard
 
 # standard: plaintext to a cloud provider. tee: runs in an enclave, but the prompt passes the
 # provider's gateway in the clear. e2ee: sealed on this machine to an attested enclave's key
@@ -41,10 +43,12 @@ def is_local_url(base_url: str) -> bool:
     if host in ("localhost", "") or host.endswith(".local") or host.endswith(".lan"):
         return True
     try:
-        ip = ipaddress.ip_address(host)
+        ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
         return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local
+    # the networks netguard allows plain http to, not Python's is_private: that also counts
+    # public addresses (6to4 2002::/16, Teredo 2001::/32) and reserved ranges as private
+    return netguard.is_local(host)
 
 
 def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None = None) -> str:
@@ -130,9 +134,11 @@ class TurnResult:
 
 class LLMClient:
     def __init__(self, base_url: str, api_key: str | None, http_client=None):
-        # Local servers often need no key, but the SDK insists on a value.
+        # Local servers often need no key, but the SDK insists on a value. The SDK's own HTTP
+        # client follows redirects, which would send the request again to wherever a reply
+        # points, plain http and other hosts included: netguard checked only the base URL.
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1, timeout=300,
-                                   http_client=http_client)
+                                   http_client=http_client or DefaultAsyncHttpxClient(follow_redirects=False))
 
     async def list_models(self) -> list[str]:
         page = await self._client.models.list()

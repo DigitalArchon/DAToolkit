@@ -75,6 +75,16 @@ def test_tiers():
     assert detect_tier("llama3", "http://localhost:11434/v1") == "local"
     assert detect_tier("qwen", "http://192.168.1.20:8000/v1") == "local"
     assert not is_local_url("https://nano-gpt.com/api/v1")
+    for local in ("http://10.0.0.5:8000/v1", "http://172.20.1.1/v1", "http://[fd00::5]:11434/v1",
+                  "http://[fe80::1%25eth0]:11434/v1", "http://169.254.10.10/v1", "http://[::ffff:192.168.1.9]/v1",
+                  "http://127.0.0.1:1234/v1", "http://[::1]/v1", "https://gpu.lan/v1", "http://box.local/v1"):
+        assert is_local_url(local), local
+    # public addresses Python's is_private counts as private (6to4 of 8.8.8.8, Teredo), and others
+    for public in ("https://[2002:808:808::1]/v1", "https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/v1",
+                   "https://[64:ff9b:1::808:808]/v1", "https://198.18.0.1/v1", "https://[::ffff:8.8.8.8]/v1",
+                   "https://100.64.0.1/v1"):
+        assert not is_local_url(public), public
+        assert detect_tier("llama3", public) == "standard"
 
 
 def test_ssh_argv():

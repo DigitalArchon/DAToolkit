@@ -379,8 +379,11 @@ class AnthropicClient:
         self.official = is_official_anthropic(base_url)
         # the SDK adds /v1/messages itself
         base = re.sub(r"/v1/?$", "", base_url.rstrip("/"))
-        self._client = anthropic.AsyncAnthropic(api_key=api_key or "not-needed", base_url=base, max_retries=1,
-                                                timeout=600, http_client=http_client)
+        # never the SDK's own HTTP client, which follows redirects: a reply pointing elsewhere
+        # would get the request again, x-api-key header included (llm/client.py LLMClient)
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key or "not-needed", base_url=base, max_retries=1, timeout=600,
+            http_client=http_client or anthropic.DefaultAsyncHttpxClient(follow_redirects=False))
         self._caps = caps or {}
 
     async def list_models(self) -> list[str]:

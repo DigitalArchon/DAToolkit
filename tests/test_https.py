@@ -14,6 +14,8 @@ from datoolkit import creds
 from datoolkit.config import Config, Provider
 from datoolkit.engine import Engine, UserError
 from datoolkit.llm import netguard
+from datoolkit.llm.anthropic_api import AnthropicClient
+from datoolkit.llm.client import LLMClient
 
 
 def test_https_is_accepted_anywhere():
@@ -115,3 +117,23 @@ async def test_a_config_edited_by_hand_to_hold_one_sends_nothing(tmp_path):
     finally:
         await engine.stop()
     assert sent == [], "no request left the machine"
+
+
+@pytest.mark.parametrize("make", [lambda: LLMClient("https://llm.example/v1", "sk-x"),
+                                  lambda: AnthropicClient("https://api.example/v1", "sk-x")])
+async def test_a_model_endpoint_redirecting_elsewhere_is_not_followed(make):
+    # The SDKs' own HTTP clients follow redirects: an https endpoint answering 307 to a plain
+    # http address got the whole request again, case and key (x-api-key) included.
+    httpx2 = pytest.importorskip("httpx2")
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx2.Response(307, headers={"location": "http://elsewhere.example/collect"})
+
+    client = make()
+    client._client._client._transport = httpx2.MockTransport(handler)    # the client's default one
+    client._client._client._mounts = {}
+    with pytest.raises(Exception, match="307"):
+        await client.complete("m", [{"role": "user", "content": "the case"}])
+    assert seen and all(url.startswith("https://") for url in seen)
