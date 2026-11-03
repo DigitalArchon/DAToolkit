@@ -25,7 +25,7 @@ from typing import Callable
 from . import config as config_mod
 from . import creds, recipes, search, tools_cache
 from . import export as export_mod
-from .case import Case, _slug, fence
+from .case import SENSITIVITIES, Case, _slug, fence
 from .config import Config, Host, Provider, data_dir, private_dir
 from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
@@ -1237,10 +1237,15 @@ class Engine:
             if self._drop_disallowed_model():
                 self.emit("toast", level="warn", text=f"{case.sensitivity.upper()} cases can't use the selected model: choose another.")
             self._persist()
-        if any(h["id"] == case.id for h in self._similar):
-            for h in self._similar:
-                if h["id"] == case.id:
-                    h["name"] = case.name
+        hit = next((h for h in self._similar if h["id"] == case.id), None)
+        if hit is not None:
+            # a case whose runbook is in the AI's context: still the open case's client's, and no
+            # more sensitive than it? Otherwise its runbook leaves the context.
+            if (not self.case or case.client != self.case.client
+                    or SENSITIVITIES.index(case.sensitivity) > SENSITIVITIES.index(self.case.sensitivity)):
+                self._similar = [h for h in self._similar if h["id"] != case.id]
+            else:
+                hit["name"] = case.name
             self._runbooks = search.runbook_context(self._similar)   # the runbook heading names the case
             self.emit("similar", cases=self.snapshot()["similar_cases"])
         if case is self.case:
@@ -3023,11 +3028,14 @@ class Engine:
         self._similar, self._runbooks = [], ""
         if not case or not case.client or not case.history:
             return
+        client = case.client
         try:
-            hits = await asyncio.to_thread(search.search, message, exclude_id=case.id, client=case.client,
+            hits = await asyncio.to_thread(search.search, message, exclude_id=case.id, client=client,
                                            max_sensitivity=case.sensitivity)
         except OSError:
             hits = []
+        if self.case is not case or case.client != client or not case.history:
+            return            # the client changed, or history was unticked, while it searched
         self._similar = hits
         self._runbooks = search.runbook_context(hits)
         if hits:

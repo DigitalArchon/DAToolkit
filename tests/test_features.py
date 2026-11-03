@@ -436,6 +436,56 @@ async def test_runbooks_reach_the_ai_only_within_a_client_with_history_on(env): 
         engine.new_case("x", "open", client="Nobody")
 
 
+async def _acme_case_with_runbook_hit(engine, fake):
+    """An open Acme case (history on) whose context holds the runbook of an earlier Acme case."""
+    engine.cfg.clients = ["Acme", "Beta"]
+    engine.new_case("Acme NAS slow SMB transfers", "open", client="Acme")
+    (engine.case.dir / "runbook.md").write_text("## Fix\nSet MTU 1500 on the NAS uplink\n")
+    source = engine.case.id
+    engine.new_case("Acme NAS slow again", "open", client="Acme", history=True)
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
+    engine.send("NAS transfers over SMB are slow")
+    await wait_turn(engine)
+    assert "MTU 1500" in engine._system_prompt()
+    return source
+
+
+@pytest.mark.parametrize("change", [{"client": "Beta"}, {"sensitivity": "sovereign"}])
+async def test_a_runbook_leaves_the_context_when_its_case_moves_out_of_reach(env, change):  # noqa: F811
+    engine, fake, _ = env
+    source = await _acme_case_with_runbook_hit(engine, fake)
+    engine.edit_case(source, "Acme NAS slow SMB transfers", **change)      # the source case, from the case list
+    assert "MTU 1500" not in engine._system_prompt() and not engine._similar
+
+
+async def test_a_runbook_stays_when_its_case_is_only_renamed(env):  # noqa: F811
+    engine, fake, _ = env
+    source = await _acme_case_with_runbook_hit(engine, fake)
+    engine.edit_case(source, "Acme NAS: the MTU one")
+    assert "MTU 1500" in engine._system_prompt() and engine._similar[0]["name"] == "Acme NAS: the MTU one"
+
+
+async def test_runbooks_found_after_the_client_changed_are_not_used(env, monkeypatch):  # noqa: F811
+    engine, fake, _ = env
+    engine.cfg.clients = ["Acme", "Beta"]
+    engine.new_case("Acme NAS slow SMB transfers", "open", client="Acme")
+    (engine.case.dir / "runbook.md").write_text("## Fix\nSet MTU 1500 on the NAS uplink\n")
+    engine.new_case("NAS slow", "open", client="Acme", history=True)
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    real, case = search.search, engine.case
+
+    def slow_search(*a, **k):          # the technician moves the case to Beta while this reads every case
+        engine.edit_case(case.id, case.name, client="Beta")
+        return real(*a, **k)
+    monkeypatch.setattr(search, "search", slow_search)
+    fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
+    engine.send("NAS transfers over SMB are slow")
+    await wait_turn(engine)
+    assert engine.case.client == "Beta"
+    assert "MTU 1500" not in fake.requests[-1]["messages"][0]["content"] and not engine._similar
+
+
 # ---------------------------------------------------------------- context view, timeline, photos
 
 async def test_context_view_drop_timeline_and_photo(env):  # noqa: F811
