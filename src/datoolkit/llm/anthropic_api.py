@@ -40,7 +40,7 @@ from typing import AsyncIterator
 import anthropic
 
 from .capabilities import EFFORTS
-from .client import ToolCall, TurnResult, is_private_mode
+from .client import NO_RESULT, ToolCall, TurnResult, is_private_mode
 from .params import nearest_effort
 from .providers import is_official_anthropic
 
@@ -54,7 +54,6 @@ DEFAULT_MAX_TOKENS = 64000
 COMPATIBLE_MAX_TOKENS = 16000
 MAX_CONTINUATIONS = 5        # pause_turn: a server-side search loop that paused, resumed this often at most
 NO_MESSAGE = "(no message)"
-NO_RESULT = "(no result: the turn ended before this tool call was answered)"
 NATIVE_SEARCH_MAX = 4        # Anthropic's searches per request (Engine.MAX_SEARCHES_PER_TURN for the gated one)
 
 _THINKING_TYPES = ("thinking", "redacted_thinking")

@@ -65,12 +65,28 @@ def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None =
 # another API (an Anthropic turn's own content blocks, "native"; the state it was answered
 # under, "state_before": llm/anthropic_api.py), which an OpenAI-compatible provider never sees.
 OPENAI_MESSAGE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
+# The reply sent for a tool call the conversation never answered (a case saved before the
+# engine answered every call): a request with an unanswered call is refused.
+NO_RESULT = "(no result: the turn ended before this tool call was answered)"
 
 
 def openai_messages(messages: list[dict]) -> list[dict]:
-    """`messages` as chat completions takes them: anything another API keeps on them left out."""
-    return [m if all(k in OPENAI_MESSAGE_KEYS for k in m) else {k: v for k, v in m.items() if k in OPENAI_MESSAGE_KEYS}
-            for m in messages]
+    """`messages` as chat completions takes them: anything another API keeps on them left out,
+    and every tool call answered before the next message (as anthropic_api.render does)."""
+    out: list[dict] = []
+    pending: list[str] = []          # tool call ids of the last assistant message not yet answered
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            if m.get("tool_call_id") in pending:
+                pending.remove(m.get("tool_call_id"))
+        elif pending:
+            out += [{"role": "tool", "tool_call_id": i, "content": NO_RESULT} for i in pending]
+            pending = []
+        out.append(m if all(k in OPENAI_MESSAGE_KEYS for k in m) else {k: v for k, v in m.items() if k in OPENAI_MESSAGE_KEYS})
+        if role == "assistant":
+            pending = [c.get("id") for c in m.get("tool_calls") or []]
+    return out + [{"role": "tool", "tool_call_id": i, "content": NO_RESULT} for i in pending]
 
 
 @dataclass
@@ -80,7 +96,12 @@ class ToolCall:
     arguments: str  # raw JSON text as streamed
 
     def parsed(self) -> dict:
-        return json.loads(self.arguments or "{}")
+        """The arguments, a JSON object. ValueError for anything else (a string or a list is
+        valid JSON too): each caller answers the model that its call was malformed."""
+        value = json.loads(self.arguments or "{}")
+        if not isinstance(value, dict):
+            raise ValueError("the arguments must be a JSON object")
+        return value
 
 
 @dataclass

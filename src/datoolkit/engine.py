@@ -3242,8 +3242,12 @@ class Engine:
             for rec in entry.get("searches", []) + entry.get("research", []):
                 if rec["status"] in ("awaiting", "running", "pending"):
                     rec["status"] = "cancelled"
-            if entry["text"]:
-                self.conv.append({"role": "assistant", "content": entry["text"] + "\n[response stopped by technician]"})
+            # stopped while a call waited (a search or research approval): it gets its answer
+            self._answer_open_calls("Not done: the technician stopped the turn before this was carried out.")
+            # the words of the round being streamed; earlier rounds' are in the conversation already
+            partial = entry["text"][in_flight[4]:] if in_flight else ""
+            if partial.strip():
+                self.conv.append({"role": "assistant", "content": partial + "\n[response stopped by technician]"})
         except ModelRetired as e:
             # Gone since it was listed: nothing was sent. The note offers what is listed instead,
             # and the top bar says so until another model is chosen.
@@ -3260,6 +3264,8 @@ class Engine:
             if overflowed:
                 error = overflowed
                 self._overflowed = True
+        if error:                 # a call whose handling failed is answered too, or every later request is refused
+            self._answer_open_calls(f"Not done: DA Toolkit hit an error carrying it out ({error}).")
         entry["text"] = entry["text"].strip()
         if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches",
                                       "research", "refusal")):
@@ -3285,6 +3291,16 @@ class Engine:
         self.emit("turn_end", entry=entry, error=error, usage=usage, chat=self.chat, can_retry=self.can_retry)
         self._queue_changed()
         self._persist()
+
+    def _answer_open_calls(self, why: str) -> None:
+        """Answer each tool call of the last assistant message that has no reply. A call left
+        unanswered makes an OpenAI-format API refuse this conversation in every later request."""
+        last = next((i for i in range(len(self.conv) - 1, -1, -1) if self.conv[i].get("role") == "assistant"), None)
+        if last is None:
+            return
+        answered = {m.get("tool_call_id") for m in self.conv[last + 1:] if m.get("role") == "tool"}
+        self.conv += [{"role": "tool", "tool_call_id": c.get("id"), "content": why}
+                      for c in self.conv[last].get("tool_calls") or [] if c.get("id") not in answered]
 
     def _native_search_event(self, entry: dict, found: dict) -> None:
         """A search Anthropic ran for the chat model (native search), shown on its message like the
@@ -3449,7 +3465,8 @@ class Engine:
         except ValueError as e:
             return f"Invalid revise_queue arguments ({e})."
         done, refused = [], []
-        for w in args.get("withdraw") or []:
+        withdraw, order = args.get("withdraw"), args.get("order")    # lists, unless the model wrote otherwise
+        for w in withdraw if isinstance(withdraw, list) else []:
             try:
                 num, reason = int(w.get("num")), str(w.get("reason", "")).strip()[:300]
             except (AttributeError, TypeError, ValueError):
@@ -3466,7 +3483,7 @@ class Engine:
             self.queue.update(num, status="withdrawn", note=f"Withdrawn by the AI: {reason}" if reason else "Withdrawn by the AI")
             self.log("proposal_withdrawn", num=num, reason=reason, command=p.command)
             done.append({"num": num, "reason": reason})
-        order = [n for n in (args.get("order") or []) if isinstance(n, int)]
+        order = [n for n in (order if isinstance(order, list) else []) if isinstance(n, int)]
         moved = self.queue.reorder(order) if len(order) > 1 else []   # one item alone cannot move
         if moved:
             self.log("queue_reordered", order=moved)
