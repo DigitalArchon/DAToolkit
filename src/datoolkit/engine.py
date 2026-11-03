@@ -883,18 +883,36 @@ class Engine:
         hit = self._tee[(prov.name, model)]
         return hit[0], hit[2]
 
-    async def _check_signatures(self, entry: dict, client: tee_mod.TeeClient, ids: list[str]) -> None:
-        """Was each reply of this turn signed by the attested enclave's key (llm/tee.py)?"""
+    async def _check_signatures(self, entry: dict, client: tee_mod.TeeClient, ids: list[str],
+                                case: Case, chat: list[dict]) -> None:
+        """Was each reply of this turn signed by the attested enclave's key (llm/tee.py)? `case`
+        and `chat` are the turn's: the check takes seconds, and another case may be open by then."""
         outcomes = []
         for rid in ids:
             try:
                 outcomes.append("signed" if await asyncio.to_thread(client.verify_reply, rid) else "failed")
             except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
                 outcomes.append("unsigned" if client.signing_address is None else "unchecked")
-        entry["tee_signature"] = next(o for o in ("failed", "unchecked", "unsigned", "signed") if o in outcomes)
-        self.log("tee_reply_signature", model=entry.get("model"), result=entry["tee_signature"], replies=len(ids))
-        self._changed()
-        self._persist()
+        result = entry["tee_signature"] = next(o for o in ("failed", "unchecked", "unsigned", "signed") if o in outcomes)
+        if self.case is case:
+            self.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(ids))
+            self._changed()
+            self._persist()
+            return
+        # Closed (or closed and opened again) meanwhile: the result goes on the entry as saved,
+        # found by its place in the chat, which only ever grows.
+        try:
+            case.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(ids))
+            index = next(i for i, e in enumerate(chat) if e is entry)
+            if self.case and self.case.id == case.id:
+                if index < len(self.chat) and self.chat[index].get("tee_signature") == "checking":
+                    self.chat[index]["tee_signature"] = result
+                    self._changed()
+                    self._persist()
+            else:
+                case.patch_chat_entry(index, {"tee_signature": "checking"}, tee_signature=result)
+        except (OSError, ValueError, StopIteration):     # deleted meanwhile, or no longer readable
+            pass
 
     def _attestation_for(self, prov: Provider, model: str, slot: str) -> None:
         """Start whatever attestation fits the model: E2EE and TEE models are attested; others have none."""
@@ -2144,7 +2162,8 @@ class Engine:
                 raise
             raise UserError("Compaction cancelled; nothing was changed.") from None
         finally:
-            self._compact_task = None
+            if self._compact_task is task:      # not a newer summary started as this one ended
+                self._compact_task = None
 
     def compact_cancel(self) -> bool:
         """Stop a summary being written: the connection to the provider is closed, so it stops
@@ -2159,7 +2178,8 @@ class Engine:
         later exchanges stay word for word. Nothing changes until compact_apply. With the
         conversation fitting the model, the request is the chat request plus an instruction,
         so a warm prompt cache serves it; after an overflow, only the part to summarise is sent."""
-        if not self.case:
+        case = self.case          # a case switch cancels this, and the cancellation is logged in this case
+        if not case:
             raise UserError("No case.")
         if self.busy:
             raise UserError("Wait for the AI to finish first.")
@@ -2197,7 +2217,7 @@ class Engine:
             messages.append({"role": "user", "content": instruction})
         tools, tool_extra = self._chat_tools()       # as the chat sends them: cached with it
         extra = {**extra, **tool_extra}
-        self.log("sent_to_ai", purpose="compact", provider=prov.name, model=model, tier=tier,
+        case.log("sent_to_ai", purpose="compact", provider=prov.name, model=model, tier=tier,
                  exchanges=upto + 1, whole_conversation=whole)
         start = self._req_conv_len if whole and self._req_conv_len <= len(self.conv) else 0
         sent = messages[1 + start:]
@@ -2212,13 +2232,14 @@ class Engine:
                 break
             except asyncio.CancelledError:
                 self._log_request("compact", model, tier, messages[0]["content"], sent,
-                                  {"error": "cancelled by the technician"}, conv_index=start)
-                self.log("compact_cancelled", model=model)
+                                  {"error": "cancelled by the technician"}, conv_index=start, case=case)
+                case.log("compact_cancelled", model=model)
                 raise
             except Exception as e:  # noqa: BLE001
                 if self._learn_unsupported(prov, model, params, e):
                     continue
-                self._log_request("compact", model, tier, messages[0]["content"], sent, {"error": str(e)}, conv_index=start)
+                self._log_request("compact", model, tier, messages[0]["content"], sent, {"error": str(e)}, conv_index=start,
+                                  case=case)
                 if capabilities.overflow(e)[0]:
                     self._overflow_message(prov, model, e)
                     raise UserError(f"Even the part to compact is too long for {model}. Compact fewer exchanges, "
@@ -2228,7 +2249,7 @@ class Engine:
         self._log_request("compact", model, tier, messages[0]["content"], sent, {
             "content": text, "reasoning": result.reasoning if result else "",
             "finish_reason": result.finish_reason if result else None, "usage": result.usage if result else None},
-            conv_index=start)
+            conv_index=start, case=case)
         if not text:
             raise UserError(f"{model} returned no summary. Try again, or remove exchanges instead.")
         if self._conv_sha(self.conv) != sha:
@@ -3247,7 +3268,7 @@ class Engine:
                      questions=entry.get("questions", []))
             if tee and reply_ids:
                 entry["tee_signature"] = "checking"
-                task = asyncio.create_task(self._check_signatures(entry, tee[0], reply_ids))
+                task = asyncio.create_task(self._check_signatures(entry, tee[0], reply_ids, self.case, self.chat))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
         self._last_turn_error = error
@@ -3494,11 +3515,13 @@ class Engine:
         return out
 
     def _log_request(self, purpose: str, model: str, tier: str, system: str, messages: list[dict],
-                     response: dict, conv_index: int | None = None) -> None:
+                     response: dict, conv_index: int | None = None, case: Case | None = None) -> None:
         """Append one model request to requests.jsonl: the system prompt when it changed, the
         messages sent that were not in the previous logged request, and the full response
-        including reasoning and tool calls. This is what the full export is built from."""
-        if not self.case:
+        including reasoning and tool calls. This is what the full export is built from.
+        `case`: the case a request outside the chat was made for, which may no longer be open."""
+        case = case or self.case
+        if not case:
             return
         sha = hashlib.sha256(system.encode()).hexdigest()
         rec = {"ts": time.time(), "purpose": purpose, "model": model, "tier": tier, "system_sha256": sha[:16]}
@@ -3511,7 +3534,7 @@ class Engine:
         rec["messages"] = self.scrub_messages(messages)
         rec["response"] = response
         try:
-            with (self.case.dir / "requests.jsonl").open("a", encoding="utf-8") as f:
+            with (case.dir / "requests.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except OSError as e:
             self.emit("toast", level="error", text=f"Could not write the request log: {e}")
@@ -3661,25 +3684,40 @@ class Engine:
             transcript.append("HYPOTHESIS BOARD:\n" + prompts.hypotheses_text(self.hypotheses))
         return "\n\n".join(transcript)
 
+    def _still_open(self, case: Case, prov: Provider, model: str) -> str:
+        """After an await (a TEE attestation takes seconds): the request is still for the open
+        case, and the case's sensitivity, which may have been raised meanwhile, still allows the
+        model. Returns the model's tier."""
+        if self.case is not case:
+            raise UserError("The case changed before the request was sent; nothing was sent.")
+        return self._check_tier(prov, model)
+
     async def _document(self, purpose: str, system_prompt: str, filename: str) -> dict:
-        if not self.case:
+        # Not a turn, so the technician can close the dialog and open another case meanwhile:
+        # everything after the first await goes to the case the write-up is of.
+        case = self.case
+        if not case:
             raise UserError("No case.")
         if not self.conv:
             raise UserError("Nothing to write up yet.")
         prov, model, tier = self._require_model()
         messages = [{"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Case: {self.case.name}\n\n" + self._transcript_for_model()}]
+                    {"role": "user", "content": f"Case: {case.name}\n\n" + self._transcript_for_model()}]
         await self._tee_guard(prov, model, "chat")
-        self.log("sent_to_ai", purpose=purpose, provider=prov.name, model=model, tier=tier)
+        tier = self._still_open(case, prov, model)
+        case.log("sent_to_ai", purpose=purpose, provider=prov.name, model=model, tier=tier)
         try:
             text = await self._complete(self._client(prov, model), prov, model, messages)
         except Exception as e:  # noqa: BLE001
-            self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)})
+            self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)}, case=case)
             raise UserError(f"{purpose} request " + (self._overflow_message(prov, model, e) or f"failed: {e}")) from e
-        self._log_request(purpose, model, tier, system_prompt, messages[1:], {"content": text})
-        path = self.case.dir / filename
-        path.write_text(text + "\n", encoding="utf-8")
-        self.log(purpose, path=str(path), text=text)
+        self._log_request(purpose, model, tier, system_prompt, messages[1:], {"content": text}, case=case)
+        path = case.dir / filename
+        try:
+            path.write_text(text + "\n", encoding="utf-8")
+            case.log(purpose, path=str(path), text=text)
+        except OSError as e:          # the case was deleted while the AI wrote
+            raise UserError(f"Could not save {filename} in {case.name}: {e}") from e
         return {"text": text, "path": str(path)}
 
     async def ticket_summary(self) -> dict:
@@ -3766,7 +3804,7 @@ class Engine:
     async def review_command(self, num: int, auto: bool = False, queue: Queue | None = None) -> dict:
         """Second opinion on one command before it runs; the reviewer never sees the proposer's reasoning.
         The result is kept on the item while its command and target stay the same."""
-        self._need_case()
+        case = self._need_case()
         queue = queue or self.queue
         if queue is not self.queue:
             raise UserError("The case changed before the review ran.")
@@ -3774,9 +3812,9 @@ class Engine:
         command, session_id = p.command, p.session_id
         prov, model, tier, different = self._review_target(auto)
         sess = self.sessions.sessions.get(p.session_id)
-        context = [f"Case: {self.case.name}"]
-        if self.case.notes:
-            context.append(f"Site notes: {self.case.notes}")
+        context = [f"Case: {case.name}"]
+        if case.notes:
+            context.append(f"Site notes: {case.notes}")
         if sess:
             context.append(f"Session: {sess.kind} to {sess.target}; OS/device: {sess.os_hint or 'unknown'}; shell: {sess.shell}")
         if self.hypotheses:
@@ -3794,16 +3832,20 @@ class Engine:
                 await self._tee_guard(prov, model, "reviewer")
         else:
             await self._tee_guard(prov, model, "chat")
-        self.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num, auto=auto)
+        if queue is not self.queue:
+            raise UserError("The case changed before the review ran.")
+        tier = self._still_open(case, prov, model)
+        case.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num, auto=auto)
         try:
             text = await self._complete(self._client(prov, model), prov, model, messages)
         except Exception as e:  # noqa: BLE001
-            self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)})
+            self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)},
+                              case=case)
             raise UserError(f"Review request failed: {e}") from e
-        self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"content": text})
+        self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"content": text}, case=case)
         out = {"num": num, "model": model, "tier": tier, "different_model": different, "text": text.strip(),
                **self._parse_review(text), "auto": auto}
-        self.log("second_opinion", **out)
+        case.log("second_opinion", **out)
         if queue is self.queue and p.command == command and p.session_id == session_id:
             p.review = {"status": "done", **{k: v for k, v in out.items() if k != "num"}, "at": time.time()}
             self._queue_changed()

@@ -135,6 +135,19 @@ class Case:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def patch_chat_entry(self, index: int, expect: dict, **fields) -> bool:
+        """Set `fields` on one chat entry of the saved state, if it still holds `expect`: a
+        result that arrived after the case was closed. Returns whether it did."""
+        state = self.load_state()
+        chat = (state or {}).get("chat")
+        if not isinstance(chat, list) or not 0 <= index < len(chat) or not isinstance(chat[index], dict):
+            return False
+        if any(chat[index].get(k) != v for k, v in expect.items()):
+            return False
+        chat[index].update(fields)
+        _write_json(self.dir / "state.json", state)
+        return True
+
     def log(self, event: str, **data) -> None:
         rec = {"ts": time.time(), "event": event, **data}
         with (self.dir / "events.jsonl").open("a", encoding="utf-8") as f:
