@@ -52,8 +52,11 @@ def load(root: Path | None = None) -> list[Tool]:
 
 def save(tools: list[Tool], root: Path | None = None) -> None:
     root = private_dir(root or cache_dir())
-    with _manifest_path(root).open("wb") as f:
+    path = _manifest_path(root)
+    tmp = path.with_suffix(".tmp")           # a write cut short leaves the old list, not half of one
+    with tmp.open("wb") as f:
         tomli_w.dump({"tool": [asdict(t) for t in tools]}, f)
+    tmp.replace(path)
 
 
 def sha256_of(path: Path) -> str:
@@ -70,12 +73,21 @@ def add(source: Path, name: str, os_: str, notes: str = "", run: str = "", root:
     source = Path(source).expanduser()
     if not source.is_file():
         raise FileNotFoundError(f"{source} is not a file")
+    if source.name in (_manifest_path(root).name, _manifest_path(root).with_suffix(".tmp").name):
+        raise ValueError(f"A tool's file can't be called {source.name}: the cache keeps its list under that name.")
+    name = name.strip() or source.stem
     dest = root / source.name
+    existing = load(root)
+    # one file per name in the cache: another tool's copy is never replaced by a different file
+    if dest != source and dest.exists() and any(t.file == source.name and t.name != name for t in existing) \
+            and sha256_of(dest) != sha256_of(source):
+        raise ValueError(f"Another tool in the cache already has a file called {source.name}. "
+                         "Rename this file first, or remove that tool.")
     if dest != source:
         shutil.copy2(source, dest)
-    tool = Tool(name=name.strip() or source.stem, file=source.name, sha256=sha256_of(dest), os=os_,
+    tool = Tool(name=name, file=source.name, sha256=sha256_of(dest), os=os_,
                 notes=notes.strip(), run=run.strip(), size=dest.stat().st_size)
-    tools = [t for t in load(root) if t.name != tool.name]
+    tools = [t for t in existing if t.name != tool.name]
     tools.append(tool)
     save(tools, root)
     return tool

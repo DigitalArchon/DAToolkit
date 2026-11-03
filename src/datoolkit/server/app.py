@@ -179,7 +179,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.send(str(body.get("message", ""))[:4000], images=cleaned, via="phone")
         return {"ok": True}
 
-    @comp.post("/api/companion/hypotheses/{hid}")
+    @comp.post("/api/companion/hypotheses/{hid:path}")
     async def companion_mark_h(hid: str, body: dict, e: Engine = Depends(auth_companion)):
         e.mark_hypothesis(hid, str(body.get("mark", "")))
         return {"ok": True}
@@ -277,7 +277,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.save_provider(body.get("provider", {}), body.get("api_key") or None, body.get("original_name"))
         return {"ok": True}
 
-    @app.delete("/api/providers/{name}")
+    @app.delete("/api/providers/{name:path}")
     async def delete_provider(name: str, e: Engine = Depends(auth)):
         e.delete_provider(name)
         return {"ok": True}
@@ -315,16 +315,16 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.save_host(body.get("host", {}), body.get("password") or None, body.get("original_name"))
         return {"ok": True}
 
-    @app.delete("/api/hosts/{name}")
+    @app.delete("/api/hosts/{name:path}")
     async def delete_host(name: str, e: Engine = Depends(auth)):
         e.delete_host(name)
         return {"ok": True}
 
-    @app.post("/api/hosts/{name}/forget-pin")
+    @app.post("/api/hosts/{name:path}/forget-pin")
     async def forget_pin(name: str, e: Engine = Depends(auth)):
         return {"removed": e.forget_pin(name)}
 
-    @app.post("/api/hosts/{name}/forget-password")
+    @app.post("/api/hosts/{name:path}/forget-password")
     async def forget_password(name: str, e: Engine = Depends(auth)):
         e.forget_host_password(name)
         return {"ok": True}
@@ -352,11 +352,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         e.add_client(str(body.get("name", "")))
         return {"ok": True, "clients": e.cfg.clients}
 
-    @app.post("/api/clients/{name}")
+    @app.post("/api/clients/{name:path}")
     async def rename_client(name: str, body: dict, e: Engine = Depends(auth)):
         return {"ok": True, "cases": e.rename_client(name, str(body.get("name", ""))), "clients": e.cfg.clients}
 
-    @app.delete("/api/clients/{name}")
+    @app.delete("/api/clients/{name:path}")
     async def delete_client(name: str, e: Engine = Depends(auth)):
         return {"ok": True, "cases": e.delete_client(name), "clients": e.cfg.clients}
 
@@ -490,7 +490,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         return {"nums": [p.num for p in added]}
 
     # hypotheses
-    @app.post("/api/hypotheses/{hid}/mark")
+    @app.post("/api/hypotheses/{hid:path}/mark")
     async def mark_hypothesis(hid: str, body: dict, e: Engine = Depends(auth)):
         e.mark_hypothesis(hid, str(body.get("mark", "")))
         return {"ok": True}
@@ -523,12 +523,12 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         return e.add_tool(str(body.get("path", "")), str(body.get("name", "")), str(body.get("os", "windows")),
                           str(body.get("notes", "")), str(body.get("run", "")))
 
-    @app.delete("/api/tools/{name}")
+    @app.delete("/api/tools/{name:path}")
     async def remove_tool(name: str, e: Engine = Depends(auth)):
         e.remove_tool(name)
         return {"ok": True}
 
-    @app.post("/api/tools/{name}/transfer")
+    @app.post("/api/tools/{name:path}/transfer")
     async def transfer_tool(name: str, body: dict, e: Engine = Depends(auth)):
         return e.transfer_tool(name, str(body.get("session_id", "")))
 

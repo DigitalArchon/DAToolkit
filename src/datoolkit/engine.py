@@ -509,14 +509,25 @@ class Engine:
         prov = Provider(name=name, base_url=base_url, default_model=str(data.get("default_model", "")).strip(),
                         tier_overrides=overrides, vision_overrides=vision, context_overrides=context, api=api,
                         routes=routes)
-        old = self.cfg.provider(original_name or name)
+        # Secrets are kept under the name: a second entry with it would take over the first's
+        # key (and send it to its own address), and two entries can't be told apart.
+        old = self.cfg.provider(original_name) if original_name else None
+        clash = self.cfg.provider(name)
+        if clash and clash is not old:
+            raise UserError(f"There is already a provider called {name}: give this one another name.")
         if original_name and original_name != name and old:
+            self._provider_renamed(original_name, name)
             key = creds.get_secret("provider", original_name)
             if key and not api_key:
                 creds.set_secret("provider", name, key)
             creds.delete_secret("provider", original_name)
             if self.cfg.active_provider == original_name:
                 self.cfg.active_provider = name
+        if old and old.base_url != base_url:
+            # attested, or learned, at the old address: requests now go to the new one
+            self._forget_tee(name)
+            for cache in (self._caps, self._enclaves):
+                cache.pop(name, None)
         if old:
             self.cfg.providers[self.cfg.providers.index(old)] = prov
         else:
@@ -530,7 +541,32 @@ class Engine:
         self._save_config(self.cfg)
         self._changed()
 
+    def _provider_renamed(self, old: str, new: str) -> None:
+        """Settings that name a provider follow its new name ("provider|model", search_via,
+        recent models), and so does what was learned about its models."""
+        s = self.cfg.settings
+        for key in ("review_model", "research_model", "vision_model"):
+            value = getattr(s, key)
+            if value.startswith(old + "|"):
+                setattr(s, key, new + value[len(old):])
+        if s.search_via == old:
+            s.search_via = new
+        self.cfg.recent_models = [new + r[len(old):] if r.startswith(old + "|") else r for r in self.cfg.recent_models]
+        for cache in (self._caps, self._enclaves, self._research_auto, self._models):
+            if old in cache:
+                cache[new] = cache.pop(old)
+        for cache in (self._unsupported, self._learned_ctx, self._hosts):
+            for key in [k for k in cache if k[0] == old]:
+                cache[(new,) + key[1:]] = cache.pop(key)
+        self._forget_tee(old)
+
+    def _forget_tee(self, name: str) -> None:
+        """Drop a provider's TEE attestations: they were made against its address as it was."""
+        for key in [k for k in self._tee if k[0] == name]:
+            self._tee.pop(key)[0].close()
+
     def delete_provider(self, name: str) -> None:
+        self._forget_tee(name)
         self.cfg.providers = [p for p in self.cfg.providers if p.name != name]
         creds.delete_secret("provider", name)
         self._secrets_changed()
@@ -988,7 +1024,10 @@ class Engine:
             found = winrm.problem(host)
             if found:
                 raise UserError(f"Host not saved. {found}")
-        old = self.cfg.host(original_name or name)
+        old = self.cfg.host(original_name) if original_name else None    # as for providers
+        clash = self.cfg.host(name)
+        if clash and clash is not old:
+            raise UserError(f"There is already a host called {name}: give this one another name.")
         if original_name and original_name != name and old:
             pw = creds.get_secret("host", original_name)
             if pw and not password:
