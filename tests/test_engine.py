@@ -235,6 +235,53 @@ def test_prompt_host():
     assert prompt_host("Password for me@10.0.0.5:") == "10.0.0.5"
     assert prompt_host("me@[fe80::1]'s password:") == "fe80::1"
     assert prompt_host("Password:") == ""
+    # OpenSSH writes IPv6 unbracketed; a user name may hold an @ (Kerberos/NTLM: bob@corp.com)
+    assert prompt_host("Password for bob@fd00::10 (WinRM): ") == "fd00::10"
+    assert prompt_host("bob@2001:db8::5's password: ") == "2001:db8::5"
+    assert prompt_host("Password for bob@corp.com@winsrv.corp.com (WinRM): ") == "winsrv.corp.com"
+    assert prompt_host("(bob@corp.com@web01.lan) Password: ") == "web01.lan"
+    assert prompt_host("RDP password for bob@127.0.0.1") == "127.0.0.1"
+    assert prompt_host("Enter passphrase for key '/home/bob@corp/.ssh/id': ") == ""
+
+
+async def test_askpass_answers_a_user_at_domain_or_ipv6_host_from_the_keyring(env):
+    engine, _, _ = env
+    engine.new_case("x", "open")
+    for name, address, prompt in (("win", "winsrv.corp.com", "Password for bob@corp.com@winsrv.corp.com (WinRM): "),
+                                  ("v6", "fd00::10", "bob@fd00::10's password: ")):
+        engine.cfg.hosts.append(Host(name, "ssh", address, user="bob", auth="password"))
+        creds.set_secret("host", name, f"pw-{name}")
+        engine.sessions.spawn(name, ["/bin/cat"], {}, name=name, kind="ssh", host_name=name)
+        assert await engine._askpass(name, prompt, "askpass") == f"pw-{name}", prompt
+
+
+async def test_a_pin_or_passcode_prompt_never_gets_the_host_password(env):
+    engine, _, events = env
+    engine.new_case("x", "open")
+    creds.set_secret("host", "web01", "pw1")
+    engine.sessions.spawn("web01", ["/bin/cat"], {}, name="web01", kind="ssh", host_name="web01")
+    # each wrong PIN counts against a smart card's few tries
+    for text in ("Enter PIN for 'PIV Card Holder pin (PIV_II)': ", "Enter PIN for ED25519-SK key /home/bob/.ssh/id_ed25519_sk: ",
+                 "(bob@web01.lan) Enter PASSCODE: ", "Enter passphrase for key '/home/bob/.ssh/id_ed25519': "):
+        events.clear()
+        task = asyncio.create_task(engine._askpass("web01", text, "askpass"))
+        await asyncio.sleep(0.05)
+        prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+        assert prompt["secret"] and prompt["can_save"] is False, text
+        engine.answer_prompt(prompt["id"], "123456", save=True)
+        assert await task == "123456"
+    assert creds.get_secret("host", "web01") == "pw1"
+
+
+async def test_a_password_asked_before_its_session_exists_is_saved_under_its_host(env):
+    engine, _, events = env
+    engine.new_case("x", "open")
+    task = asyncio.create_task(engine.ask_user("rdp-dc01", "RDP password for bob@dc01.lan", secret=True, can_save=True,
+                                               host_name="dc01"))
+    await asyncio.sleep(0.05)
+    prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+    engine.answer_prompt(prompt["id"], "s3cret", save=True)
+    assert await task == "s3cret" and creds.get_secret("host", "dc01") == "s3cret"
 
 
 async def test_missing_session_id_defaults_to_only_open_session(env):

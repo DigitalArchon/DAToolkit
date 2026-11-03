@@ -151,14 +151,15 @@ def _turn_summary(entry: dict) -> str:
     return "; ".join(parts) or "tool calls recorded"
 
 
-# the host a credential prompt names: "bob@web01.lan's password:", "(bob@jump) Password:", "me@[::1]'s password:"
-_PROMPT_HOST = re.compile(r"@(\[[^\]]+\]|[^\s'):]+)")
+# the host a credential prompt names: "bob@web01.lan's password:", "(bob@jump) Password:", "me@[::1]'s password:",
+# "Password for bob@corp.com@fd00::10 (WinRM):" (after the last @; IPv6 unbracketed, as OpenSSH writes it)
+_PROMPT_HOST = re.compile(r"@(\[[^\]]+\]|[^\s'()@\[]+?)(?=:?(?:'s\b|\)|\s|$))")
 
 
 def prompt_host(prompt: str) -> str:
     """The host named in a credential prompt, lower-cased, or "" when it names none."""
-    m = _PROMPT_HOST.search(prompt)
-    return m.group(1).strip("[]").lower().rstrip(".") if m else ""
+    found = _PROMPT_HOST.findall(prompt)
+    return found[-1].strip("[]").lower().rstrip(".") if found else ""
 
 
 class UserError(Exception):
@@ -1511,7 +1512,7 @@ class Engine:
         password = self._get_secret_safe("host", host.name)
         if not password:
             password = await self.ask_user(sid, f"RDP password for {host.user or 'the user'}@{host.host}",
-                                           secret=True, can_save=True)
+                                           secret=True, can_save=True, host_name=host.name)
             if password is None:
                 raise UserError("No password given; RDP session not opened.")
         # "Negotiate (any)" takes the security the server chose when its certificate was read
@@ -1690,7 +1691,10 @@ class Engine:
         sess = self.sessions.sessions.get(sid)
         host = self.cfg.host(sess.host_name) if sess and sess.host_name else None
         secret = kind == "password" or bool(re.search(r"password|passphrase|passcode|\bpin\b|secret", prompt, re.I))
-        is_password = secret and "passphrase" not in prompt.lower()
+        # only a password prompt gets the host's password: a key passphrase, a smart card's or
+        # security key's PIN, or a one-time passcode is something else (a wrong PIN counts
+        # against the card's few tries)
+        is_password = kind == "password" or bool(re.search(r"\bpassword\b", prompt, re.I))
         # A prompt naming some other host (a jump host on the way, judged by the whole name,
         # not a part of it) is not ours to answer from the keyring, and what the technician
         # types for it is not this host's password: it is never offered for saving under it.
@@ -1712,7 +1716,9 @@ class Engine:
         except Exception:  # noqa: BLE001
             return None
 
-    async def ask_user(self, sid: str, prompt: str, secret: bool, can_save: bool) -> str | None:
+    async def ask_user(self, sid: str, prompt: str, secret: bool, can_save: bool, host_name: str = "") -> str | None:
+        """Ask the technician. With `can_save`, a "save" tick keeps the answer as the password of
+        `host_name`, or of the session's host (an RDP session is asked before it exists)."""
         pid = str(next(self._prompt_ids))
         fut = asyncio.get_running_loop().create_future()
         info = {"id": pid, "session_id": sid, "text": prompt.strip(), "secret": secret, "can_save": can_save}
@@ -1727,9 +1733,11 @@ class Engine:
             self.emit("prompt_done", id=pid)
         if answer is not None and save and can_save:
             sess = self.sessions.sessions.get(sid)
-            if sess and sess.host_name:
-                creds.set_secret("host", sess.host_name, answer)
-                sess.used_stored_password = True
+            name = host_name or (sess.host_name if sess else "")
+            if name:
+                creds.set_secret("host", name, answer)
+                if sess:
+                    sess.used_stored_password = True
                 self._secrets_changed()
         return answer
 

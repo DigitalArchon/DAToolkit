@@ -31,6 +31,7 @@ class AskpassBridge:
         self.sock_path = runtime_dir / "askpass.sock"
         self.script_path = runtime_dir / "askpass"
         self._server: asyncio.AbstractServer | None = None
+        self._clients: set[asyncio.Task] = set()     # connections being answered (a prompt may be up)
 
     async def start(self) -> None:
         if len(str(self.sock_path)) > 100:  # AF_UNIX paths are limited to ~108 bytes
@@ -54,6 +55,10 @@ class AskpassBridge:
     async def stop(self) -> None:
         if self._server:
             self._server.close()
+            # wait_closed waits for every connection, and one may be waiting on the technician
+            # (a prompt still up, for minutes): quitting doesn't wait for an answer
+            for task in list(self._clients):
+                task.cancel()
             await self._server.wait_closed()
         for p in (self.sock_path, self.script_path):
             p.unlink(missing_ok=True)
@@ -72,6 +77,8 @@ class AskpassBridge:
         }
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        self._clients.add(task)
         try:
             line = await asyncio.wait_for(reader.readline(), 10)
             req = json.loads(line)
@@ -86,6 +93,7 @@ class AskpassBridge:
         except Exception:  # noqa: BLE001 - never let a bad client take down the app
             pass
         finally:
+            self._clients.discard(task)
             writer.close()
 
 

@@ -80,3 +80,25 @@ async def test_askpass_bridge(tmp_path):
         assert len(calls) == 2  # wrong token never reaches the handler
     finally:
         await bridge.stop()
+
+
+async def test_the_askpass_bridge_stops_with_a_prompt_still_up(tmp_path):
+    asked = asyncio.Event()
+
+    async def handler(sid, prompt, kind):
+        asked.set()
+        await asyncio.sleep(3600)          # the technician never answers
+
+    bridge = AskpassBridge(tmp_path / "rt", handler)
+    await bridge.start()
+    env = {**os.environ, **bridge.env_for("web01")}
+    helper = subprocess.Popen([str(bridge.script_path), "admin@web01's password:"], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        await asyncio.wait_for(asked.wait(), 10)
+        await asyncio.wait_for(bridge.stop(), 3)        # quitting doesn't wait for an answer
+        assert await asyncio.to_thread(helper.wait, 10) == 1
+    finally:
+        helper.kill()
+        helper.wait()
+        helper.stdout.close()
