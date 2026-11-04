@@ -439,6 +439,15 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def preview(body: dict, e: Engine = Depends(auth)):
         return {"items": e.preview([str(t) for t in body.get("texts", [])], body.get("nums"))}
 
+    @app.get("/api/draft")
+    async def load_draft(case_id: str, e: Engine = Depends(auth)):
+        return await asyncio.to_thread(e.load_draft, case_id)
+
+    @app.post("/api/draft")
+    async def save_draft(body: dict, e: Engine = Depends(auth)):
+        await asyncio.to_thread(e.save_draft, str(body.get("case_id") or ""), body.get("text", ""), body.get("images"))
+        return {"ok": True}
+
     @app.post("/api/send")
     async def send(body: dict, e: Engine = Depends(auth)):
         images = body.get("images") or []

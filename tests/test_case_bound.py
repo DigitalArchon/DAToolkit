@@ -232,3 +232,22 @@ async def test_a_write_up_is_not_sent_once_another_case_was_opened_during_attest
     with pytest.raises(UserError, match="case changed"):
         await task
     assert not sent
+
+
+async def test_the_chat_boxs_draft_stays_with_its_case(env):  # noqa: F811
+    # a message not sent yet and photos attached to it belong to the case they were made in:
+    # opening another case doesn't carry them over, and they are back when the case is reopened
+    engine, _, _ = env
+    photo = "data:image/jpeg;base64,/9j/AAAA"
+    engine.new_case("Case A", "open")
+    a = engine.case.id
+    engine.save_draft(a, "server A's disk \ud83d", [photo, "not an image", 5])
+    engine.new_case("Case B", "open")
+    assert engine.load_draft(engine.case.id) == {"text": "", "images": []}
+    engine.save_draft(a, "server A's disk, again", [photo])          # the page still saving the case it left
+    engine.open_case(a)
+    assert engine.load_draft(a) == {"text": "server A's disk, again", "images": [photo]}
+    engine.save_draft(a, "  ", [])                                    # sent: nothing left
+    assert not (engine.case.dir / "draft.json").exists()
+    with pytest.raises(UserError):
+        engine.save_draft("../elsewhere", "x", [])

@@ -155,6 +155,22 @@ class Case:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def save_draft(self, text: str, images: list[str]) -> None:
+        """The chat box's message not sent yet and the photos attached to it (draft.json)."""
+        path = self.dir / "draft.json"
+        if not text.strip() and not images:
+            path.unlink(missing_ok=True)
+        else:
+            _write_json(path, {"text": text, "images": images})
+
+    def load_draft(self) -> dict:
+        try:
+            data = json.loads((self.dir / "draft.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"text": "", "images": []}
+        images = data.get("images") if isinstance(data.get("images"), list) else []
+        return {"text": str(data.get("text") or ""), "images": [i for i in images if isinstance(i, str)]}
+
     def patch_chat_entry(self, index: int, expect: dict, **fields) -> bool:
         """Set `fields` on one chat entry of the saved state, if it still holds `expect`: a
         result that arrived after the case was closed. Returns whether it did."""

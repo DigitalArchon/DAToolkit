@@ -225,7 +225,7 @@ function handleEvent(ev) {
     case "state": {
       const was = S.state?.case?.id ?? null;
       S.state = ev.state;
-      if (was !== (S.state.case?.id ?? null)) caseSwitched(was !== null);
+      if (was !== (S.state.case?.id ?? null)) caseSwitched();
       loadLayout(S.state.config?.settings?.layout);
       if (S.state.busy && !S.streaming) {
         // a turn already running when the page (re)loaded: without this its text, searches and
@@ -619,6 +619,7 @@ function answerQuestion(question, answer, input) {
   const i = lines.findIndex((l) => l.startsWith(prefix));
   if (i >= 0) lines[i] = prefix + answer; else lines.push(prefix + answer);
   input.value = lines.join("\n");
+  if (input.id === "chat-input") saveDraftSoon();
   if (input.style.height) autosize(input);       // only boxes that grow with their text (the dialog's)
   input.focus();
   input.selectionStart = input.selectionEnd = input.value.length;
@@ -920,19 +921,50 @@ function renderBusy() {
 
 // Per-case things this page keeps: queue numbers start at 1 and images are img-1, img-2, …
 // in every case, so a terminal's output markers and the image cache would match another case's
-// items, and photos attached for one case would go out with the next case's message (those
-// attached before the first case, to send once it starts, stay).
-function caseSwitched(fromAnotherCase) {
+// items. The chat box holds the new case's own draft.
+function caseSwitched() {
   for (const t of Object.values(S.terms)) {
     t.markers.forEach((m) => m.dispose());
     t.markers.clear();
   }
   for (const url of imageCache.values()) if (url) URL.revokeObjectURL(url);
   imageCache.clear();
-  if (fromAnotherCase && pendingImages.length) {
-    pendingImages.length = 0;
+  swapDraft().catch(() => {});
+}
+
+// ------------------------------------------------------------------ the chat box's draft
+// Each case keeps what its chat box holds, a message not sent yet and the photos attached to
+// it (Engine.save_draft): it never goes out with another case's message, and it is back when the
+// case is opened again or the page reloads. S.draftCase is the case the box's contents are for.
+let draftTimer = null;
+function saveDraftSoon() {
+  if (S.loadingDraft) return;
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => saveDraft().catch(() => {}), 800);
+}
+async function saveDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = null;
+  if (!S.draftCase) return;
+  await api("POST", "/api/draft", { case_id: S.draftCase, text: $("#chat-input").value, images: pendingImages.slice() });
+}
+async function swapDraft() {
+  const was = S.draftCase, now = S.state.case?.id ?? null;
+  if (was && draftTimer) await saveDraft();         // the last of what was typed stays with its case
+  S.draftCase = now;
+  if (!now) return;
+  const box = $("#chat-input");
+  // typed (or photographed) before any case existed, to be sent once one starts: it is this one's
+  if (!was && (box.value.trim() || pendingImages.length)) return saveDraft();
+  const draft = await api("GET", `/api/draft?case_id=${encodeURIComponent(now)}`);
+  if (S.draftCase !== now) return;                  // another case opened meanwhile
+  S.loadingDraft = true;
+  try {
+    box.value = draft.text || "";
+    pendingImages.splice(0, pendingImages.length, ...(draft.images || []));
     renderAttachments();
-    toast("The photos attached for the previous case were removed.", "info", 6000);
+  } finally {
+    S.loadingDraft = false;
   }
 }
 
@@ -956,6 +988,7 @@ function renderAttachments() {
     h("button", { class: "small ghost", title: "Remove", onclick: () => { pendingImages.splice(i, 1); renderAttachments(); } }, "×"))));
   strip.classList.toggle("hidden", !pendingImages.length);
   if (pendingImages.length) setChatCollapsed(false);   // an attachment waits in the chat box: show it
+  saveDraftSoon();
 }
 async function attachPhoto(file) {
   if (!file || !file.type.startsWith("image/")) return;
@@ -993,6 +1026,7 @@ function composerSent(message) {
   if (message && S.chatHistory[S.chatHistory.length - 1] !== message) S.chatHistory.push(message);
   S.histIdx = -1;
   $("#chat-input").value = "";
+  saveDraft().catch(() => {});
 }
 
 // Up/Down at the edge of the chat box recalls earlier messages, like a shell.
@@ -1004,10 +1038,11 @@ function chatHistoryKey(e) {
   const atEnd = input.selectionStart === input.value.length;
   if (e.key === "ArrowUp" && (atTop || S.histIdx !== -1)) {
     if (S.histIdx === -1) { S.histDraft = input.value; S.histIdx = hist.length; }
-    if (S.histIdx > 0) { S.histIdx -= 1; input.value = hist[S.histIdx]; e.preventDefault(); }
+    if (S.histIdx > 0) { S.histIdx -= 1; input.value = hist[S.histIdx]; e.preventDefault(); saveDraftSoon(); }
   } else if (e.key === "ArrowDown" && S.histIdx !== -1 && atEnd) {
     S.histIdx += 1;
     if (S.histIdx >= hist.length) { S.histIdx = -1; input.value = S.histDraft; } else input.value = hist[S.histIdx];
+    saveDraftSoon();
     e.preventDefault();
   }
 }
@@ -1734,6 +1769,7 @@ async function attachScreenshot() {
     input.value = r ? `This is what I see on the remote desktop of session \`${sess.id}\` right now (screenshot attached).`
       : w ? `This is what the window of session \`${sess.id}\` shows right now (screenshot attached).`
         : `This is what I see in the terminal of session \`${sess.id}\` right now (screenshot attached).`;
+    saveDraftSoon();
   }
   input.focus();
   input.selectionStart = input.selectionEnd = input.value.length;
@@ -2586,7 +2622,7 @@ async function openSendResults(fill = null) {
       if (sent) return;
       $("#chat-input").value = message.value;
       pendingImages.splice(0, pendingImages.length, ...images);
-      renderAttachments();
+      renderAttachments();             // (saves the draft too)
     },
   });
 }
@@ -2799,6 +2835,7 @@ function openCaseModal(first, reason = "") {
             h("div", { class: "muted small" }, `${(c.started || c.id).replace("T", " ")} · ${c.resumable ? `${c.messages} message(s)` : "log only (no saved conversation)"}`))),
         h("div", { class: "row" },
           h("button", { type: "button", class: "small primary", onclick: () => guarded(async () => {
+            await saveDraft();
             await api("POST", "/api/case/open", { id: c.id });
             m.close();
             toast(`Resumed ${c.name}.`, "ok");
@@ -2833,6 +2870,7 @@ function openCaseModal(first, reason = "") {
       label: "Start case", kind: "primary", onClick: async () => {
         const sensitivity = body.querySelector("input[type=radio]:checked").value;
         const client = await ensureClient(cf);
+        await saveDraft();
         await api("POST", "/api/case", { name: name.value.trim(), sensitivity, notes: notes.value.trim(), client, history: cf.history() });
       },
     }],
@@ -3797,6 +3835,7 @@ function init() {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) sendChat(e);
     else chatHistoryKey(e);
   });
+  $("#chat-input").addEventListener("input", saveDraftSoon);
   document.addEventListener("keydown", globalKeys);
   // DAToolkit's own shortcuts still work while the remote desktop has the keyboard
   $("#terms").addEventListener("keydown", (e) => {

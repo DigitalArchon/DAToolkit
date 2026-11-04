@@ -1374,6 +1374,32 @@ class Engine:
                               "Output of earlier commands is captured from the transcript files."})
         self._persist()
 
+    # ---------------------------------------------------------------- the chat box's draft
+
+    DRAFT_IMAGES = 4                 # as many as one message takes
+    DRAFT_IMAGE_CHARS = 20_000_000   # a photo's data URL, at most
+
+    def _case_by_id(self, case_id: str) -> Case:
+        if self.case and case_id == self.case.id:
+            return self.case
+        try:
+            return Case.load(case_id)
+        except (OSError, ValueError) as e:
+            raise UserError(f"No case {case_id}.") from e
+
+    def save_draft(self, case_id: str, text: str, images: list) -> None:
+        """What the chat box holds for a case: the message not sent yet and the photos attached
+        to it. Kept with that case, so it never goes out with another case's message and is back
+        when the case is opened again (or the page reloads). By id: the page may still be saving
+        the case it has just left."""
+        case = self._case_by_id(case_id)
+        images = [i for i in (images if isinstance(images, list) else [])
+                  if isinstance(i, str) and i.startswith("data:image/") and len(i) <= self.DRAFT_IMAGE_CHARS]
+        case.save_draft(clean_text(str(text or ""))[:100_000], images[:self.DRAFT_IMAGES])
+
+    def load_draft(self, case_id: str) -> dict:
+        return self._case_by_id(case_id).load_draft()
+
     def _attach_case(self) -> None:
         self.sessions.set_transcript_paths(self.case.transcript_path)
         self._req_system_sha, self._req_conv_len, self._img_names = "", 0, {}

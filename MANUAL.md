@@ -306,7 +306,9 @@ host, not the case: deleting a case leaves them. They live under
 
 - **📷** (or paste an image) attaches a photo of a screen, LED panel or label to the next
   message. Photos are resized locally, stored in the case directory and sent to the model
-  under the same sensitivity gate as text.
+  under the same sensitivity gate as text. What the chat box holds, a message not sent yet and
+  its photos, stays with its case: opening another case shows that case's own, and it is all
+  back when you open the first again (or reload the page).
 - **Screenshot → chat** (or 🖥 by the chat box) attaches a picture of the active session:
   a terminal's screen drawn from its buffer with its colours, or the remote desktop of an
   RDP session. Use it when a login lands on an appliance menu (OPNsense, pfSense, Sophos)
