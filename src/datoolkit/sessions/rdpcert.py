@@ -74,13 +74,16 @@ async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
         if len(body) < 7 or body[1] & 0xF0 != 0xD0:
             raise CertError(f"{host}:{port} refused the RDP connection request")
         neg = body[7:]
+        legacy = {"tls": False, "protocol": "rdp", "sha256": "", "subject": "", "issuer": "", "not_after": "",
+                  "self_signed": False}
         if len(neg) >= 8 and neg[0] == 0x03:
             code = struct.unpack("<I", neg[4:8])[0]
+            if code in (2, 3):   # SSL_NOT_ALLOWED_BY_SERVER, SSL_CERT_NOT_ON_SERVER: legacy RDP security only
+                return legacy
             raise CertError(f"{host}:{port} refused TLS negotiation (RDP failure code {code})")
         selected = struct.unpack("<I", neg[4:8])[0] if len(neg) >= 8 and neg[0] == 0x02 else 0
         if not selected & (PROTOCOL_TLS | PROTOCOL_HYBRID):
-            return {"tls": False, "protocol": "rdp", "sha256": "", "subject": "", "issuer": "", "not_after": "",
-                    "self_signed": False}
+            return legacy
         protocol = "nla" if selected & PROTOCOL_HYBRID else "tls"
         ctx = ssl.create_default_context()
         ctx.check_hostname = False

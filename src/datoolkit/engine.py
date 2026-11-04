@@ -1612,6 +1612,10 @@ class Engine:
             cert = await rdpcert.fetch(host.host, port, host.user.split("\\")[-1].split("@")[0])
         except rdpcert.CertError as e:
             raise UserError(str(e)) from e
+        if host.rdp_security == "rdp" and cert["tls"]:
+            # legacy security chosen for this host: the connection won't use TLS, so the certificate
+            # is not what guards it, and the technician is told so as for a server offering nothing else
+            cert = {**cert, "tls": False, "protocol": "rdp", "sha256": "", "chosen": True}
         await self._trust_cert(sid, host.host, port, cert, "rdp")
         user, domain = host.user, ""
         if "\\" in user:
@@ -1645,8 +1649,10 @@ class Engine:
         `kind` ("rdp" | "winrm") names the audit events and the hint for finding the certificate."""
         where = f"{host}:{port}"
         if not cert["tls"]:
+            how = ("is set to legacy RDP security (Settings → Hosts)" if cert.get("chosen")
+                   else "only offers legacy RDP security")
             answer = await self.ask_user(sid, (
-                f"{where} only offers legacy RDP security: there is no TLS certificate to check, so this "
+                f"{where} {how}: there is no TLS certificate to check, so this "
                 "connection cannot be verified against a pin and could be intercepted.\nConnect anyway? (yes/no)"),
                 secret=False, can_save=False)
             self.log("rdp_no_tls", target=where, accepted=answer == "yes")

@@ -147,8 +147,8 @@ async def fake_rdp_server(mode, cert=None):
     async def handle(reader, writer):
         head = await reader.readexactly(4)
         await reader.readexactly(struct.unpack(">H", head[2:4])[0] - 4)
-        if mode == "refuse":
-            neg = struct.pack("<BBHI", 0x03, 0, 8, 5)
+        if mode in ("refuse", "ssl-not-allowed"):       # HYBRID_REQUIRED_BY_SERVER, SSL_NOT_ALLOWED_BY_SERVER
+            neg = struct.pack("<BBHI", 0x03, 0, 8, 5 if mode == "refuse" else 2)
         else:
             neg = struct.pack("<BBHI", 0x02, 0, 8, 1 if mode == "tls" else 0)
         cc = bytes([6 + len(neg), 0xD0, 0, 0, 0x12, 0x34, 0]) + neg
@@ -185,6 +185,26 @@ async def test_fetch_legacy_and_refused():
             await rdpcert.fetch("127.0.0.1", port)
     with pytest.raises(rdpcert.CertError, match="cannot reach"):
         await rdpcert.fetch("127.0.0.1", 1)
+    # a server set to standard RDP security says TLS isn't allowed: legacy, not an error
+    server, port = await fake_rdp_server("ssl-not-allowed")
+    async with server:
+        assert (await rdpcert.fetch("127.0.0.1", port))["tls"] is False
+
+
+async def test_a_host_set_to_legacy_security_is_warned_about_not_pinned(rdp_env, tmp_path):
+    engine, events = rdp_env[0], rdp_env[1]
+    c, k, fp = _self_signed(tmp_path)
+    server, port = await fake_rdp_server("tls", (c, k))
+    engine.cfg.hosts.append(Host("old", "rdp", "127.0.0.1", port=port, user="bob", auth="password", rdp_security="rdp"))
+    creds.set_secret("host", "old", "pw")
+    async with server:
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["yes"])
+        r = await opener
+    asked = [e["prompt"]["text"] for e in events if e["type"] == "prompt"]
+    assert len(asked) == 1 and "set to legacy RDP security" in asked[0] and fp not in asked[0]
+    assert engine.pins.get("127.0.0.1", port) is None                     # a certificate it doesn't use isn't pinned
+    assert "cert-fingerprints" not in engine.rdp_params(r["id"]) and engine.rdp_params(r["id"])["security"] == "rdp"
 
 
 # ---------------------------------------------------------------- engine: trust on first use
