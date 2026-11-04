@@ -103,6 +103,9 @@ const MD_OPTS = {
   FORBID_TAGS: ["img", "picture", "source", "svg", "math", "video", "audio", "iframe", "object", "embed", "form", "input", "button", "style", "link", "meta", "base"],
   FORBID_ATTR: ["style", "srcset", "poster", "background", "ping", "formaction"],
   ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
+  // with a URI pattern of its own, DOMPurify checks every attribute not marked URI-safe against
+  // it: numbered steps split by code blocks would all start at 1, table columns lose alignment
+  ADD_URI_SAFE_ATTR: ["start", "align"],
 };
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
@@ -219,15 +222,22 @@ function connectEvents() {
 
 function handleEvent(ev) {
   switch (ev.type) {
-    case "state":
+    case "state": {
+      const was = S.state?.case?.id ?? null;
       S.state = ev.state;
+      if (was !== (S.state.case?.id ?? null)) caseSwitched(was !== null);
       loadLayout(S.state.config?.settings?.layout);
-      if (S.state.busy && (S.state.search_requests?.length || S.state.research_requests?.length) && !S.streaming) {
-        S.streaming = { text: "", reasoning: "", phase: "tool", tool: S.state.research_requests?.length ? "research" : "web_search",
+      if (S.state.busy && !S.streaming) {
+        // a turn already running when the page (re)loaded: without this its text, searches and
+        // research requests would have nowhere to go
+        const asking = S.state.search_requests?.length || S.state.research_requests?.length;
+        S.streaming = { text: "", reasoning: "", phase: asking ? "tool" : "waiting",
+          tool: asking ? (S.state.research_requests?.length ? "research" : "web_search") : "",
           startAt: Date.now(), lastAt: Date.now(), searches: S.state.search_requests || [], research: S.state.research_requests || [] };
       }
       renderAll();
       break;
+    }
     case "companion":
       S.phones = ev.phones;
       renderPhoneBtn();
@@ -604,7 +614,7 @@ function questionBlock(questions, live, input = () => $("#chat-input")) {
 }
 
 function answerQuestion(question, answer, input) {
-  const prefix = `Q: ${question} — `;
+  const prefix = `Q: ${question.replace(/\s+/g, " ").trim()} — `;   // one line, so a second pick replaces it
   const lines = input.value ? input.value.split("\n") : [];
   const i = lines.findIndex((l) => l.startsWith(prefix));
   if (i >= 0) lines[i] = prefix + answer; else lines.push(prefix + answer);
@@ -908,6 +918,24 @@ function renderBusy() {
   renderChatResults();
 }
 
+// Per-case things this page keeps: queue numbers start at 1 and images are img-1, img-2, …
+// in every case, so a terminal's output markers and the image cache would match another case's
+// items, and photos attached for one case would go out with the next case's message (those
+// attached before the first case, to send once it starts, stay).
+function caseSwitched(fromAnotherCase) {
+  for (const t of Object.values(S.terms)) {
+    t.markers.forEach((m) => m.dispose());
+    t.markers.clear();
+  }
+  for (const url of imageCache.values()) if (url) URL.revokeObjectURL(url);
+  imageCache.clear();
+  if (fromAnotherCase && pendingImages.length) {
+    pendingImages.length = 0;
+    renderAttachments();
+    toast("The photos attached for the previous case were removed.", "info", 6000);
+  }
+}
+
 const imageCache = new Map();
 async function caseImage(name) {
   if (imageCache.has(name)) return imageCache.get(name);
@@ -936,6 +964,7 @@ async function attachPhoto(file) {
   const url = URL.createObjectURL(file);
   try {
     const full = await shrinkImage(url, 4000, "image/jpeg", 0.92);      // decode once, at working size
+    if (!full) throw new Error(`${file.name || "This image"} can't be read here (HEIC, for one): convert it to JPEG or PNG first.`);
     const redacted = await redactImage(full, `Photo: black out anything sensitive`);
     if (!redacted) return;
     pendingImages.push(await shrinkImage(redacted, IMAGE_MAX, "image/jpeg", 0.9));
@@ -1150,6 +1179,15 @@ async function captureFor(item) {
   }
 }
 
+// Where item `num`'s output starts in the terminal, for captureFromBuffer. Only in the normal
+// buffer: inside tmux, screen or a full-screen program the marker would number the alternate
+// screen's rows, which mean nothing in the scrollback, so the capture comes from the transcript.
+function markOutput(t, num) {
+  t.markers.get(num)?.dispose();
+  if (t.term.buffer.active.type === "normal") t.markers.set(num, t.term.registerMarker(0));
+  else t.markers.delete(num);
+}
+
 function captureFromBuffer(item) {
   const t = S.terms[item.session_id];
   if (!t) return { text: "", error: "Session is no longer open" };
@@ -1240,8 +1278,13 @@ function terminalScreenshot(sid) {
     for (let col = 0; col < term.cols; col++) {
       if (!line.getCell(col, cell) || cell.getWidth() === 0) continue;   // right half of a wide char
       let fg = cellColor(cell, true, fg0), bg = cellColor(cell, false, null);
-      if (cell.isInverse()) [fg, bg] = [bg || bg0, fg];
-      if (cell.isBold() && !cell.isFgDefault() && cell.isFgPalette() && cell.getFgColor() < 8) fg = ANSI16[cell.getFgColor() + 8];
+      // as xterm.js draws it: inverse swaps first, then bold brightens the colour now in front
+      if (cell.isInverse()) {
+        [fg, bg] = [bg || bg0, fg];
+        if (cell.isBold() && !cell.isBgDefault() && cell.isBgPalette() && cell.getBgColor() < 8) fg = ANSI16[cell.getBgColor() + 8];
+      } else if (cell.isBold() && !cell.isFgDefault() && cell.isFgPalette() && cell.getFgColor() < 8) {
+        fg = ANSI16[cell.getFgColor() + 8];
+      }
       const x = pad + col * cw, w = cw * cell.getWidth();
       if (bg) { ctx.fillStyle = bg; ctx.fillRect(x, y, w + 0.5, ch); }
       const chars = cell.getChars();
@@ -1419,9 +1462,18 @@ function keysymFor(ch) {
   return (c >= 0x20 && c <= 0x7E) || (c >= 0xA0 && c <= 0xFF) ? c : 0x01000000 | c;
 }
 
-// Type text into whichever window has focus on the remote desktop (Run adds Enter).
-async function rdpType(r, text, enter) {
+// Type text into whichever window has focus on the remote desktop (Run adds Enter). One text
+// at a time per session: two typed at once would interleave their keystrokes.
+function rdpType(r, text, enter) {
+  r.typing = (r.typing || Promise.resolve()).catch(() => {}).then(() => rdpTypeNow(r, text, enter));
+  return r.typing;
+}
+
+async function rdpTypeNow(r, text, enter) {
   if (r.state !== 3) throw new Error("The remote desktop is not connected.");
+  // keys still held down there (the Ctrl+Shift of Ctrl+Shift+Enter pressed in the remote
+  // desktop) would turn every character into a shortcut, and Enter into Ctrl+Shift+Enter
+  r.keyboard?.reset();
   const chars = [...text.replace(/\r\n?/g, "\n")];
   for (let i = 0; i < chars.length; i++) {
     const k = keysymFor(chars[i]);
@@ -1626,9 +1678,11 @@ function redactImage(dataUrl, title = "Black out anything sensitive, then attach
 // Fit an image within `max` px on its long side. Images already within it are left untouched
 // (every resample softens text); larger ones are halved step by step, then scaled once.
 const IMAGE_MAX = 2048;
+// Resolves null for an image this browser can't decode (HEIC from a phone, TIFF, a broken file).
 function shrinkImage(dataUrl, max = IMAGE_MAX, type = "image/png", quality = 0.9) {
   return new Promise((resolve) => {
     const img = new Image();
+    img.onerror = () => resolve(null);
     img.onload = () => {
       let w = img.naturalWidth, hh = img.naturalHeight;
       if (Math.max(w, hh) <= max && dataUrl.startsWith(`data:${type}`)) return resolve(dataUrl);
@@ -1725,6 +1779,17 @@ function renderQueue() {
   renderChatResults();
   updateProposalCards();
   if (!S.state.busy) renderStatus();
+}
+
+// Past the neighbour shown: with sent and withdrawn items hidden, one step in the whole queue
+// could swap with one of them, and nothing would seem to move.
+function moveItem(num, dir) {
+  const all = S.state.queue, showDone = $("#show-done").checked;
+  const shown = all.filter((i) => showDone || !HIDDEN_WHEN_DONE.includes(i.status));
+  const next = shown[shown.findIndex((i) => i.num === num) + dir];
+  if (!next) return;
+  const delta = all.findIndex((i) => i.num === next.num) - all.findIndex((i) => i.num === num);
+  return api("POST", `/api/queue/${num}/move`, { delta });
 }
 
 function renderChatResults() {
@@ -1870,8 +1935,8 @@ function updateRow(row, item) {
     btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what this command does and what could go wrong"));
     btns.push(btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
       btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"),
-      btn("↑", () => api("POST", `/api/queue/${item.num}/move`, { delta: -1 }), "ghost", "Move up"),
-      btn("↓", () => api("POST", `/api/queue/${item.num}/move`, { delta: 1 }), "ghost", "Move down"));
+      btn("↑", () => moveItem(item.num, -1), "ghost", "Move up"),
+      btn("↓", () => moveItem(item.num, 1), "ghost", "Move down"));
   } else if (item.status === "ran" || item.status === "inserted") {
     btns.push(btn("Preview", () => previewCapture(item)), btn("Reset", () => set("pending"), "ghost", "Back to pending"));
   } else if (item.status === "skipped") {
@@ -1896,11 +1961,17 @@ function flashQueueItem(num) {
   row.classList.add("flash");
 }
 
-async function runItem(num, mode) {
+// `readOnly` (Ctrl+Shift+Enter): run only a plain read-only command, as it is after saving the
+// box, which may have just turned it into something else
+async function runItem(num, mode, { readOnly = false } = {}) {
   const row = S.rows.get(num);
   const cmdEl = row && $(".cmd", row);
   if (cmdEl) await saveCommand(num, cmdEl.value);
   const item = S.state.queue.find((i) => i.num === num);
+  if (readOnly && (item.risk !== "read_only" || item.sensitive?.length || item.review?.level === "stop")) {
+    flashQueueItem(num);
+    return toast(`#${num} is no longer a plain read-only command after your edit: run it with its own Run button.`);
+  }
   const sess = (S.state.sessions || []).find((s) => s.id === item.session_id);
   if (!sess || sess.exited) throw new Error(`Session ${item.session_id} is not open. Pick another target.`);
   const rv = item.review?.status === "done" ? item.review : null;
@@ -1971,8 +2042,7 @@ async function runItem(num, mode) {
   if (!t?.ws) throw new Error("Terminal is not connected.");
   // status first: the server records the transcript position, so the output capture starts here
   await api("POST", `/api/queue/${num}`, { status: mode === "run" ? "ran" : "inserted" });
-  t.markers.get(num)?.dispose();
-  t.markers.set(num, t.term.registerMarker(0));
+  markOutput(t, num);
   t.term.paste(item.command);
   if (mode === "run") termSend(t, { type: "input", data: "\r" });
   t.term.focus();
@@ -1989,10 +2059,21 @@ async function runGroup(group) {
   if (items.some((i) => isWindowSession(i.session_id))) {
     throw new Error("This group includes a window session, whose commands you paste by hand: run its items one at a time.");
   }
-  if (items.some((i) => i.risk !== "read_only")) {
-    const ok = await confirmModal("Run paired probes", h("div", {}, h("p", {}, "This group contains non read-only commands:"),
-      h("pre", { class: "prompt-text" }, items.map((i) => `#${i.num} [${i.risk}] ${i.session_id}: ${i.command}`).join("\n"))), "Run all", "danger");
+  // what Run would confirm for each item: its risk, the reviewer's "don't run", a cut session,
+  // and the first typing into a remote desktop
+  const cautions = items.map((i) => [
+    i.risk !== "read_only" ? i.risk : "",
+    i.review?.status === "done" && i.review.level === "stop" ? "the reviewer said not to run it" : "",
+    i.cuts_session ? `it ${i.cuts_session}` : "",
+    S.rdps[i.session_id] && !S.rdps[i.session_id].typedOk ? "types into the remote desktop's focused window" : "",
+  ].filter(Boolean));
+  if (cautions.some((c) => c.length)) {
+    const danger = items.some((i, k) => i.risk !== "read_only" || cautions[k].includes("the reviewer said not to run it"));
+    const ok = await confirmModal("Run paired probes", h("div", {}, h("p", {}, "Before these run together:"),
+      h("pre", { class: "prompt-text" }, items.map((i, k) => `#${i.num} ${i.session_id}: ${i.command}`
+        + (cautions[k].length ? `\n    ⚠ ${cautions[k].join("; ")}` : "")).join("\n"))), "Run all", danger ? "danger" : "primary");
     if (!ok) return;
+    for (const i of items) if (S.rdps[i.session_id]) S.rdps[i.session_id].typedOk = true;
   }
   for (const i of items) {
     const sess = (S.state.sessions || []).find((s) => s.id === i.session_id);
@@ -2001,14 +2082,15 @@ async function runGroup(group) {
   }
   // record all start positions first, then type everything in one go so the starts line up
   await Promise.all(items.map((i) => api("POST", `/api/queue/${i.num}`, { status: "ran" })));
+  const typing = [];
   for (const i of items) {
-    if (S.rdps[i.session_id]) { rdpType(S.rdps[i.session_id], i.command, true); continue; }
+    if (S.rdps[i.session_id]) { typing.push(rdpType(S.rdps[i.session_id], i.command, true)); continue; }
     const t = S.terms[i.session_id];
-    t.markers.get(i.num)?.dispose();
-    t.markers.set(i.num, t.term.registerMarker(0));
+    markOutput(t, i.num);
     t.term.paste(i.command);
     termSend(t, { type: "input", data: "\r" });
   }
+  await Promise.all(typing);
   toast(`Started ${items.length} probes together.`, "ok", 3000);
 }
 
@@ -2330,7 +2412,7 @@ function runNextReadOnly() {
     && (S.state.sessions || []).some((s) => s.id === i.session_id && !s.exited));
   if (!item) return toast("No pending read-only command with an open session (sensitive ones need a click).");
   flashQueueItem(item.num);
-  guarded(() => runItem(item.num, "run"));
+  guarded(() => runItem(item.num, "run", { readOnly: true }));
 }
 
 function isGlobalShortcut(e) {
@@ -2342,12 +2424,17 @@ function isGlobalShortcut(e) {
 function globalKeys(e) {
   if (!isGlobalShortcut(e) || document.querySelector(".overlay")) return;
   e.preventDefault();
+  if (e.repeat) return;           // a held Ctrl+Shift+Enter would run one command after another
   if (e.altKey) {
     const sessions = S.state?.sessions || [];
     const idx = Number(e.code.slice(5)) - 1;
     if (sessions[idx]) activateTab(sessions[idx].id);
   } else if (e.key === "Enter") runNextReadOnly();
-  else if (e.code === "KeyK") { rdpMaximize(null, false); setChatCollapsed(false); $("#chat-input").focus(); }
+  else if (e.code === "KeyK") {   // as Restore does, fitting the desktop again; then the chat box
+    rdpMaximize(S.rdps[S.activeSid] || null, false);
+    setChatCollapsed(false);
+    $("#chat-input").focus();
+  }
 }
 
 function skipItem(item) {

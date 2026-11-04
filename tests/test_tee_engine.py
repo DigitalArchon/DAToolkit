@@ -46,7 +46,7 @@ async def test_a_tee_model_is_attested_and_its_replies_signature_checked(env):  
     engine._tee_factory = tee_factory()
     engine.new_case("t", "open")
     engine.select_model("Fake", "TEE/glm-5.3")
-    assert engine.attestation["status"] == "checking"
+    assert engine.attestation == {"status": "checking", "model": "TEE/glm-5.3", "kind": "tee"}   # "TEE attesting…"
     att = await settled(engine)
     assert (att["status"], att["kind"], att["level"], att["gpus"]) == ("verified", "tee", "full", 8)
     assert att["summary"].startswith("Intel TDX quote verified") and att["signing_address"]

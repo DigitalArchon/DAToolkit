@@ -865,7 +865,8 @@ class Engine:
         task = self._attest_task if slot == "chat" else self._helper_attest_task
         if task and not task.done():
             task.cancel()
-        self._set_attestation(slot, {"status": "checking", "model": model})
+        self._set_attestation(slot, {"status": "checking", "model": model,
+                                     **({} if is_private_mode(model) else {"kind": "tee"})})   # as its result will be
         task = asyncio.create_task(self._attest(prov, model, slot))
         if slot == "chat":
             self._attest_task = task
