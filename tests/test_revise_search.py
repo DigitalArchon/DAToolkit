@@ -500,3 +500,30 @@ async def test_the_ai_is_told_about_a_placeholder(env):  # noqa: F811
     await wait_turn(engine)
     reply = [m for m in engine.conv if m["role"] == "tool"][-1]["content"]
     assert "#1 contains the placeholder <NAS_IP>" in reply and "revise_queue" in reply
+
+
+async def test_a_search_nobody_answered_is_reported_as_timed_out_not_declined(search, monkeypatch):  # noqa: F811
+    from datoolkit import engine as engine_mod
+    engine, fake, _, fs = search
+    monkeypatch.setattr(engine_mod, "PROMPT_TIMEOUT", 0.1)
+    setup(engine)
+    fake.responses += [search_call(), sse(({"role": "assistant", "content": "I'll go without it."}, "stop"))]
+    engine.send("vpn drops")
+    await wait_turn(engine)
+    reply = next(m["content"] for m in engine.conv if m["role"] == "tool")
+    assert "didn't answer" in reply and "declined" not in reply and fs.calls == []
+    assert engine.chat[-1]["searches"][0]["status"] == "timed_out"
+    assert any("Web search timed out" in e["text"] for e in engine.timeline()["events"])
+
+
+async def test_the_timeline_says_what_a_request_other_than_the_chat_was_for(env):  # noqa: F811
+    engine, fake, _ = env
+    setup(engine)
+    engine.conv = [{"role": "user", "content": "disk full"}, {"role": "assistant", "content": "ok"}]
+
+    async def complete(client, prov, model, messages):
+        return "Summary."
+    engine._complete = complete
+    await engine.ticket_summary()
+    texts = [e["text"] for e in engine.timeline()["events"] if e["kind"] == "sent_to_ai"]
+    assert texts == ["Sent to anthropic/claude-opus-5.5 for a ticket summary"]

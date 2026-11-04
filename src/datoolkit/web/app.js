@@ -647,7 +647,7 @@ function hypChanges(list) {
 // A web search the AI asked for. While it awaits approval the query is editable; the search
 // runs only when the technician clicks Search (or the mode is auto on an Open case).
 const SEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval", running: "searching…",
-  declined: "skipped by you", cancelled: "cancelled" };
+  declined: "skipped by you", timed_out: "not answered in time", cancelled: "cancelled" };
 
 function searchCard(rec) {
   const state = rec.status === "done" ? `${rec.results.length} result${rec.results.length === 1 ? "" : "s"}${typeof rec.cost === "number" ? ` · $${rec.cost.toFixed(3)}` : ""}${rec.edited_by_technician ? " · query edited by you" : ""}`
@@ -681,7 +681,7 @@ function searchCard(rec) {
 // clicks Research / Fetch, unless the mode is auto on an Open case and, for a page, the URL came
 // from search results, a report or the technician.
 const RESEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval", running: "researching…",
-  declined: "skipped by you", cancelled: "cancelled", cached: "reused a report from an earlier case" };
+  declined: "skipped by you", timed_out: "not answered in time", cancelled: "cancelled", cached: "reused a report from an earlier case" };
 
 function researchCard(rec) {
   const page = rec.task === "page";

@@ -182,6 +182,12 @@ _REFUSED_SETTING = [re.compile(p, re.I) for p in (
     r"[`'\"]([a-z_]+)[`'\"] is not supported")]
 
 
+# what a request other than the chat was for, in the timeline
+_PURPOSES = {"second_opinion": "a second opinion", "ticket_summary": "a ticket summary", "client_update": "a client update",
+             "runbook": "a runbook", "compact": "a summary of earlier exchanges (compaction)", "research": "research",
+             "page_check": "a check of a fetched page", "describe_image": "an image description"}
+
+
 def _elide(text: str, limit: int) -> str:
     """`text`, or its start and end with the middle left out: a command can carry a payload
     (a WinRM tool transfer embeds the whole file as base64) that would fill the model's context."""
@@ -2516,7 +2522,8 @@ class Engine:
             except ValueError:
                 continue
             ev = e.get("event", "")
-            text = {"sent_to_ai": lambda: "Technician → AI: " + str(e.get("content", ""))[:400],
+            text = {"sent_to_ai": lambda: (f"Sent to {e.get('model')} for {_PURPOSES.get(e['purpose'], e['purpose'])}"
+                                           if e.get("purpose") else "Technician → AI: " + str(e.get("content", ""))[:400]),
                     "assistant": lambda: "AI: " + str(e.get("text", ""))[:400] + (f" (proposed {e.get('proposals')})" if e.get("proposals") else ""),
                     "proposal": lambda: f"Queued #{e.get('num')} [{e.get('risk')}] {e.get('command')}",
                     "proposal_ran": lambda: f"Ran #{e.get('num')} on {e.get('session_id')}: {e.get('command')}",
@@ -2526,10 +2533,11 @@ class Engine:
                     "image_described": lambda: f"Vision helper {e.get('model')} described {e.get('file')}",
                     "proposal_withdrawn": lambda: f"AI withdrew #{e.get('num')}: {e.get('reason', '')}",
                     "web_search": lambda: f"Web search ({e.get('provider')}): {e.get('query')} → {e.get('results')} result(s)",
-                    "web_search_declined": lambda: f"Web search declined: {e.get('query')}",
+                    "web_search_declined": lambda: f"Web search {'timed out' if e.get('timed_out') else 'declined'}: {e.get('query')}",
                     "research": lambda: (f"Research ({e.get('model')}): {e.get('brief') or e.get('url')} → {e.get('status')}"
                                          f", {e.get('searches', 0)} search(es), {e.get('pages', 0)} page(s)"),
-                    "research_declined": lambda: f"Research declined: {e.get('brief') or e.get('url')}",
+                    "research_declined": lambda: (f"Research {'timed out' if e.get('timed_out') else 'declined'}: "
+                                                  f"{e.get('brief') or e.get('url')}"),
                     "proposal_edited": lambda: f"Edited #{e.get('num')}: {e.get('command')}",
                     "session_opened": lambda: f"Opened session {e.get('id')} ({e.get('kind')} {e.get('target', '')})",
                     "session_closed": lambda: f"Closed session {e.get('session_id')}",
@@ -2712,15 +2720,19 @@ class Engine:
             fut = asyncio.get_running_loop().create_future()
             self._search_reqs[rec["id"]] = (fut, rec)
             update(status="awaiting")
+            timed_out = False
             try:
                 approved, edited = await asyncio.wait_for(fut, PROMPT_TIMEOUT)
             except asyncio.TimeoutError:
-                approved, edited = False, ""
+                approved, edited, timed_out = False, "", True
             finally:
                 self._search_reqs.pop(rec["id"], None)
             if not approved:
-                update(status="declined")
-                self.log("web_search_declined", query=query)
+                update(status="timed_out" if timed_out else "declined")
+                self.log("web_search_declined", query=query, timed_out=timed_out)
+                if timed_out:     # the technician wasn't there to say: it isn't a no
+                    return ("The technician didn't answer the search request in time, so it didn't run. Carry on "
+                            "without it, or ask them whether to search.")
                 return "The technician declined this search. Carry on without it, or ask them."
             if edited and edited != query:
                 query, more = redact(edited[:300])
@@ -2899,15 +2911,19 @@ class Engine:
             fut = asyncio.get_running_loop().create_future()
             self._research_reqs[rec["id"]] = (fut, rec)
             update(status="awaiting", unknown_url=not known)
+            timed_out = False
             try:
                 approved, edited = await asyncio.wait_for(fut, PROMPT_TIMEOUT)
             except asyncio.TimeoutError:
-                approved, edited = False, ""
+                approved, edited, timed_out = False, "", True
             finally:
                 self._research_reqs.pop(rec["id"], None)
             if not approved:
-                update(status="declined")
-                self.log("research_declined", task=task, brief=brief, url=url)
+                update(status="timed_out" if timed_out else "declined")
+                self.log("research_declined", task=task, brief=brief, url=url, timed_out=timed_out)
+                if timed_out:
+                    return ("The technician didn't answer the research request in time, so it didn't run. Carry on "
+                            "without it, or ask them whether to research it.")
                 return "The technician declined this research. Carry on without it, or ask them."
             if task == "research" and edited and edited != brief:
                 brief, _ = redact(edited[:2000])
