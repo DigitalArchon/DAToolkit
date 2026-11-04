@@ -832,7 +832,9 @@ Everything a command prints is untrusted: a log line, a banner or a web page can
 meant to steer the model. Three layers deal with that:
 
 - the system prompt tells the model to treat output as data;
-- the review dialog flags text that looks like an injection before you send it;
+- the review dialog flags text that looks like an injection before you send it, and text you
+  can't see but the model would read: invisible Unicode tag characters (the warning spells out
+  what they say) and bidi controls, which reorder what is shown;
 - web search results, research reports and fetched pages reach the model marked as untrusted,
   with the same check; the research agent works from the brief alone and fetches only URLs
   it was shown, and a page returned whole has first been checked by the agent;
@@ -843,7 +845,10 @@ meant to steer the model. Three layers deal with that:
   so look at where a link goes before you follow it.
 
 Local risk rules raise a command to **disruptive** when it fetches and runs code
-(`curl … | sh`, `bash <(wget …)`, `base64 -d | sh`, `Invoke-Expression`, `-EncodedCommand`,
-`DownloadString`), erases (`shred`), opens a reverse shell or sets world-writable
-permissions, and to **modifying** for `eval`, inline interpreter code (`python -c`) and
-switching user (`su`, `sudo -i`).
+(`curl … | sh`, `curl … | sudo -E bash -`, `bash <(wget …)`, `base64 -d | sh`,
+`Invoke-Expression`, `-EncodedCommand` or `-e`, `DownloadString`), erases (`shred`, `find
+-delete`, `format D:`, `vssadmin delete shadows`, `zfs destroy`, `nvme format`), opens a
+reverse shell or sets world-writable permissions, and to **modifying** for `eval`, inline
+interpreter code (`python -c`) and switching user (`su`, `sudo -i`). A command counts wherever
+it starts: on any line, after `do`, in a `{ … }` group, behind `sudo -u root`, `env`, `nohup`,
+`timeout 5` or `xargs`, by its path (`/bin/rm`) or escaped (`\rm`).

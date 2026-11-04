@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import unicodedata
 
-# invisible, but not "Cf" or "Cc": Hangul fillers render blank
-_BLANK_LETTERS = {"\u115f", "\u1160", "\u3164", "\uffa0"}
+# invisible, but not "Cf" or "Cc": Hangul fillers and the Braille blank render blank; the
+# combining grapheme joiner, Khmer's inherent vowels and Mongolian's variation selectors are
+# default-ignorable marks
+_BLANK_LETTERS = {"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800",
+                  "\u034f", "\u17b4", "\u17b5", "\u180b", "\u180c", "\u180d", "\u180f"}
 
 
 def _hidden(ch: str) -> bool:

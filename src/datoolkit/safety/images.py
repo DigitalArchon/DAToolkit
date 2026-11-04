@@ -41,6 +41,9 @@ def clean(raw: bytes) -> Cleaned:
             im.seek(0)                                   # first frame only (APNG)
             if max(im.size) > MAX_SIDE:
                 raise ValueError(f"image is {im.size[0]}x{im.size[1]}, over {MAX_SIDE}px")
+            # Pillow itself refuses only past twice MAX_IMAGE_PIXELS (it warns in between)
+            if im.size[0] * im.size[1] > MAX_PIXELS:
+                raise ValueError(f"image is {im.size[0]}x{im.size[1]}, over {MAX_PIXELS // 1_000_000} megapixels")
             alpha = fmt == "PNG" and (im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info)
             pixels = im.convert("RGBA" if alpha else "RGB")
     except (OSError, Image.DecompressionBombError, SyntaxError) as e:

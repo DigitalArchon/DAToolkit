@@ -29,10 +29,21 @@ PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# Text the technician can't see but the model reads: Unicode tag characters spell ASCII
+# invisibly (a whole hidden instruction after "Build OK"), bidi controls reorder what is shown.
+_TAGS = re.compile("[\U000E0000-\U000E007F]+")
+_BIDI = re.compile("[\u202A-\u202E\u2066-\u2069]")
+
+
 def suspicious(text: str) -> list[str]:
     """Return a de-duplicated list of reasons the text looks like a prompt injection."""
     out: list[str] = []
+    hidden = "".join(chr(ord(c) - 0xE0000) for m in _TAGS.finditer(text) for c in m.group(0) if 0xE0020 <= ord(c) <= 0xE007E)
+    if hidden:
+        out.append(f"carries invisible text (Unicode tag characters) that reads: {hidden[:120]!r}")
+    if _BIDI.search(text):
+        out.append("contains bidi control characters, which reorder what you see")
     for pat, why in PATTERNS:
-        if why not in out and pat.search(text):
+        if why not in out and (pat.search(text) or (hidden and pat.search(hidden))):
             out.append(why)
     return out

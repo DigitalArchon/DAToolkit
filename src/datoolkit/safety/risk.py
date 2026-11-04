@@ -13,14 +13,29 @@ LEVELS = ("read_only", "modifying", "disruptive")
 
 _I = re.IGNORECASE
 
-# Position where a new command starts: line start, after a separator, or after sudo.
-CMD = r"(?:^|[;&|(]\s*|\bsudo\s+(?:-\S+\s+)*)"
+# Position where a new command starts: a line's start; after a separator, `{`, `$(` or a backtick;
+# after an opening quote (only ever seen where the command hands the quoted text to a shell,
+# _REPARSES: elsewhere quoted text is blanked first); after `do`, `then` or `else`; after
+# `ssh [options] host`, or find's -exec. Then any prefixes that run the next word as the
+# command (sudo and its options, env, nohup, timeout 5, xargs...), and the command may be
+# named by its path (/bin/rm) or escaped (\rm).
+_SSH_HOST = r"\bssh\s+(?:-[46AaCfGgKkMNnqsTtVvXxYy]+\s+|-[BbcDEeFIiJLlmOoPpQRSWw]\s*\S+\s+)*[^\s-]\S*\s+"
+_PREFIX = (r"(?:(?:sudo|doas)\s+(?:-\S+(?:\s+(?!-)\S+)?\s+)*|(?:nohup|exec|command|builtin|time|nice|ionice|stdbuf)\s+(?:-\S+\s+)*"
+           r"|env\s+(?:-\S+\s+|\w+=\S*\s+)*|timeout\s+(?:-\S+\s+)*\S+\s+|xargs\s+(?:-\S+\s+)*)")
+CMD = (r"(?:^|[;&|(`{]\s*|[\"'](?=\S)|\$\(\s*|\b(?:do|then|else)\s+|" + _SSH_HOST + r"|\s-(?:exec|execdir|ok|okdir)\s+"
+       r"|\b(?:sudo|doas)\s+(?:-\S+(?:\s+(?!-)\S+)?\s+)*)" + _PREFIX + r"*(?:\\|(?:[^\s/]*+/)*+)")
 
 # Each entry: (pattern, reason). Patterns are matched against the whole command text.
 DISRUPTIVE: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\brm\s+(-[a-z]*[rf][a-z]*\s+)+", _I), "recursive/forced delete"),
-    (re.compile(r"\b(mkfs(\.\w+)?|wipefs|fdisk|sfdisk|parted|sgdisk|gdisk|blkdiscard)\b"), "disk/partition tool"),
-    (re.compile(r"\bdd\b(?=.*\bof=)(?!.*\bof=/dev/null\b)", _I), "dd writing to a target"),
+    # the flags may end the line (`xargs rm -f`)
+    (re.compile(r"\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rf][a-z]*|--recursive|--force)\b", _I), "recursive/forced delete"),
+    (re.compile(r"\b(mkfs(\.\w+)?|mke2fs|mkswap|wipefs|fdisk|sfdisk|parted|sgdisk|gdisk|blkdiscard|lvremove|vgremove|pvremove)\b"),
+     "disk/partition tool"),
+    (re.compile(r"\b(zpool|zfs)\s+destroy\b|\bmdadm\b.*--zero-superblock\b|\bcryptsetup\s+(\S+\s+)*(luksErase|erase|luksKillSlot)\b"
+                r"|\bnvme\s+(format|sanitize)\b|\bhdparm\b.*--security-erase", _I), "erases a disk or volume"),
+    # each dd on the line by itself: a later `of=/dev/null` excuses only its own dd
+    (re.compile(r"\bdd\b[^;&|\n]*\bof=(?!/dev/null\b)", _I), "dd writing to a target"),
+    (re.compile(r"\bfind\b[^;&|\n]*\s-delete\b"), "find -delete"),
     (re.compile(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)"), "write to block device"),
     (re.compile(CMD + r"(shutdown|reboot|poweroff|halt)\b", re.M), "shutdown/reboot"),
     (re.compile(CMD + r"(telinit|init)\s+[06]\b", re.M), "runlevel change"),
@@ -39,21 +54,33 @@ DISRUPTIVE: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bdocker\s+(system\s+prune|volume\s+(rm|prune)|rm\s+-f)\b"), "docker destructive"),
     (re.compile(r"\bkubectl\s+delete\b"), "kubernetes delete"),
     # code fetched from the network or decoded at runtime and executed: unreviewable
-    (re.compile(r"\b(curl|wget|fetch|Invoke-WebRequest|iwr)\b[^|;]*\|\s*(sudo\s+)?(ba|z|k|da|)sh\b", _I), "pipe to shell"),
+    (re.compile(r"\b(curl|wget|fetch|Invoke-WebRequest|iwr)\b[^|;]*\|\s*" + _PREFIX + r"*(\S*/)?(ba|z|k|da|)sh\b", _I),
+     "pipe to shell"),
     (re.compile(r"\b(ba|z|k|da|)sh\s+(-c\s+)?[\"']?\s*\$\((curl|wget)\b", _I), "shell runs downloaded script"),
     (re.compile(r"\b(ba|z|k|da|)sh\s+<\s*\((curl|wget)\b", _I), "shell runs downloaded script"),
-    (re.compile(r"\bbase64\s+(-d|--decode)\b[^|;]*\|\s*(sudo\s+)?(ba|z|k|da|)sh\b", _I), "decoded payload piped to shell"),
+    (re.compile(r"\bbase64\s+(-d|--decode)\b[^|;]*\|\s*" + _PREFIX + r"*(\S*/)?(ba|z|k|da|)sh\b", _I),
+     "decoded payload piped to shell"),
     (re.compile(r"\bshred\b"), "secure erase"),
-    (re.compile(r":\(\)\s*\{\s*:\s*\|\s*:"), "fork bomb"),
+    # a function piping itself to itself: `:(){ :|:& };:`, `bomb(){ bomb|bomb& }`. The name is
+    # taken whole (possessive, from a word's start): backtracking into a long word (a tool
+    # transfer's base64) at every position took minutes
+    (re.compile(r"(?<!\w)(\w++|:)\s*\(\)\s*\{[^}]*?\1\s*\|\s*\1"), "fork bomb"),
     (re.compile(r"\bhistory\s+-c\b"), "history clear"),
     (re.compile(r"\b(nc|ncat|netcat)\b.*\s-e\s", _I), "reverse shell"),
     (re.compile(r"\bchmod\s+(-R\s+)?[0-7]*777\b"), "world-writable permissions"),
     # PowerShell / Windows
     (re.compile(r"\b(Invoke-Expression|iex)\b", _I), "Invoke-Expression"),
     (re.compile(r"(?<!\S)-(EncodedCommand|enc|ec)\s+\S+", _I), "encoded PowerShell"),
+    # -e, -en, -enc... are -EncodedCommand too (not -ExecutionPolicy: -ex...)
+    (re.compile(r"\b(powershell|pwsh)(\.exe)?\b.*\s-(e|ec|en\w*)\s+[A-Za-z0-9+/=]{8,}", _I), "encoded PowerShell"),
     (re.compile(r"\b(Invoke-WebRequest|iwr|curl|wget|Invoke-RestMethod|irm)\b.*\|\s*(iex|Invoke-Expression)\b", _I), "download and execute"),
     (re.compile(r"\bDownloadString\s*\(", _I), "download and execute"),
     (re.compile(r"\bRemove-Item\b.*-Recurse\b", _I), "recursive delete"),
+    (re.compile(CMD + r"(ri|del|erase|rd|rmdir)\b[^;|\n]*\s-r(ec(urse)?)?\b|" + CMD + r"(del|erase|rd|rmdir)\s+(?:/\S+\s+)*/s\b",
+                _I | re.M), "recursive delete"),
+    (re.compile(CMD + r"format(\.com)?\s+[a-z]:", _I | re.M), "disk format"),
+    (re.compile(r"\bvssadmin(\.exe)?\s+(delete|resize)\s+shadow\w*|\bwmic(\.exe)?\s+shadowcopy\s+delete\b"
+                r"|\bwbadmin(\.exe)?\s+delete\s+(catalog|systemstatebackup|backup)\b", _I), "deletes backups or shadow copies"),
     (re.compile(r"\b(Format-Volume|Clear-Disk|Initialize-Disk|Remove-Partition)\b", _I), "disk operation"),
     (re.compile(r"\b(Stop-Computer|Restart-Computer)\b", _I), "shutdown/reboot"),
     (re.compile(r"\b(Stop-Service|Restart-Service|Stop-Process)\b", _I), "service/process stop"),
@@ -62,7 +89,7 @@ DISRUPTIVE: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(Clear-EventLog|wevtutil\s+cl)\b", _I), "event log clear"),
     (re.compile(r"\bnet\s+stop\b", _I), "service stop"),
     (re.compile(r"\b(bcdedit|diskpart)\b", _I), "boot/disk configuration"),
-    (re.compile(r"\breg\s+delete\b", _I), "registry delete"),
+    (re.compile(r"\breg(\.exe)?\s+delete\b", _I), "registry delete"),
     (re.compile(r"\btaskkill\b", _I), "process kill"),
     # Network devices (Cisco IOS / NX-OS / Junos / MikroTik / FortiOS)
     (re.compile(r"^\s*reload\b", _I | re.M), "device reload"),
@@ -81,14 +108,16 @@ MODIFYING: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bsed\s+(-[a-z]*\s+)*-i"), "in-place file edit"),
     (re.compile(r"\btee\b"), "file write"),
     (re.compile(r"(?<![0-9&>=-])>{1,2}(?!&)\s*(?!/dev/null\b)[^\s|&;]"), "output redirect to file"),
-    (re.compile(CMD + r"(mv|cp|rm|rmdir|chmod|chown|chgrp|mkdir|touch|ln|install|truncate)\b"), "filesystem change"),
+    (re.compile(CMD + r"(mv|cp|rm|rmdir|chmod|chown|chgrp|mkdir|touch|ln|install|truncate)\b", re.M), "filesystem change"),
     (re.compile(r"\b(useradd|usermod|groupadd|groupmod|chpasswd|visudo)\b"), "account change"),
     # passwd is also a file (/etc/passwd) and a getent database, so only as the command itself
-    (re.compile(CMD + r"(\S*/)?passwd\b(?![.-])", re.M), "account change"),
+    (re.compile(CMD + r"passwd\b(?![.-])", re.M), "account change"),       # CMD takes a path (/usr/bin/passwd)
     (re.compile(r"\bgit\s+(commit|push|reset|checkout|merge|rebase|pull|clean)\b"), "repository change"),
     (re.compile(r"\bdocker\s+(rm|rmi|stop|restart|kill|run|start|pull|compose\s+(up|down|restart))\b"), "container change"),
     (re.compile(r"\bkubectl\s+(apply|create|scale|rollout|patch|edit|label|annotate|cordon|drain)\b"), "kubernetes change"),
-    (re.compile(r"\b(ip\s+(addr|route|link)\s+(add|del|change|replace|set|flush)|ifdown|ifup|nmcli\s+(con|connection|dev|device)\s+(up|down|modify|delete|add))\b"), "network change"),
+    (re.compile(r"\b(ip\s+(addr|route|link)\s+(add|del|change|replace|set|flush)|ifdown|ifup"
+                r"|nmcli\s+(con|connection|dev|device)\s+(up|down|modify|delete|add|disconnect|reapply)|nmcli\s+(networking|radio\s+\S+)\s+(on|off)"
+                r"|ifconfig\s+\S+\s+(down|up)|route\s+(add|del|delete|change|flush)|(dhclient|dhcpcd)\s+(-\S+\s+)*-[rxk])\b"), "network change"),
     # firewall tools, except when they only list rules
     (re.compile(r"\bip6?tables\b(?!-save\b)(?![^|;&\n]*\s(-[a-zA-Z]*[LS][a-zA-Z]*|--list(-rules)?)\b)"
                 r"|\bnft\b(?!\s+(-\S+\s+)*list\b)|\bufw\b(?!\s+(status|show|app\s+list)\b)"
@@ -130,7 +159,11 @@ _SSH_CUTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bservice\s+(ssh|sshd|networking|network|NetworkManager)\s+(stop|restart)\b"), "stops or restarts the SSH/network service you are connected through"),
     (re.compile(r"\b(pkill|killall)\s+(-\S+\s+)*(sshd?|ssh-agent)\b"), "kills sshd"),
     (re.compile(r"\bip\s+link\s+set\s+(dev\s+)?\S+\s+down\b"), "brings an interface down"),
-    (re.compile(r"\b(ifdown|nmcli\s+(dev|device|con|connection)\s+down)\b"), "brings an interface down"),
+    (re.compile(r"\b(ifdown|nmcli\s+(dev|device|con|connection)\s+down|nmcli\s+(dev|device)\s+disconnect|ifconfig\s+\S+\s+down)\b"),
+     "brings an interface down"),
+    (re.compile(r"\bnmcli\s+networking\s+off\b"), "turns networking off"),
+    (re.compile(r"\broute\s+(del|delete)\s+(default|0\.0\.0\.0)\b"), "removes the default route"),
+    (re.compile(r"\b(dhclient|dhcpcd)\s+(-\S+\s+)*-[rxk]\b"), "releases the DHCP lease"),
     (re.compile(r"\bip\s+(addr|address|route)\s+(flush|del|delete)\b"), "removes addresses or routes"),
     (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-P\s+INPUT\s+DROP\b"), "default-drops inbound traffic"),
     (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-[AI]\s+INPUT\b(?!.*--dport\s+(?!22\b))(?=.*-j\s+(DROP|REJECT))"), "drops inbound traffic, possibly including SSH"),
@@ -159,7 +192,8 @@ _WINRM_CUTS: list[tuple[re.Pattern, str]] = [
 ]
 _NETDEV_CUTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^\s*reload\b", _I | re.M), "reloads the device"),
-    (re.compile(r"\b(no\s+)?(ip\s+ssh|line\s+vty|transport\s+input)\b", _I), "changes vty/SSH access"),
+    (re.compile(r"^(?!\s*(do\s+)?(show|sh)\b)[^\n]*\b(no\s+)?(ip\s+ssh|line\s+vty|transport\s+input)\b", _I | re.M),
+     "changes vty/SSH access"),
     (re.compile(r"^\s*shutdown\s*$", _I | re.M), "shuts the interface you may be connected through"),
     (re.compile(r"\b(no\s+ip\s+address|no\s+ip\s+route|no\s+interface)\b", _I), "removes addressing or routing"),
     (re.compile(r"\b(write\s+erase|erase\s+startup)", _I), "erases the configuration"),
