@@ -78,6 +78,26 @@ def search(query: str, root: Path | None = None, limit: int = 5, exclude_id: str
     return hits[:limit]
 
 
+def reload_hits(saved: list, client: str, max_sensitivity: str, root: Path | None = None) -> list[dict]:
+    """The hits a case found (as saved with it: id, score, matched terms) in search()'s form,
+    for the case opened again: each read afresh, and kept only while it still exists, is the
+    same client's and no more sensitive than `max_sensitivity`, as search() would have it."""
+    base = root or data_dir() / "cases"
+    allowed = SENSITIVITIES.index(max_sensitivity) if max_sensitivity in SENSITIVITIES else -1
+    cases = {c["id"]: c for c in Case.list_all(base)}
+    hits = []
+    for s in saved if isinstance(saved, list) else []:
+        c = cases.get(str(s.get("id", ""))) if isinstance(s, dict) else None
+        if (not c or c.get("client", "") != client or c["sensitivity"] not in SENSITIVITIES
+                or SENSITIVITIES.index(c["sensitivity"]) > allowed):
+            continue
+        _, runbook = _case_text(base / c["id"])
+        matched = s.get("matched") if isinstance(s.get("matched"), list) else []
+        hits.append({**c, "score": s.get("score", 0), "matched": [str(m) for m in matched][:8], "has_runbook": bool(runbook),
+                     "runbook": runbook[:4000]})
+    return hits
+
+
 def runbook_context(hits: list[dict], max_chars: int = 6000) -> str:
     """Runbooks from search hits, for the system prompt."""
     out, used = [], 0

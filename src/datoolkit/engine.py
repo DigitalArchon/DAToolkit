@@ -286,6 +286,7 @@ class Engine:
         self.hypotheses: list[dict] = []             # the model's board, with technician marks
         self._runbooks: str = ""                     # runbook text from similar past cases (system prompt)
         self._similar: list[dict] = []
+        self._similar_for = ""                       # a message to look for them with on the next turn (open_case)
         self._attest_task: asyncio.Task | None = None
         self._turn: asyncio.Task | None = None
         self._prompts: dict[str, tuple[asyncio.Future, dict]] = {}
@@ -1207,7 +1208,7 @@ class Engine:
         self.queue = Queue()
         self.conv, self.chat = [], []
         self.last_usage = None
-        self.hypotheses, self._runbooks, self._similar = [], "", []
+        self.hypotheses, self._runbooks, self._similar, self._similar_for = [], "", [], ""
         self.compactions, self._compact_pending, self._overflowed = [], None, False
         self._attach_case()
         self._persist()
@@ -1368,7 +1369,14 @@ class Engine:
         self.last_usage = state.get("last_usage") if isinstance(state.get("last_usage"), dict) else None
         self.hypotheses = list(state.get("hypotheses", []))
         self.compactions, self._compact_pending, self._overflowed = list(state.get("compactions", [])), None, False
-        self._runbooks, self._similar = "", []
+        # the runbooks it had, read again and checked against its client and sensitivity as they are now
+        saved, self._similar_for = state.get("similar"), ""
+        self._similar = (search.reload_hits(saved or [], case.client, case.sensitivity)
+                         if case.client and case.history else [])
+        self._runbooks = search.runbook_context(self._similar)
+        if saved is None and case.client and case.history and self.conv:
+            # saved before cases kept them: looked up again, with its first message, on the next turn
+            self._similar_for = next((e.get("text", "") for e in self.chat if e.get("kind") == "user" and e.get("text")), "")
         self.log("case_resumed", messages=len(self.chat), queue=len(self.queue.items))
         self._attach_case()
         if self.chat:
@@ -1432,7 +1440,8 @@ class Engine:
             return
         try:
             self.case.save_state(self.conv, self.chat, self.queue.to_list(), self.hypotheses, self.compactions,
-                                 self.last_usage)
+                                 self.last_usage, [{"id": h["id"], "score": h.get("score", 0), "matched": h.get("matched", [])}
+                                                   for h in self._similar])
         except OSError as e:
             self.emit("toast", level="error", text=f"Could not save case state: {e}")
 
@@ -3037,8 +3046,10 @@ class Engine:
         if images and self.vision_status()["mode"] == "none":
             raise UserError(self.vision_status()["why"] + " Images can't be sent.")
         saved_images = self._save_images(self.clean_images(images))
-        # the first message of a case looks for similar past cases (off the loop, in the turn)
-        similar_for = message if not self.conv and message.strip() else ""
+        # the first message of a case looks for similar past cases (off the loop, in the turn), and so
+        # does the next one of a case resumed from before its runbooks were kept (_similar_for)
+        similar_for = message if not self.conv and message.strip() else self._similar_for
+        self._similar_for = ""
 
         parts, shown = [], []
         if via == "phone":

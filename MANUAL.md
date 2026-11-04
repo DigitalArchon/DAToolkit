@@ -378,7 +378,9 @@ host, not the case: deleting a case leaves them. They live under
   Open and Confidential ones, an Open case only Open ones), those cases are noted in the chat
   and their runbooks go into the AI's context as leads. A case with no client, or with the box
   unticked, never gets another case's runbook, and nothing from one client's cases reaches
-  another client's. Changing the client or unticking the box drops them again. **Context ▾ →
+  another client's. Changing the client or unticking the box drops them again. A case opened
+  again keeps its runbooks (read afresh, and only those still of its client and sensitivity).
+  **Context ▾ →
   Similar past cases…** is your own search across every case, on this machine only, and
   **Context ▾ → Open case folder** opens the case's files.
 

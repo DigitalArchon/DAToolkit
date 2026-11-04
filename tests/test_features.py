@@ -478,6 +478,42 @@ async def _acme_case_with_runbook_hit(engine, fake):
     return source
 
 
+async def test_a_resumed_case_keeps_its_runbooks(env):  # noqa: F811
+    engine, fake, _ = env
+    await _acme_case_with_runbook_hit(engine, fake)
+    resumed = engine.case.id
+    engine.new_case("something else", "open")
+    assert "MTU 1500" not in engine._system_prompt()
+    engine.open_case(resumed)
+    assert "MTU 1500" in engine._system_prompt() and engine.snapshot()["similar_cases"]
+
+
+async def test_a_resumed_case_from_before_looks_its_runbooks_up_again(env):  # noqa: F811
+    engine, fake, _ = env
+    await _acme_case_with_runbook_hit(engine, fake)
+    resumed = engine.case
+    state = json.loads((resumed.dir / "state.json").read_text())
+    del state["similar"]                                   # as a case saved before they were kept
+    (resumed.dir / "state.json").write_text(json.dumps(state))
+    engine.new_case("something else", "open")
+    engine.open_case(resumed.id)
+    assert "MTU 1500" not in engine._system_prompt()
+    fake.responses.append(sse(({"role": "assistant", "content": "ok"}, "stop")))
+    engine.send("still slow")
+    await wait_turn(engine)
+    assert "MTU 1500" in fake.requests[-1]["messages"][0]["content"]
+
+
+async def test_a_resumed_case_drops_a_runbook_whose_case_moved_away(env):  # noqa: F811
+    engine, fake, _ = env
+    source = await _acme_case_with_runbook_hit(engine, fake)
+    resumed = engine.case.id
+    engine.new_case("something else", "open")
+    engine.edit_case(source, "Acme NAS slow SMB transfers", client="Beta")    # while the case was closed
+    engine.open_case(resumed)
+    assert "MTU 1500" not in engine._system_prompt() and not engine._similar
+
+
 @pytest.mark.parametrize("change", [{"client": "Beta"}, {"sensitivity": "sovereign"}])
 async def test_a_runbook_leaves_the_context_when_its_case_moves_out_of_reach(env, change):  # noqa: F811
     engine, fake, _ = env

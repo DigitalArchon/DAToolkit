@@ -143,11 +143,12 @@ class Case:
 
     def save_state(self, conv: list[dict], chat: list[dict], queue: list[dict],
                    hypotheses: list[dict] | None = None, compactions: list[dict] | None = None,
-                   last_usage: dict | None = None) -> None:
-        """Persist everything needed to resume the case later."""
+                   last_usage: dict | None = None, similar: list[dict] | None = None) -> None:
+        """Persist everything needed to resume the case later. `similar`: the past cases whose
+        runbooks are in its AI's context (id, score, matched terms; search.reload_hits)."""
         _write_json(self.dir / "state.json", {"version": 2, "conv": conv, "chat": chat, "queue": queue,
                                               "hypotheses": hypotheses or [], "compactions": compactions or [],
-                                              "last_usage": last_usage})
+                                              "last_usage": last_usage, "similar": similar or []})
 
     def load_state(self) -> dict | None:
         path = self.dir / "state.json"
