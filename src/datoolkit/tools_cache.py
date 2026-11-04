@@ -18,6 +18,7 @@ from pathlib import Path
 import tomli_w
 
 from .config import Host, data_dir, private_dir
+from .sessions.ssh import ssh_options
 
 
 def cache_dir() -> Path:
@@ -127,13 +128,15 @@ def transfer_command(tool: Tool, host: Host | None, kind: str, root: Path | None
     if sha256_of(path) != tool.sha256:
         raise ValueError(f"{tool.file} no longer matches its recorded hash; refusing to transfer")
     if kind == "ssh" and host:
-        target = f"{host.user}@{host.host}" if host.user else host.host
-        port = ["-P", str(host.port)] if host.port else []
-        jump = ["-J", host.jump] if host.jump else []
-        argv = ["scp"] + port + jump + [str(path), f"{target}:~/{tool.file}"]
-        check = f"ssh {shlex.quote(target)} sha256sum ~/{shlex.quote(tool.file)}"
+        # with the session's own key, login and options (scp alone may not reach the host at all)
+        address = f"[{host.host}]" if ":" in host.host else host.host
+        target = f"{host.user}@{address}" if host.user else address
+        argv = ["scp"] + (["-P", str(host.port)] if host.port else []) + ssh_options(host) + [str(path), f"{target}:~/{tool.file}"]
+        # run in the SSH session itself, after the copy: its output is the hash to compare
+        check = (f"sha256sum ~/{shlex.quote(tool.file)}" if tool.os != "windows" else
+                 f"powershell -NoProfile -Command \"(Get-FileHash ~/{tool.file} -Algorithm SHA256).Hash.ToLower()\"")
         return {"session": "local", "command": " ".join(shlex.quote(a) for a in argv),
-                "purpose": f"Copy {tool.name} to {target} (then verify: {check})", "risk": "modifying",
+                "purpose": f"Copy {tool.name} to {target}", "risk": "modifying",
                 "verify": check, "expected_sha256": tool.sha256}
     if kind == "winrm":
         if path.stat().st_size > 4 * 1024 * 1024:

@@ -362,6 +362,12 @@ def test_tool_cache_add_verify_transfer(tmp_path):
     assert v[0]["status"] == "ok"
     ssh = tools_cache.transfer_command(t, Host("web01", "ssh", "web01.lan", user="bob", port=2222, jump="bastion"), "ssh", root)
     assert ssh["session"] == "local" and ssh["command"].startswith("scp -P 2222 -J bastion ") and "bob@web01.lan:~/WizTree64.exe" in ssh["command"]
+    # the session's own key and options, which scp needs as much as ssh does; an IPv6 address bracketed
+    keyed = Host("old", "ssh", "fd00::7", user="bob", auth="key", key_file="~/.ssh/client_a",
+                 ssh_options=["KexAlgorithms=+diffie-hellman-group14-sha1"])
+    cmd = tools_cache.transfer_command(t, keyed, "ssh", root)["command"]
+    assert "-i '~/.ssh/client_a' -o IdentitiesOnly=yes" in cmd and "-o KexAlgorithms=+diffie-hellman-group14-sha1" in cmd
+    assert "'bob@[fd00::7]:~/WizTree64.exe'" in cmd
     win = tools_cache.transfer_command(t, Host("dc1", "winrm", "dc1.lan"), "winrm", root)
     assert win["session"] == "remote" and "FromBase64String" in win["command"] and t.sha256 in win["command"]
     (root / "WizTree64.exe").write_bytes(b"tampered")
@@ -391,6 +397,15 @@ async def test_engine_transfer_tool_needs_local_session(env, tmp_path, monkeypat
     engine.sessions.sessions[sid].kind = "winrm"
     r = engine.transfer_tool("T", sid)
     assert len(r["nums"]) == 2 and engine.queue.items[-1].command == "./t.bin"
+    # over SSH: copy from a local shell, check the hash in the SSH session, then run it
+    engine.open_session("local")
+    remote = engine.sessions.roster()[0]["id"]
+    engine.sessions.sessions[remote].kind, engine.sessions.sessions[remote].host_name = "ssh", "web01"
+    r = engine.transfer_tool("T", remote)
+    copy, check, run = (engine.queue.get(n) for n in r["nums"])
+    assert copy.command.startswith("scp ") and copy.session_id != remote
+    assert (check.session_id, check.command, check.risk) == (remote, "sha256sum ~/t.bin", "read_only")
+    assert r["expected_sha256"] in check.purpose and run.command == "./t.bin"
 
 
 # ---------------------------------------------------------------- search & runbooks

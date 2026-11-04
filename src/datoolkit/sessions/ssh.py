@@ -11,6 +11,16 @@ def ssh_argv(host: Host) -> list[str]:
         argv += ["-p", str(host.port)]
     if host.user:
         argv += ["-l", host.user]
+    argv += ssh_options(host)
+    argv.append(host.host)
+    return argv
+
+
+def ssh_options(host: Host) -> list[str]:
+    """What the session's ssh gets besides its port and user, for the other OpenSSH tools to the
+    same host (scp takes the port as -P and the user in its target): the key, how to log in,
+    the jump host and the host's own -o options."""
+    argv = []
     if host.auth == "key" and host.key_file:
         argv += ["-i", host.key_file, "-o", "IdentitiesOnly=yes"]
     elif host.auth == "password":
@@ -22,7 +32,6 @@ def ssh_argv(host: Host) -> list[str]:
         opt = opt.strip()
         if opt:
             argv += ["-o", opt]
-    argv.append(host.host)
     return argv
 
 

@@ -2183,6 +2183,9 @@ class Engine:
                 raise UserError("scp runs from a local session: open a local shell first.")
             target_sid = local.id
         items = [{"session_id": target_sid, "command": spec["command"], "purpose": spec["purpose"], "risk": spec["risk"]}]
+        if spec.get("verify"):           # scp checks nothing: the copy's hash, before it can run
+            items.append({"session_id": session_id, "command": spec["verify"], "risk": "read_only",
+                          "purpose": f"Check {tool.name} arrived intact: its SHA-256 must be {tool.sha256}"})
         if tool.run:
             items.append({"session_id": session_id, "command": tool.run, "purpose": f"Run {tool.name} (from the tool cache)",
                           "risk": "modifying"})

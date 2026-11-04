@@ -446,8 +446,10 @@ phone checks again); a new one is also made when it expires, after about two yea
 
 **Settings → Tool cache** holds vetted portable CLI tools (WizTree, nmap, Sysinternals, …)
 with a SHA-256 each. **Send to session** queues the transfer: `scp` from a local shell for
-SSH hosts, or an inline PowerShell write (under 4 MB) for WinRM sessions, followed by the
-tool's run command. The hash is checked on arrival and nothing runs without your click.
+SSH hosts (with the host's key, jump host and options, as its session uses them), or an inline
+PowerShell write (under 4 MB) for WinRM sessions, followed by the tool's run command. The hash
+is checked on arrival (for SSH, by a read-only item between the copy and the run, which prints
+the copy's SHA-256 next to the one it must have) and nothing runs without your click.
 
 ### Training provider
 
