@@ -154,7 +154,16 @@ class Case:
             f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
     def transcript_path(self, session_id: str) -> Path:
-        return self.dir / f"term-{_slug(session_id)}.log"
+        """Where a session's terminal transcript is written. Named by the whole id: cut to 40
+        characters, as names once were, two sessions to a host with a long name (web01-..., and
+        its -2) shared one file, and each one's output read as the other's."""
+        return self.dir / f"term-{re.sub(r'[^A-Za-z0-9._-]+', '-', session_id).strip('-') or 'session'}.log"
+
+    def transcript_file(self, session_id: str) -> Path:
+        """The transcript to read: transcript_path, or the cut name a case from before has."""
+        path = self.transcript_path(session_id)
+        old = self.dir / f"term-{_slug(session_id)}.log"
+        return old if not path.exists() and old.exists() else path
 
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "sensitivity": self.sensitivity,

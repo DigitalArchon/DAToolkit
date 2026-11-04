@@ -28,8 +28,13 @@ _ANSI = re.compile(
     r"|\x1b\[[0-?]*[ -/]*[@-~]"            # CSI
     r"|\x1b[PX^_][^\x1b]*\x1b\\"           # DCS/SOS/PM/APC
     r"|\x1b[()][A-Za-z0-9]"                # charset
-    r"|\x1b[@-Z\\-_=>]"                    # other 2-byte
+    # other 2-byte: ESC 7/8 (save/restore cursor), ESC = >, ESC c, ESC M... Not the introducers
+    # above (ESC [ ] P X ^ _): taken as 2-byte, the start of an OSC title a read cut off went
+    # unnoticed, and the title text landed in the transcript
+    r"|\x1b[0-OQ-WYZ\\`-~]"
 )
+# an OSC, DCS, SOS, PM or APC string not yet ended by BEL or ESC \ (its end in the next read)
+_OPEN_STRING = re.compile(r"\x1b[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*+\Z")
 
 
 class TranscriptWriter:
@@ -51,9 +56,13 @@ class TranscriptWriter:
         if self._file is None:
             return
         text = self._pending + self._decoder.decode(data)
-        # hold back an escape sequence split across reads
+        # hold back an escape sequence split across reads: a string (window titles run long)
+        # until its end arrives, up to 4 KB; any other up to 64 characters
+        open_string = _OPEN_STRING.search(text)
         esc = text.rfind("\x1b")
-        if esc != -1 and len(text) - esc < 64 and not _ANSI.match(text, esc):
+        if open_string and len(text) - open_string.start() < 4096:
+            text, self._pending = text[:open_string.start()], text[open_string.start():]
+        elif not open_string and esc != -1 and len(text) - esc < 64 and not _ANSI.match(text, esc):
             text, self._pending = text[:esc], text[esc:]
         else:
             self._pending = ""

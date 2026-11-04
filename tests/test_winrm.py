@@ -114,3 +114,116 @@ async def test_pinned_host_never_opens_unchecked(env):  # noqa: F811
     engine.cfg.hosts.append(Host("win10", "winrm", "192.168.1.14", user="admin", auth="ntlm", winrm_cert_validation=False))
     with pytest.raises(UserError, match="checked before every connection"):
         engine.open_session("winrm", "win10")
+
+
+def _tls_server(tmp_path):
+    """A local HTTPS server with a self-signed certificate; returns (port, SHA-256 of its certificate, stop)."""
+    import datetime
+    import http.server
+    import ssl
+    import threading
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    from datoolkit.sessions import rdpcert
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "winrm.test")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(1).not_valid_before(now).not_valid_after(now + datetime.timedelta(days=1))
+            .sign(key, hashes.SHA256()))
+    (tmp_path / "c.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    (tmp_path / "k.pem").write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                       serialization.NoEncryption()))
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        do_GET = do_POST
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(tmp_path / "c.pem", tmp_path / "k.pem")
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def stop():
+        httpd.shutdown()
+        httpd.server_close()
+    return httpd.server_address[1], rdpcert.fingerprint(cert.public_bytes(serialization.Encoding.DER)), stop
+
+
+def test_the_console_checks_the_pin_on_its_own_connections(tmp_path):
+    # The engine checks the pin on a probe connection of its own; the console's connections,
+    # which carry the login, must present the same certificate or nothing is sent.
+    import requests
+    from pypsrp.wsman import WSMan
+
+    from datoolkit.sessions.psrp_console import pin_certificate
+
+    port, good, stop = _tls_server(tmp_path)
+    try:
+        for pin, ok in ((good, True), ("AB:" * 31 + "AB", False)):
+            wsman = WSMan("127.0.0.1", port=port, username="bob", password="pw", ssl=True, auth="basic",
+                          cert_validation=False, operation_timeout=5, read_timeout=10)
+            pin_certificate(wsman, pin)
+            session = wsman.transport._build_session()
+            try:
+                if ok:
+                    assert session.post(wsman.transport.endpoint, timeout=10).status_code == 401
+                else:
+                    with pytest.raises(requests.exceptions.SSLError, match="(?i)fingerprint"):
+                        session.post(wsman.transport.endpoint, timeout=10)
+            finally:
+                session.close()
+    finally:
+        stop()
+
+
+def test_a_pinned_hosts_console_is_given_the_pin():
+    import json
+    pinned = Host("dc", "winrm", "dc.lan", winrm_cert_validation=False)
+    assert json.loads(winrm.console_config(pinned, "AA:BB"))["pin"] == "AA:BB"
+    assert "pin" not in json.loads(winrm.console_config(Host("dc", "winrm", "dc.lan")))
+
+
+def test_the_console_prints_write_host_and_verbose_output(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    import pypsrp.powershell
+    from pypsrp.complex_objects import PSInvocationState
+
+    from datoolkit.sessions import psrp_console
+
+    class FakePowerShell:            # what pypsrp returns for: Write-Host "copied"; Write-Verbose "checking" -Verbose; "done"
+        def __init__(self, pool):
+            self.state = PSInvocationState.COMPLETED
+            self.output = ["done\n"]
+            self.streams = SimpleNamespace(information=[SimpleNamespace(message_data="copied 3 files")],
+                                           verbose=[SimpleNamespace(message="checking the share")], warning=[], error=[])
+
+        def add_script(self, s):
+            return self
+
+        def add_cmdlet(self, c):
+            return self
+
+        def add_parameter(self, k, v):
+            return self
+
+        def begin_invoke(self):
+            pass
+
+    monkeypatch.setattr(pypsrp.powershell, "PowerShell", FakePowerShell)
+    psrp_console.run_command(None, "Copy-Things")
+    out = capsys.readouterr().out
+    assert "copied 3 files" in out and "done" in out and "VERBOSE: checking the share" in out

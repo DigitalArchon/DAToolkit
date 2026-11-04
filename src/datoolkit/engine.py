@@ -1427,10 +1427,14 @@ class Engine:
                 found = winrm.problem(host)
                 if found:
                     raise UserError(found)
-                if winrm.pins(host) and not _cert_checked:
-                    raise UserError(f"{host.name}'s certificate is checked before every connection: open it "
-                                    "from the session menu.")
-                env["DATOOLKIT_PSRP"] = winrm.console_config(host)
+                pin = ""
+                if winrm.pins(host):
+                    pinned = self.pins.get(host.host, winrm.port(host))
+                    if not _cert_checked or not pinned:
+                        raise UserError(f"{host.name}'s certificate is checked before every connection: open it "
+                                        "from the session menu.")
+                    pin = pinned["sha256"]
+                env["DATOOLKIT_PSRP"] = winrm.console_config(host, pin)
                 src_root = str(Path(__file__).resolve().parents[1])
                 env["PYTHONPATH"] = src_root + (":" + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")
                 sess = self.sessions.spawn(sid, [sys.executable, "-m", "datoolkit.sessions.psrp_console"], env,
@@ -1832,7 +1836,7 @@ class Engine:
                     and other.capture_start > p.capture_start and (end is None or other.capture_start < end)):
                 end = other.capture_start
         try:
-            with self.case.transcript_path(p.session_id).open("rb") as f:
+            with self.case.transcript_file(p.session_id).open("rb") as f:
                 f.seek(p.capture_start)
                 data = f.read() if end is None else f.read(max(0, end - p.capture_start))
         except OSError as e:
@@ -1922,7 +1926,11 @@ class Engine:
             raise UserError("This item is already a watch.")
         sess = self.sessions.sessions.get(p.session_id)
         shell = "powershell" if (sess and recipes.os_family(sess.roster()) == "windows") else "sh"
-        wrapped = watch_mod.wrap(p.command, interval, count, shell)
+        interval, count = watch_mod.bounds(interval, count)      # what the loop runs, and the AI is told
+        try:
+            wrapped = watch_mod.wrap(p.command, interval, count, shell)
+        except ValueError as e:
+            raise UserError(str(e)) from None
         self.queue.update(num, command=wrapped, watch=True, session_kinds=self._session_kinds())
         p.purpose = f"[watch every {interval}s x{count}] {p.purpose}"
         self.log("watch_set", num=num, interval=interval, count=count)
@@ -2471,7 +2479,7 @@ class Engine:
 
     def transcript_text(self, sid: str, upto: int | None = None) -> str:
         case = self._need_case()
-        path = case.dir / f"term-{_slug(sid)}.log"
+        path = case.transcript_file(sid)
         if not path.exists():
             return ""
         data = path.read_bytes()

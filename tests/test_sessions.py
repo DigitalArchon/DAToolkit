@@ -2,6 +2,8 @@ import asyncio
 import os
 import subprocess
 
+import pytest
+
 from datoolkit.sessions.askpass import AskpassBridge
 from datoolkit.sessions.manager import SessionManager, TranscriptWriter
 
@@ -102,3 +104,33 @@ async def test_the_askpass_bridge_stops_with_a_prompt_still_up(tmp_path):
         helper.kill()
         helper.wait()
         helper.stdout.close()
+
+
+def test_sessions_to_a_host_with_a_long_name_keep_their_own_transcripts(tmp_path):
+    from datoolkit.case import Case
+    case = Case.create("t", "open", root=tmp_path)
+    a = "fileserver01-sydney-corp-acme-holdings-com-au"         # 45 characters: names were cut at 40
+    b = a + "-2"                                                 # a second session to it
+    assert case.transcript_path(a) != case.transcript_path(b)
+    old = case.dir / f"term-{a[:40]}.log"                       # what a case from before has
+    old.write_text("before")
+    assert case.transcript_file(a) == old
+    case.transcript_path(a).write_text("now")
+    assert case.transcript_file(a) == case.transcript_path(a)
+
+
+@pytest.mark.parametrize("chunks,written", [
+    # a window title (OSC) cut off by the read: none of it is output
+    ([b"ok\r\n\x1b]0;bob@web01: ~/src", b"\x07bob@web01:~/src$ "], "ok\nbob@web01:~/src$ "),
+    ([b"a\x1b]0;title\x1b", b"\\b"], "ab"),                                  # its ESC \ end split too
+    ([b"a\x1b]0;" + b"t" * 300, b"\x07b"], "ab"),                            # longer than 64 characters
+    ([b"x\x1b7y\x1b8z\x1bcw"], "xyzw"),                                     # save/restore cursor, reset
+    ([b"abc\x1b[3", b"1mred\x1b[0m\r\n"], "abcred\n"),
+])
+def test_escape_sequences_split_across_reads_stay_out_of_the_transcript(tmp_path, chunks, written):
+    w = TranscriptWriter()
+    w.open(tmp_path / "x.log")
+    for c in chunks:
+        w.write(c)
+    w.close()
+    assert (tmp_path / "x.log").read_text() == written

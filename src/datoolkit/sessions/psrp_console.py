@@ -41,9 +41,17 @@ def run_command(pool, line: str) -> None:
         except Exception as e:  # noqa: BLE001
             print(f"{DIM}(stop failed: {e}){RESET}")
         return
+    # Write-Host and Write-Information (PowerShell 5 and later) go to the information stream,
+    # not the output that Out-String formats: a script reporting with them printed nothing
+    for record in ps.streams.information:
+        text = str(getattr(record, "message_data", record) or "")
+        if text.strip():
+            print(text.rstrip("\n"))
     out = "".join(str(o) for o in ps.output)
     if out.strip():
         sys.stdout.write(out.rstrip("\n") + "\n")
+    for v in ps.streams.verbose:
+        print(f"{DIM}VERBOSE: {getattr(v, 'message', v)}{RESET}")
     for w in ps.streams.warning:
         print(f"{YELLOW}WARNING: {w}{RESET}")
     for e in ps.streams.error:
@@ -64,6 +72,27 @@ def current_location(pool) -> str:
         return ""
 
 
+def pin_certificate(wsman, sha256: str) -> None:
+    """Every TLS connection pypsrp opens must present the certificate with this SHA-256: urllib3
+    compares it before a byte of the login is sent. The engine checked the pin on a connection
+    of its own first, which can't vouch for these (one let through, the next intercepted).
+    Added to pypsrp's own adapter, which also controls when new connections may be made."""
+    transport = wsman.transport
+    build = transport._build_session
+
+    def pinned_session():
+        session = build()
+        adapter = session.get_adapter("https://")
+        adapter.poolmanager.connection_pool_kw["assert_fingerprint"] = sha256
+        through_proxy = adapter.proxy_manager_for
+
+        def proxy_manager_for(proxy, **kwargs):     # an https_proxy from the environment
+            return through_proxy(proxy, **{**kwargs, "assert_fingerprint": sha256})
+        adapter.proxy_manager_for = proxy_manager_for
+        return session
+    transport._build_session = pinned_session
+
+
 def main() -> int:
     from pypsrp.powershell import RunspacePool
     from pypsrp.wsman import WSMan
@@ -80,9 +109,18 @@ def main() -> int:
     print(f"{DIM}Connecting to {host}:{port} over {'HTTPS' if ssl else 'HTTP'} ({cfg.get('auth', 'negotiate')})...{RESET}")
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
+        auth = cfg.get("auth", "negotiate")
+        # Basic over plain HTTP (only with the host's "Allow Basic over plain HTTP" tick, on the
+        # local network: winrm.problem) has no message encryption, which pypsrp otherwise insists on
         wsman = WSMan(host, port=port, username=cfg.get("user") or None, password=password, ssl=ssl,
-                      auth=cfg.get("auth", "negotiate"), cert_validation=bool(cfg.get("cert_validation", True)),
+                      auth=auth, cert_validation=bool(cfg.get("cert_validation", True)),
+                      encryption="never" if not ssl and auth == "basic" else "auto",
                       operation_timeout=20, read_timeout=30)
+        if ssl and cfg.get("pin"):
+            pin_certificate(wsman, cfg["pin"])
+        elif ssl and not cfg.get("cert_validation", True):
+            print(f"{RED}No pinned certificate to check this connection against: not connecting.{RESET}")
+            return 1
         with wsman, RunspacePool(wsman) as pool:
             del password
             print(f"Connected. Type PowerShell commands (single line). 'exit' to disconnect.\n")

@@ -39,9 +39,11 @@ def port(host: Host) -> int:
     return host.port or (5986 if host.winrm_ssl else 5985)
 
 
-def console_config(host: Host) -> str:
-    """DATOOLKIT_PSRP for sessions/psrp_console.py: connection settings, no secrets. A pinned
-    certificate was checked by the engine before the console starts, so pypsrp's own check is
-    off then; otherwise it checks against the system CA store."""
+def console_config(host: Host, pin: str = "") -> str:
+    """DATOOLKIT_PSRP for sessions/psrp_console.py: connection settings, no secrets. A host
+    whose certificate DA Toolkit pins (`pin`, its SHA-256) has pypsrp's CA check off, and
+    every connection the console makes must present that certificate (the engine's check
+    before it starts was of another connection); otherwise it checks against the CA store."""
     return json.dumps({"host": host.host, "port": host.port, "user": host.user, "auth": host.auth,
-                       "ssl": host.winrm_ssl, "cert_validation": host.winrm_cert_validation})
+                       "ssl": host.winrm_ssl, "cert_validation": host.winrm_cert_validation,
+                       **({"pin": pin} if pin else {})})

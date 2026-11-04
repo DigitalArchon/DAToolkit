@@ -698,3 +698,22 @@ async def test_layout_is_saved_quietly_and_kept_in_range(env, tmp_path):  # noqa
     config.save(engine.cfg, path)
     assert config.load(path).settings.layout == engine.cfg.settings.layout
     assert engine.snapshot()["config"]["settings"]["layout"]["chat_w"] == 520
+
+
+@pytest.mark.parametrize("command", ["free -m  # memory", "ss -s;", "ping -c1 gw &", "grep '#include' main.c",
+                                     "echo $# args", "uptime"])
+def test_a_watch_loop_is_valid_shell_whatever_the_command_ends_with(command):
+    # a trailing comment used to comment out the loop's end (the shell sat at a > prompt),
+    # and a trailing ; or & made a syntax error
+    import subprocess
+
+    from datoolkit.safety import watch
+    loop = watch.wrap(command, 2, 3, "sh")
+    assert subprocess.run(["bash", "-n", "-c", loop], capture_output=True).returncode == 0, loop
+    assert ("#include" in loop) == ("#include" in command)          # quoted text is kept
+
+
+def test_a_watch_tells_the_ai_the_numbers_it_runs_with():
+    from datoolkit.safety import watch
+    assert watch.bounds(0, 5000) == (1, 720)
+    assert "seq 1 720" in watch.wrap("uptime", 0, 5000, "sh") and "sleep 1;" in watch.wrap("uptime", 0, 5000, "sh")
