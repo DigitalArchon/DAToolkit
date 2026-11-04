@@ -392,6 +392,8 @@ class AnthropicClient:
     async def list_models_detailed(self) -> tuple[list[str], dict[str, dict]]:
         ids, caps = [], {}
         async for m in self._client.models.list(limit=1000):
+            if getattr(m, "lifecycle", None) == "retired":
+                continue                    # still listed, as a record, but every request naming it fails
             ids.append(m.id)
             if self.official:
                 caps[m.id] = parse_caps(m)

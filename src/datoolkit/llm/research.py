@@ -60,7 +60,8 @@ def looks_blocked(page: dict) -> bool:
     if not page.get("success"):
         return True
     text = (page.get("markdown") or "").strip()
-    return len(text) < 200 or (len(text) < 3000 and bool(_BLOCKED.search(text)))
+    # short alone is no sign: a raw file or a short note is a page too, and stealth costs five times as much
+    return len(text) < 20 or (len(text) < 3000 and bool(_BLOCKED.search(text)))
 
 
 async def scrape(base_url: str, api_key: str, urls: list[str], stealth: bool = False,

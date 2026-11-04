@@ -123,6 +123,10 @@ async def test_models_and_capabilities_come_from_anthropics_list(aenv):
     assert models[OPUS]["vision"] is True and models[OPUS]["reasoning"] is True and models[OPUS]["context"] == 1_000_000
     assert models[OPUS]["tier"] == "standard" and models[OPUS]["routable"] is False
     assert engine.cfg.provider("Anthropic").default_model == OPUS
+    # a retired model stays in Anthropic's list as a record, but every request naming it fails
+    fake.models.append({"id": "claude-2-1", "type": "model", "display_name": "Claude 2.1", "created_at": "2023-11-21T00:00:00Z",
+                        "lifecycle": "retired", "retires_at": "2025-07-21T00:00:00Z"})
+    assert "claude-2-1" not in {m["id"] for m in await engine.list_models("Anthropic", refresh=True)}
     view = engine.snapshot()["config"]["providers"][0]
     assert view["kind"] == "anthropic" and view["api_effective"] == "anthropic"
 

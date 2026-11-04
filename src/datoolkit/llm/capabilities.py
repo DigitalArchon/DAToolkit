@@ -91,17 +91,20 @@ def lookup(caps: dict[str, dict], model_id: str) -> dict | None:
     return caps[twins[0]] if twins else None
 
 
-# How providers say a request didn't fit (OpenAI/vLLM, Anthropic, Gemini, llama.cpp, generic).
+# How providers say a request didn't fit (OpenAI/vLLM, Anthropic, Gemini, llama.cpp, Moonshot, generic).
 _OVERFLOW = re.compile(r"context[_ ]length[_ ]exceeded|maximum context length|context (?:window|size|length) "
                        r"(?:exceeded|is exceeded|limit)|exceeds? (?:the )?(?:available |model'?s? )?context|prompt is too long|"
-                       r"too many (?:input )?tokens|input token count .* exceeds|reduce the length of (?:the )?(?:messages|prompt)",
-                       re.I)
+                       r"too many (?:input )?tokens|input token count .* exceeds|reduce the length of (?:the )?(?:messages|prompt)"
+                       r"|exceeded (?:the )?model(?:'s)? token limit", re.I)
+# ... and how they say "slow down": "Too many tokens, please wait" (Bedrock) is a rate limit
+_RATE_LIMIT = re.compile(r"\b429\b|rate[ _-]?limit|per (?:second|minute|hour|day)\b|please wait|throttl", re.I)
 _LIMIT = [re.compile(p, re.I) for p in (
     r"maximum context length is (\d+)",                 # OpenAI, vLLM
     r"\d+ tokens > (\d+) maximum",                      # Anthropic
     r"maximum number of tokens allowed \((\d+)\)",      # Gemini
     r"context (?:window|size|length)(?: limit)? (?:of|is) (\d+)",
-    r"n_ctx(?:_slot)?\s*[=:]\s*(\d+)",                  # llama.cpp
+    r"n_ctx(?:_slot)?['\"]?\s*[=:]\s*(\d+)",            # llama.cpp, also as the SDK quotes its JSON ('n_ctx': 8192)
+    r"model(?:'s)? token limit:?\s*(\d+)",              # Moonshot
 )]
 
 
@@ -109,7 +112,7 @@ def overflow(err: Exception | str) -> tuple[bool, int | None]:
     """Whether a provider error says the request was too long for the model's context window,
     and the window size when the message names it."""
     text = str(err)
-    if not _OVERFLOW.search(text):
+    if not _OVERFLOW.search(text) or _RATE_LIMIT.search(text):
         return False, None
     for pat in _LIMIT:
         m = pat.search(text)

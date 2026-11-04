@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 
 from .client import ToolCall
 
@@ -32,7 +33,8 @@ def _value(raw: str, as_string: bool = False):
 
 
 def _call(name: str, args: dict, n: int) -> ToolCall:
-    return ToolCall(id=f"text_call_{n}", name=name, arguments=json.dumps(args))
+    # unique across rounds and turns: text_call_0 in every reply gave the history duplicate ids
+    return ToolCall(id=f"text_call_{n}_{uuid.uuid4().hex[:12]}", name=name, arguments=json.dumps(args))
 
 
 def extract(text: str) -> tuple[str, list[ToolCall]]:

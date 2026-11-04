@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 from urllib.parse import urlparse
@@ -197,7 +198,8 @@ class StreamAccumulator:
 
     def __init__(self) -> None:
         self.result = TurnResult()
-        self._calls: dict[int, ToolCall] = {}
+        self._calls: list[ToolCall] = []           # in the order they began
+        self._at: dict[int, ToolCall] = {}         # stream index -> the call it is filling now
         self._pricing: dict | None = None
 
     def feed(self, chunk) -> list[tuple[str, str]]:
@@ -228,7 +230,7 @@ class StreamAccumulator:
             self.result.content += delta.content
             events.append(("text", delta.content))
         for tc in delta.tool_calls or []:
-            call = self._calls.setdefault(tc.index, ToolCall(id="", name="", arguments=""))
+            call = self._call_for(tc)
             if tc.id:
                 call.id = tc.id
             if tc.function:
@@ -236,18 +238,32 @@ class StreamAccumulator:
                     if not call.name:
                         # arguments stream silently; this tells the UI the model is still working
                         events.append(("tool", tc.function.name))
-                    call.name += tc.function.name
+                    if tc.function.name != call.name:   # some routes send the whole name with every piece
+                        call.name += tc.function.name
                 if tc.function.arguments:
                     call.arguments += tc.function.arguments
         return events
+
+    def _call_for(self, tc) -> ToolCall:
+        """The call a delta continues. A new id at an index that already holds a named call is a
+        new call (some routes number every call 0), and a delta with no index continues the last
+        call unless it brings an id of its own."""
+        index = tc.index if isinstance(tc.index, int) else None
+        current = self._at.get(index) if index is not None else (self._calls[-1] if self._calls else None)
+        if current is None or (tc.id and current.id and tc.id != current.id and current.name):
+            current = ToolCall(id="", name="", arguments="")
+            self._calls.append(current)
+            if index is not None:
+                self._at[index] = current
+        return current
 
     def finish(self) -> TurnResult:
         cost = (self._pricing or {}).get("cost", (self._pricing or {}).get("amount"))
         if self.result.usage is not None and not isinstance(self.result.usage.get("cost"), (int, float)) \
                 and isinstance(cost, (int, float)):
             self.result.usage["cost"] = cost
-        self.result.tool_calls = [self._calls[i] for i in sorted(self._calls)]
-        for i, call in enumerate(self.result.tool_calls):
-            if not call.id:
-                call.id = f"call_{i}"
+        self.result.tool_calls = list(self._calls)
+        for call in self.result.tool_calls:
+            if not call.id:          # unique across rounds and turns, as the history needs them
+                call.id = f"call_{uuid.uuid4().hex[:16]}"
         return self.result

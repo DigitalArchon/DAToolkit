@@ -281,7 +281,30 @@ def test_overflow_errors_are_recognised_and_name_the_window():
     assert o("The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).") == (True, 1048576)
     assert o("the request exceeds the available context size, try increasing it") == (True, None)
     assert o("503 all routes failed") == (False, None)
+    # llama.cpp's JSON as the SDK quotes it, Moonshot's wording; rate limits are no overflow
+    assert o("Error code: 400 - {'error': {'message': 'the request exceeds the available context size', "
+             "'n_prompt_tokens': 9000, 'n_ctx': 8192}}") == (True, 8192)
+    assert o("Invalid request: Your request exceeded model token limit: 262144") == (True, 262144)
+    assert o("ThrottlingException: Too many tokens, please wait before trying again.") == (False, None)
+    assert o("Error code: 429 - Too many input tokens per minute") == (False, None)
     assert o("moonshotai/kimi-k3 does not support temperature on the selected route") == (False, None)
+
+
+@pytest.mark.parametrize("error,setting", [
+    ("moonshotai/kimi-k3 does not support temperature on the selected route", "temperature"),
+    ("Error code: 400 - {'error': {'message': \"Unsupported value: 'temperature' does not support 0.3 with this model. "
+     "Only the default (1) value is supported.\", 'param': 'temperature'}}", "temperature"),
+    ("Error code: 400 - {'error': {'message': \"Unsupported parameter: 'max_tokens' is not supported with this model. "
+     "Use 'max_completion_tokens' instead.\"}}", "max_tokens"),
+])
+async def test_a_setting_a_route_refuses_is_recognised_however_it_says_so(env, error, setting):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("c", "open")
+    prov = engine.cfg.provider("Fake")
+    params = {"temperature": 0.3, "max_tokens": 4000, "reasoning_effort": "medium"}
+    assert engine._learn_unsupported(prov, "gpt-5.5", params, Exception(error)) == setting
+    assert setting not in engine._params(prov, "gpt-5.5")
+    assert engine._learn_unsupported(prov, "gpt-5.5", params, Exception("503 all routes failed")) is None
 
 
 async def test_context_limit_comes_from_override_then_provider_then_errors(env):  # noqa: F811

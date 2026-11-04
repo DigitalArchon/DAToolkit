@@ -173,6 +173,15 @@ _STATUS_WORDS = {"sent": "sent to the AI", "withdrawn": "withdrawn by the AI"}
 _DROPPED = "[An earlier exchange was removed from your context by the technician to save space.]"
 
 
+# How a provider says it won't take one of the generation settings: NanoGPT and Kimi ("does not
+# support temperature on the selected route"), OpenAI ("Unsupported value: 'temperature' does
+# not support 0.3 with this model", "Unsupported parameter: 'max_tokens' is not supported")
+_REFUSED_SETTING = [re.compile(p, re.I) for p in (
+    r"(?:does not|doesn't|do not) support (?:the )?[`'\"]?([a-z_]+)",
+    r"unsupported (?:value|parameter|argument)s?: [`'\"]?([a-z_]+)",
+    r"[`'\"]([a-z_]+)[`'\"] is not supported")]
+
+
 def _elide(text: str, limit: int) -> str:
     """`text`, or its start and end with the middle left out: a command can carry a payload
     (a WinRM tool transfer embeds the whole file as base64) that would fill the model's context."""
@@ -825,9 +834,9 @@ class Engine:
         """A provider that refuses one of the generation settings for this model (live: "Kimi K3
         does not support temperature on the selected route"): leave it out for this model from
         now on, and say so. Returns the setting, or None when the error is something else."""
-        m = re.search(r"(?:does not|doesn't|do not) support (?:the )?[`'\"]?([a-z_]+)", str(err), re.I)
-        key = m.group(1).lower() if m else ""
-        if key not in params:
+        key = next((m.group(1).lower() for pat in _REFUSED_SETTING for m in pat.finditer(str(err))
+                    if m.group(1).lower() in params), "")
+        if not key:
             return None
         self._unsupported.setdefault((prov.name, model), set()).add(key)
         self.log("setting_unsupported", model=model, setting=key, error=str(err)[:300])

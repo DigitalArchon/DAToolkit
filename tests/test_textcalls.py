@@ -48,3 +48,38 @@ async def test_engine_queues_a_call_written_as_text(env):  # noqa: F811
     assert entry["text"] == "Checking the link." and entry["proposals"] == [1]
     assert engine.queue.get(1).command == "ethtool eth0"
     assert "text_tool_calls" in (engine.case.dir / "events.jsonl").read_text()
+
+
+def _chunk(*tool_deltas, content=None):
+    from types import SimpleNamespace as N
+    calls = [N(index=i, id=cid, function=N(name=name, arguments=args)) for i, cid, name, args in tool_deltas]
+    return N(id="r1", usage=None, model_extra={}, choices=[N(finish_reason=None, delta=N(content=content, tool_calls=calls, model_extra={}))])
+
+
+def test_the_stream_keeps_calls_apart_however_a_route_numbers_them():
+    from datoolkit.llm.client import StreamAccumulator
+    acc = StreamAccumulator()
+    acc.feed(_chunk((0, "a", "propose_commands", '{"items": []}')))
+    acc.feed(_chunk((0, "b", "update_hypotheses", '{"items": []}')))     # a second call, numbered 0 again
+    acc.feed(_chunk((None, None, None, "")))                               # no index: continues the last one
+    calls = acc.finish().tool_calls
+    assert [(c.id, c.name, c.arguments) for c in calls] == [("a", "propose_commands", '{"items": []}'),
+                                                            ("b", "update_hypotheses", '{"items": []}')]
+    acc = StreamAccumulator()
+    acc.feed(_chunk((0, None, "propose_commands", '{"it')))
+    acc.feed(_chunk((0, None, "propose_commands", 'ems": []}')))           # the whole name in every piece
+    (call,) = acc.finish().tool_calls
+    assert call.name == "propose_commands" and call.arguments == '{"items": []}'
+    assert call.id.startswith("call_")
+
+
+def test_ids_made_up_for_calls_never_repeat():
+    from datoolkit.llm.client import StreamAccumulator
+    from datoolkit.llm.textcalls import _call
+    made = set()
+    for _ in range(3):
+        acc = StreamAccumulator()
+        acc.feed(_chunk((0, None, "propose_commands", "{}")))
+        made.add(acc.finish().tool_calls[0].id)
+        made.add(_call("propose_commands", {}, 0).id)
+    assert len(made) == 6
