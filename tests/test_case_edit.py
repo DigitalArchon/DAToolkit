@@ -188,3 +188,17 @@ def test_two_cases_with_one_name_in_one_second_get_their_own_folders(tmp_path):
     second = Case.create("TKT-9", "open", root=tmp_path)           # same name, same second
     assert first.dir != second.dir
     assert Case.load(first.id, root=tmp_path).sensitivity == "sovereign"
+
+
+async def test_a_case_whose_state_cant_be_read_leaves_the_open_case_as_it_was(env):  # noqa: F811
+    import json
+    engine, _, _ = env
+    engine.new_case("broken", "open")
+    broken = engine.case
+    (broken.dir / "state.json").write_text(json.dumps({"version": 2, "conv": [], "chat": [], "queue": [{"bad": 1}]}))
+    engine.new_case("current", "open")
+    engine.queue.add("c", [{"session_id": "s", "command": "uptime", "risk": "read_only"}])
+    with pytest.raises(UserError, match="Could not open"):
+        engine.open_case(broken.id)
+    assert engine.case.name == "current" and [p.command for p in engine.queue.items] == ["uptime"]
+    assert json.loads((broken.dir / "state.json").read_text())["queue"] == [{"bad": 1}]     # nothing written into it

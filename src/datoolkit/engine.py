@@ -1381,25 +1381,27 @@ class Engine:
         """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
         if self.busy:
             raise UserError("Wait for the AI to finish (or stop it) before opening a case.")
-        self.compact_cancel()        # a summary of the old case's conversation is no use now
+        # everything read first: a saved state that can't be read leaves the case open now as it was
+        # (the queue of one attached to the other, and then saved into it, otherwise)
         try:
             case = Case.load(case_id)
             state = case.load_state() or {}
-        except (OSError, ValueError) as e:
+            conv, chat = list(state.get("conv", [])), list(state.get("chat", []))
+            queue = Queue.from_list(state.get("queue", []))
+            hypotheses, compactions = list(state.get("hypotheses", [])), list(state.get("compactions", []))
+            # the runbooks it had, read again and checked against its client and sensitivity as they are now
+            saved = state.get("similar")
+            similar = (search.reload_hits(saved or [], case.client, case.sensitivity)
+                       if case.client and case.history else [])
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
             raise UserError(f"Could not open case {case_id}: {e}") from e
-        self.case = case
-        self.conv = list(state.get("conv", []))
-        self.chat = list(state.get("chat", []))
-        self.queue = Queue.from_list(state.get("queue", []))
+        self.compact_cancel()        # a summary of the old case's conversation is no use now
+        self.case, self.conv, self.chat, self.queue = case, conv, chat, queue
         # the last request's size, so the context figure shows on resume, before the next request
         self.last_usage = state.get("last_usage") if isinstance(state.get("last_usage"), dict) else None
-        self.hypotheses = list(state.get("hypotheses", []))
-        self.compactions, self._compact_pending, self._overflowed = list(state.get("compactions", [])), None, False
-        # the runbooks it had, read again and checked against its client and sensitivity as they are now
-        saved, self._similar_for = state.get("similar"), ""
-        self._similar = (search.reload_hits(saved or [], case.client, case.sensitivity)
-                         if case.client and case.history else [])
-        self._runbooks = search.runbook_context(self._similar)
+        self.hypotheses = hypotheses
+        self.compactions, self._compact_pending, self._overflowed = compactions, None, False
+        self._similar, self._runbooks, self._similar_for = similar, search.runbook_context(similar), ""
         if saved is None and case.client and case.history and self.conv:
             # saved before cases kept them: looked up again, with its first message, on the next turn
             self._similar_for = next((e.get("text", "") for e in self.chat if e.get("kind") == "user" and e.get("text")), "")
