@@ -109,3 +109,25 @@ async def test_removing_the_newest_exchange_leaves_nothing_to_retry(env):  # noq
     assert engine.conv[-1]["content"].startswith("[An earlier exchange was removed")
     with pytest.raises(UserError, match="no longer in the AI's context"):
         engine.drop_context([7])
+
+
+async def test_half_an_emoji_doesnt_stop_the_case_being_saved(env):  # noqa: F811
+    # JSON from the page can carry a lone surrogate (an emoji cut in half), and a reply streamed
+    # in pieces can split a surrogate pair; UTF-8 has no form for either, and the failed write
+    # used to fail every later save of the case too
+    import json
+
+    engine, fake, _ = env
+    setup(engine)
+    fake.responses.append(sse(({"role": "assistant", "content": "Disk \ud83d"}, None),
+                              ({"content": "\ude00 is full."}, "stop")))
+    engine.send(json.loads('"disk full \\ud83d"'))
+    await wait_turn(engine)
+    engine.add_client("Acme")
+    engine._persist()
+    saved = json.loads((engine.case.dir / "state.json").read_text(encoding="utf-8"))
+    assert saved["chat"][0]["text"] == "disk full �"
+    assert "Disk \U0001F600 is full." in json.dumps(saved["chat"], ensure_ascii=False)
+    assert "�" in (engine.case.dir / "events.jsonl").read_text(encoding="utf-8")
+    name, data = engine.export_full(False)
+    assert data[:2] == b"PK"

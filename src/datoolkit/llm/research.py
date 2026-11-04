@@ -531,5 +531,5 @@ class ReportCache:
         rec = {"ts": time.time(), "brief": brief, "report": report, "sources": sources, "model": model}
         name = sha256(" ".join(sorted(terms(brief))).encode()).hexdigest()[:24] + ".json"
         tmp = self.root / (name + ".tmp")
-        tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.write_text(json.dumps(rec, indent=1), encoding="ascii")      # any text at all, surrogates included
         tmp.replace(self.root / name)

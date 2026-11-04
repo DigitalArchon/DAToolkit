@@ -14,7 +14,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from .case import fence
+from .case import fence, utf8
 from .llm.prompts import STATE_HEADER
 
 README = """\
@@ -161,23 +161,27 @@ def build_zip(case: dict, case_dir: Path, requests: list[dict], conv: list[dict]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         dump = lambda obj: json.dumps(obj, ensure_ascii=False, indent=1)  # noqa: E731
-        z.writestr("README.txt", README.format(
+
+        def put(name: str, text: str) -> None:       # as UTF-8, surrogates and all (case.utf8)
+            z.writestr(name, utf8(text))
+
+        put("README.txt", README.format(
             name=case["name"], id=case["id"], when=f"{datetime.now():%Y-%m-%d %H:%M}",
             terminals="Raw terminal transcripts (UNREDACTED: everything the terminals showed)."
             if include_terminals else "Not included (raw terminal transcripts are unredacted; tick the option to add them)."))
-        z.writestr("full-transcript.md", full_transcript(case, requests, conv, chat, system_now))
+        put("full-transcript.md", full_transcript(case, requests, conv, chat, system_now))
         for f in sorted(case_dir.glob("img-*")):
             z.write(f, f"images/{f.name}")
-        z.writestr("documents/transcript.md", transcript_md)
+        put("documents/transcript.md", transcript_md)
         for name in ("ticket-summary.md", "client-update.md", "runbook.md"):
             if (case_dir / name).exists():
                 z.write(case_dir / name, f"documents/{name}")
-        z.writestr("data/requests.jsonl", "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in requests))
-        z.writestr("data/conversation.json", dump(conv))
-        z.writestr("data/chat.json", dump(chat))
-        z.writestr("data/queue.json", dump(queue))
-        z.writestr("data/hypotheses.json", dump(hypotheses))
-        z.writestr("data/case.json", dump(case))
+        put("data/requests.jsonl", "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in requests))
+        put("data/conversation.json", dump(conv))
+        put("data/chat.json", dump(chat))
+        put("data/queue.json", dump(queue))
+        put("data/hypotheses.json", dump(hypotheses))
+        put("data/case.json", dump(case))
         if (case_dir / "events.jsonl").exists():
             z.write(case_dir / "events.jsonl", "data/events.jsonl")
         if include_terminals:

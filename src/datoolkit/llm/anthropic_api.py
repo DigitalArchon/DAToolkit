@@ -191,7 +191,7 @@ def _strip(obj):
 def _sha(system: str, tools: list[dict], msgs: list[dict]) -> str:
     tools = sorted(_strip(tools), key=lambda t: t.get("name", ""))     # bound as a name-sorted set
     data = json.dumps([system, tools, _strip(msgs)], sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(data.encode()).hexdigest()
+    return hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()   # any half-emoji in it: still a fingerprint
 
 
 def native_blocks(m: dict) -> list[dict] | None:

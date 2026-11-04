@@ -25,7 +25,7 @@ from typing import Callable
 from . import config as config_mod
 from . import creds, recipes, search, tools_cache
 from . import export as export_mod
-from .case import SENSITIVITIES, Case, _slug, fence
+from .case import SENSITIVITIES, Case, _slug, clean_text, fence, utf8
 from .config import Config, Host, Provider, data_dir, private_dir
 from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
@@ -2056,7 +2056,7 @@ class Engine:
         path = d / f"{datetime.now():%Y%m%d-%H%M%S}.json"
         data = {"host": key, "taken": datetime.now().isoformat(timespec="seconds"), "case": self.case.id,
                 "sections": {k: {"command": c, "text": t} for k, (c, t) in items.items()}}
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        path.write_bytes(utf8(json.dumps(data, ensure_ascii=False, indent=1)))
         self.log("baseline_saved", host=key, path=str(path), sections=sorted(items))
         return {"host": key, "path": str(path), "sections": sorted(items)}
 
@@ -2387,9 +2387,9 @@ class Engine:
         n = 1 + max((int(m.group(1)) for f in self.case.dir.glob("context-before-compact-*.json")
                      if (m := re.search(r"-(\d+)\.json$", f.name))), default=0)
         backup = f"context-before-compact-{n}.json"
-        (self.case.dir / backup).write_text(json.dumps(
+        (self.case.dir / backup).write_bytes(utf8(json.dumps(
             {"ts": time.time(), "model": pending["model"], "replaced_messages": end + 1, "conv": self.conv},
-            ensure_ascii=False), encoding="utf-8")
+            ensure_ascii=False)))
         head = prompts.COMPACT_HEADER.format(model=pending["model"], when=f"{datetime.now():%Y-%m-%d %H:%M}")
         msg = {"role": "user", "content": head + "\n\n" + summary}
         self.conv = [msg, {"role": "assistant", "content": prompts.COMPACT_ACK}] + self.conv[end + 1:]
@@ -2981,6 +2981,10 @@ class Engine:
              snippets: list[dict] | None = None, images: list[str] | None = None, via: str = "") -> None:
         """`via` is "phone" for a photo sent from the companion: the AI is told, and the chat shows it."""
         results, snippets, images = results or [], snippets or [], images or []
+        # text from the page can hold half an emoji (a lone surrogate), which no file takes
+        message = clean_text(message)
+        results = [{**r, **{k: clean_text(str(r[k])) for k in ("text", "note") if k in r}} for r in results]
+        snippets = [{**sn, "text": clean_text(str(sn.get("text", "")))} for sn in snippets]
         if self.busy:
             raise UserError("The AI is still responding.")
         if not self.case:
@@ -3671,8 +3675,8 @@ class Engine:
         rec["messages"] = self.scrub_messages(messages)
         rec["response"] = response
         try:
-            with (case.dir / "requests.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            with (case.dir / "requests.jsonl").open("ab") as f:
+                f.write(utf8(json.dumps(rec, ensure_ascii=False) + "\n"))
         except OSError as e:
             self.emit("toast", level="error", text=f"Could not write the request log: {e}")
 
@@ -3851,7 +3855,7 @@ class Engine:
         self._log_request(purpose, model, tier, system_prompt, messages[1:], {"content": text}, case=case)
         path = case.dir / filename
         try:
-            path.write_text(text + "\n", encoding="utf-8")
+            path.write_bytes(utf8(text + "\n"))
             case.log(purpose, path=str(path), text=text)
         except OSError as e:          # the case was deleted while the AI wrote
             raise UserError(f"Could not save {filename} in {case.name}: {e}") from e

@@ -15,6 +15,21 @@ from .config import data_dir, private_dir
 SENSITIVITIES = ("open", "confidential", "sovereign")
 
 
+def utf8(text: str) -> bytes:
+    """`text` as UTF-8. A surrogate has no UTF-8 form: a pair (a reply streamed in pieces can
+    split one) is joined, a lone one (half an emoji pasted) becomes U+FFFD. Raising instead
+    lost the write, and with the text still in the case, every later save of it."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace").encode("utf-8")
+
+
+def clean_text(text: str) -> str:
+    """`text` with its surrogates mended as utf8() does."""
+    return utf8(text).decode("utf-8")
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-")[:40] or "case"
 
@@ -150,8 +165,9 @@ class Case:
 
     def log(self, event: str, **data) -> None:
         rec = {"ts": time.time(), "event": event, **data}
-        with (self.dir / "events.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        line = utf8(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        with (self.dir / "events.jsonl").open("ab") as f:
+            f.write(line)
 
     def transcript_path(self, session_id: str) -> Path:
         """Where a session's terminal transcript is written. Named by the whole id: cut to 40
@@ -216,13 +232,13 @@ class Case:
             rb = (q.get("rollback") or "").replace("|", "\\|").replace("\n", " ")
             out.append(f"| {q['num']} | {q['session_id']} | `{cmd}` | {q['risk']} | {q['status']} | {rb} | {q['note']} |")
         path = self.dir / "transcript.md"
-        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        path.write_bytes(utf8("\n".join(out) + "\n"))
         return path
 
 
 def _write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+    tmp.write_bytes(utf8(json.dumps(data, ensure_ascii=False, default=str)))
     tmp.replace(path)
 
 
