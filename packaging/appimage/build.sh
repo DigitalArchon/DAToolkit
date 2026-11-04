@@ -105,8 +105,9 @@ done
 "$W/buildpy/bin/python3" - "$P/requirements.lock" "$W/binary.lock" $SDIST_ONLY <<'PY'
 import re, sys
 text, skip = open(sys.argv[1]).read(), set(sys.argv[3:])
-blocks = re.split(r"(?m)^(?=[\w.-]+==)", text)
-open(sys.argv[2], "w").write("".join(b for b in blocks if b.split("==", 1)[0] not in skip))
+# a block per requirement, extras included (uvicorn[standard]==...: else it joins the block before)
+blocks = re.split(r"(?m)^(?=[\w.-]+(?:\[[^\]]*\])?==)", text)
+open(sys.argv[2], "w").write("".join(b for b in blocks if re.split(r"[\[=]", b, maxsplit=1)[0] not in skip))
 PY
 
 # the AppImage's Python: locked wheels only (hash-checked), then the ones built here
