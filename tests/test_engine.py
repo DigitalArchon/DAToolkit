@@ -86,6 +86,17 @@ async def env(tmp_path, monkeypatch):
     await engine.stop()
 
 
+async def prompt_of(events, secs: float = 5.0) -> dict:
+    """The credential prompt the engine sent, once it has: it may ask ssh for the host's
+    address first (an alias's HostName), which takes longer on a busy machine."""
+    for _ in range(int(secs * 100)):
+        found = [e["prompt"] for e in events if e["type"] == "prompt"]
+        if found:
+            return found[0]
+        await asyncio.sleep(0.01)
+    raise AssertionError("no credential prompt was shown")
+
+
 async def wait_turn(engine):
     for _ in range(200):
         if not engine.busy:
@@ -199,8 +210,7 @@ async def test_askpass_uses_keyring_once_then_asks(env):
     assert await engine._askpass("web01", "bob@web01.lan's password: ", "askpass") == "pw1"
     # second password prompt (e.g. wrong password) must go to the technician, not loop on the keyring
     task = asyncio.create_task(engine._askpass("web01", "bob@web01.lan's password: ", "askpass"))
-    await asyncio.sleep(0.05)
-    prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+    prompt = await prompt_of(events)
     assert prompt["secret"] and prompt["can_save"]
     engine.answer_prompt(prompt["id"], "pw2", save=True)
     assert await task == "pw2"
@@ -217,8 +227,7 @@ async def test_askpass_jump_host_prompt_not_answered_from_keyring(env):
     for text in ("me@bastion's password: ", "(me@web01.lan-bastion) Password: ", "Password for me@web01.lan.evil:"):
         events.clear()
         task = asyncio.create_task(engine._askpass("web01", text, "askpass"))
-        await asyncio.sleep(0.05)
-        prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+        prompt = await prompt_of(events)
         assert prompt["can_save"] is False, text
         engine.answer_prompt(prompt["id"], None)
         assert await task is None
@@ -235,8 +244,7 @@ async def test_a_prompt_naming_no_host_isnt_answered_for_a_host_behind_a_jump_ho
     creds.set_secret("host", "inner", "inner-pw")
     engine.sessions.spawn("inner", ["/bin/cat"], {}, name="inner", kind="ssh", host_name="inner")
     task = asyncio.create_task(engine._askpass("inner", "Password: ", "askpass"))   # the bastion's, from an old client
-    await asyncio.sleep(0.05)
-    prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+    prompt = await prompt_of(events)
     assert prompt["can_save"] is False
     engine.answer_prompt(prompt["id"], None)
     assert await task is None
@@ -316,8 +324,7 @@ async def test_a_pin_or_passcode_prompt_never_gets_the_host_password(env):
                  "(bob@web01.lan) Enter PASSCODE: ", "Enter passphrase for key '/home/bob/.ssh/id_ed25519': "):
         events.clear()
         task = asyncio.create_task(engine._askpass("web01", text, "askpass"))
-        await asyncio.sleep(0.05)
-        prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+        prompt = await prompt_of(events)
         assert prompt["secret"] and prompt["can_save"] is False, text
         engine.answer_prompt(prompt["id"], "123456", save=True)
         assert await task == "123456"
@@ -329,8 +336,7 @@ async def test_a_password_asked_before_its_session_exists_is_saved_under_its_hos
     engine.new_case("x", "open")
     task = asyncio.create_task(engine.ask_user("rdp-dc01", "RDP password for bob@dc01.lan", secret=True, can_save=True,
                                                host_name="dc01"))
-    await asyncio.sleep(0.05)
-    prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+    prompt = await prompt_of(events)
     engine.answer_prompt(prompt["id"], "s3cret", save=True)
     assert await task == "s3cret" and creds.get_secret("host", "dc01") == "s3cret"
 
