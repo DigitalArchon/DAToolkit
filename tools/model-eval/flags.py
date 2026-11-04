@@ -18,7 +18,7 @@ _PROMISE = re.compile(
     r"\b(commands?|checks?|these|the following|few more|a few|some more|the next)\b"
     r"|\b(I['’]?ve|I have|I['’]?ll|I will|let me|I['’]?m going to|I['’]?d like to|I want to|we['’]?ll|we will|we need to)\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?"
     r"(queue|queued|propose|proposed|add|added|give you|send you|prepare|line up|make|apply|enable|check|look|start by)\b"
-    r"|\b(I['’]?ll|I will|let me|I['’]?m going to|I need to|now I need to|I want to|we['’]?ll|we will)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
+    r"|\b(I['’]?ll|I will|let me(?!\s+know\b)|I['’]?m going to|I need to|now I need to|I want to|we['’]?ll|we will)\b[^.?!\n]{0,40}\b(pull|grab|gather|collect|"
     r"fetch|see|ask for|check|confirm|verify|inspect|queue|fix)\b"
     r"|\blet['’]?s\s+(now\s+|just\s+|also\s+|then\s+|first\s+)?(get|gather|grab|redo|rerun|run|try|test|verify|confirm|"
     r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
@@ -50,13 +50,15 @@ def promises_commands(text: str) -> bool:
 _RUN_REF = re.compile(r"\b(run|re-?run|try|execute|send)\b[^.?!\n]{0,40}?((?:#\d+[\s,/&and–-]*)+)", re.I)
 
 
-def stale_run_refs(text: str, pending: set[int]) -> list[int]:
+def stale_run_refs(text: str, pending: set[int], ready: set[int] = frozenset()) -> list[int]:
     """Items the message asks the technician to run that are not pending: skipped, withdrawn
-    or already run (live: GLM 5.3 asked for #10 and #11 after they had been skipped)."""
+    or already run (live: GLM 5.3 asked for #10 and #11 after they had been skipped). Asking
+    to send the output of one that ran and wasn't sent yet (`ready`) is no stale request."""
     out = []
     for m in _RUN_REF.finditer(text):
+        ok = pending | ready if m.group(1).lower() == "send" else pending
         for n in re.findall(r"#(\d+)", m.group(2)):
-            if int(n) not in pending and int(n) not in out:
+            if int(n) not in ok and int(n) not in out:
                 out.append(int(n))
     return out
 

@@ -356,6 +356,8 @@ def test_promises_are_recognised(text):
     "Let's look.",
     "Guests can reach the staff LAN now. If you'd like that locked down, I'll propose a drop rule before rule 10.",  # Qwen 3.8 Max
     "Here's what I see:\n- the link is at 100 Mb/s\n- CRC errors are climbing\nThat points at the cable.",
+    "Swap the cable on port 12 and let me know what you see.",
+    "Reseat the module, then let me know whether the link comes back.",
     "",
 ])
 def test_ordinary_endings_are_not_promises(text):
@@ -404,6 +406,10 @@ def test_stale_run_references():
     assert stale_run_refs(text, pending={10, 11}) == []
     assert stale_run_refs("Run #3-#5 next.", pending={3}) == [5]
     assert stale_run_refs("#4 showed the link at 100 Mb/s.", pending=set()) == []
+    # asking for the output of an item that ran and wasn't sent yet is no stale request; running it again is
+    assert stale_run_refs("Let it finish, then send me the output of #1.", pending=set(), ready={1}) == []
+    assert stale_run_refs("Run #1 again and send me the output.", pending=set(), ready={1}) == [1]
+    assert stale_run_refs("Send me the output of #7.", pending=set(), ready={1}) == [7]
 
 
 async def test_asking_for_items_no_longer_queued_gets_a_nudge(env):  # noqa: F811
