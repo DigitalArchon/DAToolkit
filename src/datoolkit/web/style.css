@@ -88,7 +88,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 /* explicit rows so hidden elements (e.g. the banner) don't shift the layout */
 #topbar { grid-row: 1; }
-#keyring-banner { grid-row: 2; }
+#banners { grid-row: 2; }        /* both banners: the notice one fell into a 6th row below the queue */
 #workspace { grid-row: 3; }
 #split-h { grid-row: 4; }
 #queue-pane { grid-row: 5; }
@@ -141,7 +141,7 @@ body.queue-collapsed #split-h, body.queue-collapsed #queue-list { display: none;
 body.queue-collapsed .queue-head { border-bottom: none; border-top: 1px solid var(--border); }
 /* a maximized remote desktop (see rdpMaximize): only the session, until Restore */
 body.rdp-max { grid-template-rows: 0 0 1fr 0 0; }
-body.rdp-max #topbar, body.rdp-max #keyring-banner, body.rdp-max #split-h, body.rdp-max #queue-pane,
+body.rdp-max #topbar, body.rdp-max #banners, body.rdp-max #split-h, body.rdp-max #queue-pane,
 body.rdp-max #chat-pane, body.rdp-max #split-v, body.rdp-max #tabs { display: none; }
 body.rdp-max #workspace { grid-template-columns: 1fr; }
 body.rdp-max .term-host { inset: 0; }

@@ -32,6 +32,8 @@ const S = {
   streaming: null,    // {text, reasoning, model, tier}
   promptModals: {},   // prompt id -> modal
   rows: new Map(),    // queue num -> row element
+  running: new Set(), // queue nums being run (runItem)
+  cardEdits: {},      // "search:<id>" / "research:<id>" -> what the technician typed into the card
   chatHistory: [],    // messages typed by the technician this session (up-arrow recall)
   histIdx: -1,
   histDraft: "",
@@ -110,6 +112,13 @@ const MD_OPTS = {
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
 });
+// A link to a page the model, a search or a provider named: http(s) only (md() holds rendered
+// replies to that rule too), anything else is shown as text.
+function extLink(url, text, attrs = {}) {
+  return /^https?:\/\//i.test(url || "") ? h("a", { href: url, target: "_blank", rel: "noopener noreferrer", ...attrs }, text)
+    : h("span", { title: url || "" }, text);
+}
+
 function md(text) {
   return DOMPurify.sanitize(marked.parse(text || "", { breaks: true }), MD_OPTS);
 }
@@ -223,9 +232,10 @@ function connectEvents() {
 function handleEvent(ev) {
   switch (ev.type) {
     case "state": {
-      const was = S.state?.case?.id ?? null;
+      const first = !S.state, was = S.state?.case?.id ?? null;
       S.state = ev.state;
-      if (was !== (S.state.case?.id ?? null)) caseSwitched();
+      const switched = was !== (S.state.case?.id ?? null);
+      if (switched) caseSwitched();
       loadLayout(S.state.config?.settings?.layout);
       if (S.state.busy && !S.streaming) {
         // a turn already running when the page (re)loaded: without this its text, searches and
@@ -235,7 +245,7 @@ function handleEvent(ev) {
           tool: asking ? (S.state.research_requests?.length ? "research" : "web_search") : "",
           startAt: Date.now(), lastAt: Date.now(), searches: S.state.search_requests || [], research: S.state.research_requests || [] };
       }
-      renderAll();
+      renderAll(first || switched);
       break;
     }
     case "companion":
@@ -489,12 +499,14 @@ function renderUsage() {
       : p >= warn ? `\nThe conversation is getting long (warning threshold ${setting.toLocaleString()} in Settings → General). Consider a new case or a ticket summary.` : "");
 }
 
-function renderAll() {
+// `scroll`: to the end of the chat (the first load, another case); any other refresh of the
+// state keeps the chat where the technician is reading, unless they were at the end anyway
+function renderAll(scroll = false) {
   renderTop();
   renderVision();
   renderUsage();
   renderHypotheses();
-  renderChat(true);
+  renderChat(scroll);
   renderSessions();
   renderQueue();
   renderBusy();
@@ -586,7 +598,7 @@ function renderEntry(e, live = false) {
     e.refusal.explanation ? h("div", { class: "muted" }, e.refusal.explanation) : null));
   if (e.searches?.length) box.append(h("div", { class: "scards" }, e.searches.map((r) => searchCard(r))));
   if (e.citations?.length) box.append(h("div", { class: "citations small" }, h("span", { class: "muted" }, "Sources: "),
-    e.citations.map((c, i) => [i ? " · " : "", h("a", { href: c.url, target: "_blank", rel: "noopener noreferrer", title: c.url }, c.title || c.url)])));
+    e.citations.map((c, i) => [i ? " · " : "", extLink(c.url, c.title || c.url, { title: c.url })])));
   if (e.research?.length) box.append(h("div", { class: "scards" }, e.research.map((r) => researchCard(r))));
   if (e.withdrawn?.length || e.reordered?.length) {
     box.append(h("div", { class: "revisions small" },
@@ -649,6 +661,30 @@ function hypChanges(list) {
 const SEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval", running: "searching…",
   declined: "skipped by you", timed_out: "not answered in time", cancelled: "cancelled" };
 
+// What the technician types into a card waiting for approval (a query, a brief, a URL), kept
+// across the chat's re-renders, which rebuild the card: an edit (and the caret) used to be lost
+// to any refresh that came meanwhile.
+function cardInput(key, el, initial) {
+  el.value = S.cardEdits[key] ?? initial;
+  el.dataset.edit = key;
+  el.addEventListener("input", () => { S.cardEdits[key] = el.value; });
+  return el;
+}
+
+// Runs `rebuild` (which replaces chat elements) and puts the focus and caret back into the card
+// field that had them.
+function keepingCardFocus(rebuild) {
+  const a = document.activeElement, key = a?.dataset?.edit;
+  const range = key ? [a.selectionStart, a.selectionEnd] : null;
+  rebuild();
+  if (!key) return;
+  const el = document.querySelector(`[data-edit="${CSS.escape(key)}"]`);
+  if (el && el !== a) {
+    el.focus();
+    el.setSelectionRange(...range);
+  }
+}
+
 function searchCard(rec) {
   const state = rec.status === "done" ? `${rec.results.length} result${rec.results.length === 1 ? "" : "s"}${typeof rec.cost === "number" ? ` · $${rec.cost.toFixed(3)}` : ""}${rec.edited_by_technician ? " · query edited by you" : ""}`
     : rec.status === "failed" || rec.status === "unavailable" ? `not run: ${rec.error}` : SEARCH_STATE[rec.status] || rec.status;
@@ -656,8 +692,11 @@ function searchCard(rec) {
     h("div", { class: "phead" }, h("span", {}, "🔎 Web search"), h("span", { class: "muted small", title: rec.native ? "Run on Anthropic's side as Claude worked, without asking (Settings → General)" : "" }, rec.native ? "Anthropic (unasked)" : rec.provider),
       h("span", { class: "spacer" }), h("span", { class: "small sstate" }, state)));
   if (rec.status === "awaiting") {
-    const q = h("input", { type: "text", value: rec.query, spellcheck: "false" });
-    const answer = (approve) => guarded(async () => { await api("POST", `/api/web-search/${rec.id}`, { approve, query: q.value }); });
+    const q = cardInput(`search:${rec.id}`, h("input", { type: "text", spellcheck: "false" }), rec.query);
+    const answer = (approve) => guarded(async () => {
+      await api("POST", `/api/web-search/${rec.id}`, { approve, query: q.value });
+      delete S.cardEdits[`search:${rec.id}`];
+    });
     q.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); answer(true); } });
     add(el, q, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
       h("div", { class: "muted small" }, "The query goes to the search provider through NanoGPT, in the clear. Edit out anything that identifies the client."),
@@ -669,7 +708,7 @@ function searchCard(rec) {
   }
   if (rec.status === "done" && rec.results.length) {
     el.append(h("details", {}, h("summary", {}, "Results"), h("ol", { class: "sresults" }, rec.results.map((r) =>
-      h("li", {}, r.url ? h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.title || r.url) : (r.title || "(untitled)"),
+      h("li", {}, r.url ? extLink(r.url, r.title || r.url) : (r.title || "(untitled)"),
         r.date ? h("span", { class: "muted small" }, ` · ${r.date}`) : null,
         r.url ? h("div", { class: "muted small surl" }, r.url) : null)))));
   }
@@ -693,9 +732,12 @@ function researchCard(rec) {
     h("div", { class: "phead" }, h("span", {}, page ? "📄 Read a page" : "🔬 Research"), h("span", { class: "muted small" }, rec.model || ""),
       h("span", { class: "spacer" }), h("span", { class: "small sstate" }, state)));
   if (rec.status === "awaiting") {
-    const input = page ? h("input", { type: "text", value: rec.url, spellcheck: "false" })
-      : h("textarea", { rows: 4, spellcheck: "false" }, rec.brief);
-    const answer = (approve) => guarded(async () => { await api("POST", `/api/research/${rec.id}`, { approve, text: input.value }); });
+    const input = cardInput(`research:${rec.id}`, page ? h("input", { type: "text", spellcheck: "false" })
+      : h("textarea", { rows: 4, spellcheck: "false" }), page ? rec.url : rec.brief);
+    const answer = (approve) => guarded(async () => {
+      await api("POST", `/api/research/${rec.id}`, { approve, text: input.value });
+      delete S.cardEdits[`research:${rec.id}`];
+    });
     add(el, input, rec.reason ? h("div", { class: "muted small" }, rec.reason) : null,
       h("div", { class: "muted small" }, page
         ? (rec.unknown_url ? "This URL didn't come from a search result, a report or you, so it is always asked about: a URL can carry data out. " : "")
@@ -713,7 +755,7 @@ function researchCard(rec) {
         : st.unreadable ? "🛡 Page check: no readable verdict" : st.flagged ? `🛡 Page check: ${st.flagged} passage(s) flagged, ${st.removed} removed`
           : st.clean === false ? "🛡 Page check: text aimed at an AI may remain (the AI was told)" : "🛡 Page check: clean")
       : st.status === "done" ? h("span", {}, "📄 ", ...st.pages.map((pg, i) => h("span", {}, i ? ", " : "",
-          h("a", { href: pg.url, target: "_blank", rel: "noopener noreferrer", class: "surl" }, pg.url),
+          extLink(pg.url, pg.url, { class: "surl" }),
           pg.ok ? (pg.stealth ? " (stealth)" : "") : ` ✕ ${pg.error}`)))
       : st.status === "failed" ? `📄 ${st.urls.join(", ")} ✕ ${st.error}` : `📄 ${st.urls.join(", ")} …`))));
   }
@@ -789,8 +831,10 @@ function renderChat(scroll) {
     if (chat[i].kind === "user") break;
     if (chat[i].kind === "assistant") { live = i; break; }
   }
-  log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
-  if (S.streaming) log.append(streamingBubble());
+  keepingCardFocus(() => {
+    log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
+    if (S.streaming) log.append(streamingBubble());
+  });
   if (!S.state.case) {
     log.append(h("div", { class: "empty" },
       h("p", {}, "No case is open. Settings, providers, models and hosts work without one; the conversation, sessions and the command queue belong to a case."),
@@ -819,8 +863,10 @@ function scheduleStreamRender() {
     const log = $("#chat-log");
     const stick = nearBottom(log);
     const old = $("#streaming");
-    if (old && S.streaming) old.replaceWith(streamingBubble());
-    else if (S.streaming) log.append(streamingBubble());
+    keepingCardFocus(() => {
+      if (old && S.streaming) old.replaceWith(streamingBubble());
+      else if (S.streaming) log.append(streamingBubble());
+    });
     if (stick) log.scrollTop = log.scrollHeight;
   });
 }
@@ -1074,7 +1120,7 @@ function ensureTerm(sess) {
     if (!e.ctrlKey || !e.shiftKey) return true;
     // Returning false only stops xterm; preventDefault also stops the browser's own
     // Ctrl+Shift+V paste, which xterm would otherwise paste a second time.
-    if (e.code === "KeyC") { e.preventDefault(); clipWrite(term.getSelection()); return false; }
+    if (e.code === "KeyC") { e.preventDefault(); if (term.hasSelection()) clipWrite(term.getSelection()); return false; }
     if (e.code === "KeyV") { e.preventDefault(); clipRead().then((txt) => txt && term.paste(txt)).catch(() => toast("Clipboard not available", "error")); return false; }
     return true;
   });
@@ -1922,7 +1968,12 @@ function updateRow(row, item) {
   cmd.readOnly = !pending;
   requestAnimationFrame(() => autosize(cmd));
   const sel = $(".sess", row);
-  sel.replaceChildren(...sessionOptions(item));
+  // rebuilt only when it changes: a rebuild closes the dropdown open under the mouse
+  const sessKey = JSON.stringify([item.session_id, (S.state.sessions || []).map((s) => [s.id, s.exited])]);
+  if (row._sessKey !== sessKey) {
+    row._sessKey = sessKey;
+    sel.replaceChildren(...sessionOptions(item));
+  }
   sel.disabled = !pending;
   $(".purpose", row).textContent = item.purpose + (item.edited ? "  (edited)" : "") + (item.recipe ? `  [recipe ${item.recipe}]` : "");
   $(".rollback", row).textContent = item.rollback ? `Rollback: ${item.rollback}` : (item.risk !== "read_only" && !item.dry_run_of ? "No rollback given" : "");
@@ -1950,9 +2001,17 @@ function updateRow(row, item) {
   if (item.ran_at && (item.status === "ran" || item.status === "inserted")) status.textContent += ` · ${elapsed(item.ran_at)} ago`;
 
   const actions = $(".actions", row);
-  const btn = (label, fn, kind = "", title = "") => h("button", { class: `small ${kind}`, title, onclick: () => guarded(fn) }, label);
-  const set = (status, extra = {}) => api("POST", `/api/queue/${item.num}`, { status, ...extra });
   const sessOpen = (S.state.sessions || []).some((s) => s.id === item.session_id && !s.exited);
+  // the buttons are rebuilt only when which ones show, or how, changes (a rebuild under a click
+  // can lose it), so they act on the item as it is when clicked
+  const actKey = JSON.stringify([item.status, item.risk, item.group, item.dry_run, item.watch, item.dry_run_of, sessOpen,
+    isWindowSession(item.session_id)]);
+  if (row._actKey === actKey) return;
+  row._actKey = actKey;
+  const num = item.num;
+  const now = () => S.state.queue.find((i) => i.num === num) || item;
+  const btn = (label, fn, kind = "", title = "") => h("button", { class: `small ${kind}`, title, onclick: () => guarded(fn) }, label);
+  const set = (status, extra = {}) => api("POST", `/api/queue/${num}`, { status, ...extra });
   const btns = [];
   if (pending) {
     if (isWindowSession(item.session_id)) {
@@ -1967,20 +2026,20 @@ function updateRow(row, item) {
     }
     if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
     if (item.dry_run) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", `Queue the rehearsal first (${item.dry_run.description}): ${item.dry_run.command}`));
-    if (item.risk === "read_only" && !item.watch && !item.dry_run_of) btns.push(btn("Watch", () => watchItem(item), "", "Repeat this read-only command for a bounded time and keep only the changes"));
-    btns.push(btn("2nd opinion", () => secondOpinion(item), "", "Ask a reviewer model what this command does and what could go wrong"));
-    btns.push(btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
-      btn("Force skip", () => forceSkip(item), "ghost", "Skip in one click; the AI is told you chose not to run it"),
+    if (item.risk === "read_only" && !item.watch && !item.dry_run_of) btns.push(btn("Watch", () => watchItem(now()), "", "Repeat this read-only command for a bounded time and keep only the changes"));
+    btns.push(btn("2nd opinion", () => secondOpinion(now()), "", "Ask a reviewer model what this command does and what could go wrong"));
+    btns.push(btn("Skip…", () => skipItem(now()), "", "Skip, with a reason for the AI"),
+      btn("Force skip", () => forceSkip(now()), "ghost", "Skip in one click; the AI is told you chose not to run it"),
       btn("↑", () => moveItem(item.num, -1), "ghost", "Move up"),
       btn("↓", () => moveItem(item.num, 1), "ghost", "Move down"));
   } else if (item.status === "ran" || item.status === "inserted") {
-    btns.push(btn("Preview", () => previewCapture(item)), btn("Reset", () => set("pending"), "ghost", "Back to pending"));
+    btns.push(btn("Preview", () => previewCapture(now())), btn("Reset", () => set("pending"), "ghost", "Back to pending"));
   } else if (item.status === "skipped") {
     btns.push(btn("Unskip", () => set("pending", { note: "" }), "ghost"));
   } else if (item.status === "withdrawn") {
     btns.push(btn("Restore", () => set("pending", { note: "" }), "ghost", "Put it back in the queue as pending"));
   }
-  btns.push(btn("Copy", async () => { await clipWrite(item.command); toast("Command copied.", "ok", 2000); }, "ghost", "Copy the command text"));
+  btns.push(btn("Copy", async () => { await clipWrite(now().command); toast("Command copied.", "ok", 2000); }, "ghost", "Copy the command text"));
   actions.replaceChildren(...btns);
 }
 
@@ -1998,8 +2057,19 @@ function flashQueueItem(num) {
 }
 
 // `readOnly` (Ctrl+Shift+Enter): run only a plain read-only command, as it is after saving the
-// box, which may have just turned it into something else
-async function runItem(num, mode, { readOnly = false } = {}) {
+// box, which may have just turned it into something else. A second click while the first is
+// still under way (a dialog, the status on its way) does nothing.
+async function runItem(num, mode, opts = {}) {
+  if (S.running.has(num)) return;
+  S.running.add(num);
+  try {
+    await runItemNow(num, mode, opts);
+  } finally {
+    S.running.delete(num);
+  }
+}
+
+async function runItemNow(num, mode, { readOnly = false } = {}) {
   const row = S.rows.get(num);
   const cmdEl = row && $(".cmd", row);
   if (cmdEl) await saveCommand(num, cmdEl.value);
@@ -2927,6 +2997,8 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     h("span", { class: `badge ${x.tier}` }, x.tier))));
     if (!shown.length) {
       listEl.append(h("div", { class: "muted" }, pool.length || !filter ? "No matching models." : `No ${filterNote || "matching"} models from ${prov}.`));
+    } else if (shown.length > 400) {
+      listEl.append(h("div", { class: "muted small" }, `${shown.length - 400} more: type to narrow the list.`));
     }
   };
   const load = async (refresh) => {
@@ -3150,11 +3222,16 @@ function openSettings(tab = "providers") {
           : m ? (m.context_auto ? `detected: ${fmtTokens(m.context_auto)}` : "not reported") : "";
         const r = routes[model.value.trim()];
         routeBtn.textContent = r ? `⚡ ${ROUTE_LABELS[r.priority]}` : "Route…";
-        routeBtn.disabled = !routable() || !model.value.trim() || /^(private|TEE)\//i.test(model.value.trim());
-        routeBtn.title = routeBtn.disabled ? "Routes apply to NanoGPT and OpenRouter models, never to private/ or TEE ones" : "Choose which host serves this model";
+        // as routing.routable: Standard-tier models of a NanoGPT or OpenRouter provider (a tier set
+        // here counts: one marked TEE or Local is never routed)
+        const id = model.value.trim();
+        const effTier = tier.value || m?.tier_auto || (/^(private|TEE)\//i.test(id) ? "e2ee" : "standard");
+        routeBtn.disabled = !routable() || !id || /^private\//i.test(id) || effTier !== "standard";
+        routeBtn.title = routeBtn.disabled ? "Routes apply to Standard-tier NanoGPT and OpenRouter models, never to private/, TEE or Local ones" : "Choose which host serves this model";
       };
       model.addEventListener("input", fill);
       ctx.addEventListener("input", fill);
+      tier.addEventListener("change", fill);
       routeBtn.addEventListener("click", async () => {
         const m = model.value.trim();
         if (p._new) { toast("Save the provider first.", "info"); return; }
@@ -3839,7 +3916,13 @@ function init() {
   document.addEventListener("keydown", globalKeys);
   // DAToolkit's own shortcuts still work while the remote desktop has the keyboard
   $("#terms").addEventListener("keydown", (e) => {
-    if (e.target.closest?.(".rdp-view") && isGlobalShortcut(e)) { e.stopPropagation(); globalKeys(e); }
+    if (!e.target.closest?.(".rdp-view") || !isGlobalShortcut(e)) return;
+    e.stopPropagation();
+    const r = S.rdps[S.activeSid];
+    // Alt has already gone to the remote desktop; another key between its press and release
+    // keeps Windows from opening the focused window's menu bar when it is let go
+    if (e.altKey && r?.state === 3) { r.client.sendKeyEvent(1, 0xFFE3); r.client.sendKeyEvent(0, 0xFFE3); }
+    globalKeys(e);
   }, true);
   setInterval(tickElapsed, 10000);
   setInterval(() => { if (S.state?.busy) renderStatus(); }, 1000);
@@ -3895,7 +3978,9 @@ function init() {
   $("#attach-btn").addEventListener("click", () => $("#photo-input").click());
   $("#photo-input").addEventListener("change", async (e) => { const files = [...e.target.files]; e.target.value = ""; for (const f of files) await guarded(() => attachPhoto(f)); });
   $("#chat-input").addEventListener("paste", async (e) => {
-    const files = [...(e.clipboardData?.items || [])].filter((it) => it.type.startsWith("image/")).map((it) => it.getAsFile());
+    const items = [...(e.clipboardData?.items || [])];
+    if (items.some((it) => it.type === "text/plain")) return;      // spreadsheet cells, also offered as a picture
+    const files = items.filter((it) => it.type.startsWith("image/")).map((it) => it.getAsFile());
     for (const f of files) await guarded(() => attachPhoto(f));
   });
   $("#hyp-toggle").addEventListener("click", () => $("#hyp-list").classList.toggle("hidden"));
