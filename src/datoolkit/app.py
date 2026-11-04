@@ -207,14 +207,16 @@ def main(argv: list[str] | None = None) -> None:
 
     token = secrets.token_urlsafe(32)
     port = args.port or _free_port()
-    cfg = config.load()
+    cfg, notice = config.load_or_set_aside()
+    if notice:
+        print(notice, file=sys.stderr)
     use_browser = args.browser or args.no_open or (cfg.settings.ui_mode == "browser" and not args.window)
-    notice = ""
     if not use_browser:
         problem = window_problem()
         if problem:
-            use_browser, notice = True, f"{problem}. Running in your web browser until then."
-            print(notice, file=sys.stderr)
+            use_browser, why = True, f"{problem}. Running in your web browser until then."
+            notice = f"{notice} {why}".strip()
+            print(why, file=sys.stderr)
     desktop = None if use_browser else Desktop()
 
     def make_engine(emit):

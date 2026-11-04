@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
+import tempfile
+import time
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -209,11 +211,33 @@ def load(path: Path | None = None) -> Config:
         return from_dict(tomllib.load(f))
 
 
+def load_or_set_aside(path: Path | None = None) -> tuple[Config, str]:
+    """The config, or, when it can't be read, the defaults and why: the file is kept beside
+    itself (config.toml.broken-<time>) and never overwritten, and the app still starts, with a
+    banner, rather than ending in a traceback with no window."""
+    path = path or config_dir() / "config.toml"
+    try:
+        return load(path), ""
+    except Exception as e:  # noqa: BLE001 - a hand-edited file can be wrong in any way at all
+        kept = path.with_name(f"{path.name}.broken-{time.strftime('%Y%m%d-%H%M%S')}")
+        try:
+            path.replace(kept)
+        except OSError:
+            return Config(), f"{path} couldn't be read ({e}). DA Toolkit started with default settings."
+        return Config(), (f"{path.name} couldn't be read ({e}), so DA Toolkit started with default settings. The file "
+                          f"is kept as {kept}: fix it, quit, and put it back as {path.name}.")
+
+
 def save(cfg: Config, path: Path | None = None) -> None:
     path = path or config_dir() / "config.toml"
     private_dir(path.parent)
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("wb") as f:
-        tomli_w.dump(cfg.to_dict(), f)
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+    # a temporary file of its own: two instances saving at once would write one config.tmp in turns
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")   # 0600 from the start
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(cfg.to_dict(), f)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

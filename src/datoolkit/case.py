@@ -276,22 +276,38 @@ def _case_dir(case_id: str, root: Path | None = None) -> Path:
 
 
 def _read_meta(d: Path) -> dict | None:
-    """case.json, or the case_started event of a case written before case.json existed."""
-    meta = d / "case.json"
+    """case.json, or the case_started event of a case written before case.json existed, with
+    its name and sensitivity always there (one damaged file mustn't break the case list): a
+    sensitivity that can't be read is taken as the strictest."""
+    meta = _read_meta_raw(d)
+    if meta is None:
+        return None
+    meta = dict(meta)
+    meta["name"] = str(meta.get("name") or d.name)
+    if meta.get("sensitivity") not in SENSITIVITIES:
+        meta["sensitivity"] = SENSITIVITIES[-1]
+    return meta
+
+
+def _read_meta_raw(d: Path) -> dict | None:
+    """case.json; failing that (none, or damaged), the case_started event that began the audit log."""
     try:
-        if meta.exists():
-            return json.loads(meta.read_text(encoding="utf-8"))
-        events = d / "events.jsonl"
-        if events.exists():
-            with events.open(encoding="utf-8") as f:
-                first = json.loads(f.readline() or "{}")
-            if first.get("event") == "case_started":
-                started = datetime.fromtimestamp(first["ts"]).isoformat(timespec="seconds") if "ts" in first else ""
-                return {"name": first.get("name", d.name), "sensitivity": first.get("sensitivity", "open"),
-                        "notes": first.get("notes", ""), "started": started}
+        data = json.loads((d / "case.json").read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
     except (OSError, ValueError):
         pass
-    return None
+    try:
+        with (d / "events.jsonl").open(encoding="utf-8") as f:
+            first = json.loads(f.readline() or "{}")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(first, dict) or first.get("event") != "case_started":
+        return None
+    started = datetime.fromtimestamp(first["ts"]).isoformat(timespec="seconds") if isinstance(first.get("ts"), (int, float)) else ""
+    return {"name": first.get("name", d.name), "sensitivity": first.get("sensitivity", "open"),
+            "notes": first.get("notes", ""), "started": started, "client": first.get("client", ""),
+            "history": bool(first.get("history", False))}
 
 
 def inline_code(text: str) -> str:

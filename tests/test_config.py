@@ -136,3 +136,34 @@ def _round_trip(settings) -> dict:
 
     import tomli_w
     return tomllib.loads(tomli_w.dumps(asdict(settings)))
+
+
+def test_a_config_that_cant_be_read_is_set_aside_not_a_crash(tmp_path):
+    from datoolkit.config import load_or_set_aside, save
+    path = tmp_path / "config.toml"
+    path.write_text('[[providers]]\nname = "NanoGPT"\nbase_url = "https://nano-gpt.com/api/v1"\n[settings\n')   # a typo
+    cfg, notice = load_or_set_aside(path)
+    assert cfg.providers == [] and "couldn't be read" in notice
+    kept = next(tmp_path.glob("config.toml.broken-*"))
+    assert 'name = "NanoGPT"' in kept.read_text()
+    save(cfg, path)                                              # the next save writes a new file beside it
+    assert 'name = "NanoGPT"' in kept.read_text() and path.exists()
+    import stat
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and not list(tmp_path.glob(".config.toml.*.tmp"))
+    assert load_or_set_aside(path)[1] == ""
+
+
+def test_a_damaged_case_json_doesnt_break_the_case_list(tmp_path):
+    import json
+
+    from datoolkit.case import Case
+    good = Case.create("good", "open", root=tmp_path)
+    nameless = Case.create("nameless", "confidential", root=tmp_path)
+    (nameless.dir / "case.json").write_text(json.dumps({"notes": "x"}))
+    listy = Case.create("listy", "open", root=tmp_path)
+    (listy.dir / "case.json").write_text("[1, 2]")
+    found = {c["id"]: c for c in Case.list_all(root=tmp_path)}
+    assert found[good.id]["name"] == "good"
+    assert found[nameless.id]["name"] == nameless.id and found[nameless.id]["sensitivity"] == "sovereign"
+    assert Case.load(nameless.id, root=tmp_path).sensitivity == "sovereign"
+    assert found[listy.id]["name"] == "listy"                   # from the audit log's first event instead
