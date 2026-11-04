@@ -180,3 +180,11 @@ async def test_setup_works_without_a_case(env):  # noqa: F811
             assert r.status_code == 400 and r.json()["error"] == "Start a case first."
         assert (await c.get("/api/cases", headers=m)).json()["cases"] == []
     assert engine.case is None
+
+
+def test_two_cases_with_one_name_in_one_second_get_their_own_folders(tmp_path):
+    from datoolkit.case import Case
+    first = Case.create("TKT-9", "sovereign", root=tmp_path)
+    second = Case.create("TKT-9", "open", root=tmp_path)           # same name, same second
+    assert first.dir != second.dir
+    assert Case.load(first.id, root=tmp_path).sensitivity == "sovereign"

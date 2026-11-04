@@ -53,8 +53,13 @@ class Case:
         if sensitivity not in SENSITIVITIES:
             raise ValueError(f"Unknown sensitivity {sensitivity}")
         now = datetime.now()
-        case_id = f"{now:%Y%m%d-%H%M%S}-{_slug(name)}"
-        d = private_dir((root or data_dir() / "cases") / case_id)
+        base = root or data_dir() / "cases"
+        case_id = stem = f"{now:%Y%m%d-%H%M%S}-{_slug(name)}"
+        n = 1
+        while (base / case_id).exists():     # the same name in the same second: never another case's folder
+            n += 1
+            case_id = f"{stem}-{n}"
+        d = private_dir(base / case_id)
         case = cls(name=name, sensitivity=sensitivity, notes=notes, id=case_id, dir=d,
                    started=now.isoformat(timespec="seconds"), client=client, history=bool(history))
         case.log("case_started", name=name, sensitivity=sensitivity, notes=notes, client=client, history=bool(history))
