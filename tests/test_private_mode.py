@@ -375,7 +375,7 @@ def test_the_encryption_stack_is_pinned_exactly_and_alike_everywhere():
         assert locked, f"{name} is not in the AppImage lock"
         pin = f"{name}=={locked.group(1)}"
         assert pin in deps, f"pyproject.toml must pin {pin} exactly"
-        block = re.split(r"(?m)^(?=\S)", lock[locked.end():], 1)[0]     # its hashes and "via" lines
+        block = re.split(r"(?m)^(?=\S)", lock[locked.end():], maxsplit=1)[0]     # its hashes and "via" lines
         assert "datoolkit (./pyproject.toml)" in block, f"the lock must record {name} as pyproject.toml's own pin"
 
 MODULE = _private_mode
