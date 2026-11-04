@@ -91,7 +91,7 @@ def test_ssh_argv():
     h = Host("r1", "ssh", "10.1.1.1", port=2222, user="admin", auth="password", jump="me@bastion",
              ssh_options=["KexAlgorithms=+diffie-hellman-group14-sha1", " "])
     argv = ssh_argv(h)
-    assert argv[0] == "ssh" and argv[-1] == "10.1.1.1"
+    assert argv[0] == "ssh" and argv[-2:] == ["--", "10.1.1.1"]          # never read as an option
     assert ["-p", "2222"] == argv[argv.index("-p"):argv.index("-p") + 2]
     assert "-J" in argv and "me@bastion" in argv
     assert "PubkeyAuthentication=no" in argv

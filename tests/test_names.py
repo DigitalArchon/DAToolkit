@@ -124,3 +124,16 @@ def test_a_tool_never_replaces_another_tools_file(tmp_path):
     with pytest.raises(ValueError, match="tools.toml"):
         tools_cache.add(a / "tools.toml", "manifest", "any", root=root)
     assert [t.name for t in tools_cache.load(root)] == ["psexec-2.40"]
+
+
+@pytest.mark.parametrize("data,why", [
+    ({"host": "-oProxyCommand=touch /tmp/x", "port": 22}, "on its own"),
+    ({"host": "-p 2222 web01"}, "on its own"),
+    ({"host": "web01.lan", "port": 70000}, "between 1 and 65535"),
+    ({"host": "web01.lan", "port": "22a"}, "must be a number"),
+])
+def test_a_host_address_that_ssh_would_take_for_options_is_refused(env, data, why):  # noqa: F811
+    engine, _, _ = env
+    with pytest.raises(UserError, match=why):
+        engine.save_host({"name": "bad", "kind": "ssh", **data})
+    assert not engine.cfg.host("bad")

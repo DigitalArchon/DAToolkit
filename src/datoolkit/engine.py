@@ -1037,9 +1037,20 @@ class Engine:
         if data.get("rdp_security", "any") not in ("any", "nla", "nla-ext", "tls", "rdp"):
             raise UserError("RDP security must be any, nla, nla-ext, tls or rdp.")
         port = data.get("port")
+        try:
+            port = int(port) if port not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            raise UserError("The port must be a number.") from None
+        if port is not None and not 1 <= port <= 65535:
+            raise UserError("The port must be between 1 and 65535.")
+        address = str(data["host"]).strip()
+        if re.search(r"\s", address) or address.startswith("-"):
+            # ssh would read "-p 2222 web01" or "-oProxyCommand=..." as its own options
+            raise UserError("The address is a host name or IP address on its own: put the port in Port and options "
+                            "under SSH options.")
         host = Host(
-            name=name, kind=data["kind"], host=str(data["host"]).strip(),
-            port=int(port) if port not in (None, "", 0) else None,
+            name=name, kind=data["kind"], host=address,
+            port=port,
             user=str(data.get("user", "")).strip(), auth=str(data.get("auth", "agent")),
             key_file=str(data.get("key_file", "")).strip(), jump=str(data.get("jump", "")).strip(),
             ssh_options=[o.strip() for o in data.get("ssh_options", []) if o.strip()],

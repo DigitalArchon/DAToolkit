@@ -12,7 +12,7 @@ def ssh_argv(host: Host) -> list[str]:
     if host.user:
         argv += ["-l", host.user]
     argv += ssh_options(host)
-    argv.append(host.host)
+    argv += ["--", host.host]          # the address is never read as an option (Engine.save_host refuses those too)
     return argv
 
 

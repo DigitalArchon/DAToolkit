@@ -131,7 +131,8 @@ def transfer_command(tool: Tool, host: Host | None, kind: str, root: Path | None
         # with the session's own key, login and options (scp alone may not reach the host at all)
         address = f"[{host.host}]" if ":" in host.host else host.host
         target = f"{host.user}@{address}" if host.user else address
-        argv = ["scp"] + (["-P", str(host.port)] if host.port else []) + ssh_options(host) + [str(path), f"{target}:~/{tool.file}"]
+        argv = (["scp"] + (["-P", str(host.port)] if host.port else []) + ssh_options(host)
+                + ["--", str(path), f"{target}:~/{tool.file}"])
         # run in the SSH session itself, after the copy: its output is the hash to compare
         check = (f"sha256sum ~/{shlex.quote(tool.file)}" if tool.os != "windows" else
                  f"powershell -NoProfile -Command \"(Get-FileHash ~/{tool.file} -Algorithm SHA256).Hash.ToLower()\"")
