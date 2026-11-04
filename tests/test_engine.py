@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -164,7 +165,7 @@ async def test_full_loop(env):
     log = (engine.case.dir / "events.jsonl").read_text()
     assert "sent_to_ai" in log and "proposal_skipped" in log
     md = engine.export_markdown()["path"]
-    assert "TKT-1 disk full" in open(md).read()
+    assert "TKT-1 disk full" in Path(md).read_text()
 
 
 async def test_invalid_tool_args_retry(env):

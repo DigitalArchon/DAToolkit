@@ -58,6 +58,7 @@ class FakeGuacd:
 
     def serve(self):
         conn, _ = self.sock.accept()
+        self.sock.close()                # one connection is all it takes
         conn.settimeout(5)
         parser, got = guac.Parser(), []
         try:

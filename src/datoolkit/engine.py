@@ -30,7 +30,7 @@ from .case import SENSITIVITIES, Case, _slug, clean_text, fence, utf8
 from .config import Config, Host, Provider, data_dir, private_dir
 from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
-from .llm.private_mode import (Enclave, ModelRetired, PrivateModeClient, PrivateModeError,
+from .llm.private_mode import (Enclave, ModelRetired, PrivateModeClient,
                                list_private_models, offers_private_mode, relay_url)
 from .llm import capabilities, model_prompts, netguard, research, routing, textcalls, websearch
 from .llm import anthropic_api

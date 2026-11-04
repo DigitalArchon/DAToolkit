@@ -123,7 +123,7 @@ def main() -> int:
             return 1
         with wsman, RunspacePool(wsman) as pool:
             del password
-            print(f"Connected. Type PowerShell commands (single line). 'exit' to disconnect.\n")
+            print("Connected. Type PowerShell commands (single line). 'exit' to disconnect.\n")
             while True:
                 loc = current_location(pool)
                 try:

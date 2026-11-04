@@ -93,6 +93,8 @@ def tkwin(xdisplay):
     finally:
         p.kill()
         p.wait(5)
+        p.stdin.close()
+        p.stdout.close()
 
 
 def _wait(cond, timeout=5.0):
