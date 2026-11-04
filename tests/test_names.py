@@ -23,6 +23,22 @@ def test_a_new_provider_cannot_take_an_existing_name(env):  # noqa: F811
     assert creds.get_secret("provider", "Fake") == "sk-test"
 
 
+def test_one_address_can_have_several_providers_each_with_its_own_key(env):  # noqa: F811
+    # a NanoGPT subscription and pay-as-you-go: the same host, two keys, told apart by name
+    from datoolkit.engine import Engine
+    engine, _, _ = env
+    engine.save_provider({"name": "NanoGPT Sub Only", "base_url": "https://nano-gpt.com/api/v1"}, api_key="sk-sub")
+    engine.save_provider({"name": "NanoGPT PAYG", "base_url": "https://nano-gpt.com/api/v1"}, api_key="sk-payg")
+    with pytest.raises(UserError, match="under a name of its own"):
+        engine.save_provider({"name": "NanoGPT PAYG", "base_url": "https://nano-gpt.com/api/v1"}, api_key="sk-other")
+    keys = {name: Engine._client(engine, engine.cfg.provider(name))._client.api_key
+            for name in ("NanoGPT Sub Only", "NanoGPT PAYG")}
+    assert keys == {"NanoGPT Sub Only": "sk-sub", "NanoGPT PAYG": "sk-payg"}
+    engine.save_host({"name": "web01 as app", "kind": "ssh", "host": "web01.lan", "user": "app"}, password="pw-app")
+    assert {h.host for h in engine.cfg.hosts if h.name.startswith("web01")} == {"web01.lan"}
+    assert creds.get_secret("host", "web01 as app") == "pw-app"
+
+
 def test_a_provider_cannot_be_renamed_onto_another(env):  # noqa: F811
     engine, _, _ = env
     engine.save_provider({"name": "Other", "base_url": "https://other.example/v1"}, api_key="sk-other")

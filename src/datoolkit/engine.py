@@ -537,7 +537,8 @@ class Engine:
         old = self.cfg.provider(original_name) if original_name else None
         clash = self.cfg.provider(name)
         if clash and clash is not old:
-            raise UserError(f"There is already a provider called {name}: give this one another name.")
+            raise UserError(f"There is already a provider called {name}. The same address can be added again with "
+                            f"another API key, under a name of its own (such as \"{name} PAYG\" beside \"{name} Sub Only\").")
         if original_name and original_name != name and old:
             self._provider_renamed(original_name, name)
             key = creds.get_secret("provider", original_name)
@@ -1055,7 +1056,8 @@ class Engine:
         old = self.cfg.host(original_name) if original_name else None    # as for providers
         clash = self.cfg.host(name)
         if clash and clash is not old:
-            raise UserError(f"There is already a host called {name}: give this one another name.")
+            raise UserError(f"There is already a host called {name}. The same address can be added again (another "
+                            "user, another password), under a name of its own.")
         if original_name and original_name != name and old:
             pw = creds.get_secret("host", original_name)
             if pw and not password:
