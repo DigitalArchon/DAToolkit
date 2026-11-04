@@ -227,6 +227,21 @@ async def test_askpass_jump_host_prompt_not_answered_from_keyring(env):
         assert await engine._askpass("web01", text, "askpass") == "pw1", text
 
 
+async def test_a_prompt_naming_no_host_isnt_answered_for_a_host_behind_a_jump_host(env):
+    engine, _, events = env
+    engine.new_case("x", "open")
+    engine.cfg.hosts.append(Host("inner", "ssh", "inner.lan", user="bob", auth="password", jump="me@bastion"))
+    creds.set_secret("host", "inner", "inner-pw")
+    engine.sessions.spawn("inner", ["/bin/cat"], {}, name="inner", kind="ssh", host_name="inner")
+    task = asyncio.create_task(engine._askpass("inner", "Password: ", "askpass"))   # the bastion's, from an old client
+    await asyncio.sleep(0.05)
+    prompt = next(e for e in events if e["type"] == "prompt")["prompt"]
+    assert prompt["can_save"] is False
+    engine.answer_prompt(prompt["id"], None)
+    assert await task is None
+    assert await engine._askpass("inner", "bob@inner.lan's password: ", "askpass") == "inner-pw"
+
+
 def test_prompt_host():
     from datoolkit.engine import prompt_host
 

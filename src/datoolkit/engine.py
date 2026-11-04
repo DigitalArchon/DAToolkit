@@ -1742,6 +1742,9 @@ class Engine:
         # types for it is not this host's password: it is never offered for saving under it.
         named = prompt_host(prompt)
         other_host = bool(host and named and named != host.host.strip().lower().rstrip("."))
+        # A prompt naming no host may be the jump host's (OpenSSH before 8.4 names none for
+        # keyboard-interactive): with one on the way, the target's password isn't offered to it.
+        other_host = other_host or bool(host and host.jump and not named)
         if sess and host and is_password and not other_host and not sess.used_stored_password:
             stored = self._get_secret_safe("host", host.name)
             if stored:
