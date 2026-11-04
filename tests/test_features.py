@@ -576,6 +576,27 @@ async def test_training_provider_runs_a_scenario(env, monkeypatch):  # noqa: F81
     assert "Root cause" in r["text"]
 
 
+async def test_training_pairs_its_probes_on_both_ends(env, monkeypatch):  # noqa: F811
+    # vpn-one-way's second turn says to run the counter on B and the ping on A as a pair
+    engine, _, _ = env
+    monkeypatch.delattr(engine, "_client")
+    engine.cfg.providers.append(Provider("Training", "training://vpn-one-way"))
+    engine.new_case("train", "open")
+    await engine.list_models("Training")
+    engine.select_model("Training", "training/vpn-one-way")
+    engine.open_session("local")
+    engine.open_session("local")
+    a, b = (s["id"] for s in engine.sessions.roster())
+    engine.send("site A can't reach B's server")
+    await wait_turn(engine)
+    engine.send("small pings fail too")
+    await wait_turn(engine)
+    counter, ping = engine.queue.items[-2:]
+    assert counter.group == ping.group == "pair"
+    assert (counter.session_id, ping.session_id) == (b, a)
+    engine.sessions.close_all()
+
+
 # ---------------------------------------------------------------- second opinion
 
 async def test_second_opinion_uses_reviewer_and_respects_tier(env, monkeypatch):  # noqa: F811

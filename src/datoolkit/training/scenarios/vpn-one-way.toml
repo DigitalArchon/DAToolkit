@@ -27,8 +27,8 @@ hypotheses = [
   { id = "mtu", text = "MTU on the tunnel causes large packets to be dropped", confidence = 0.5, status = "open" },
 ]
 propose = [
-  { command = "sudo iptables -L INPUT -v -n --line-numbers | head -30", purpose = "Input rules and counters on B", risk = "read_only" },
-  { command = "ping -c 10 -i 0.5 10.2.0.10", purpose = "Traffic from A while B counts", risk = "read_only" },
+  { command = "sudo iptables -L INPUT -v -n --line-numbers | head -30", purpose = "Input rules and counters on B", risk = "read_only", group = "pair", session = 1 },
+  { command = "ping -c 10 -i 0.5 10.2.0.10", purpose = "Traffic from A while B counts", risk = "read_only", group = "pair", session = 0 },
 ]
 
 [[turn]]

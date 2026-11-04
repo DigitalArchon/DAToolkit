@@ -85,7 +85,9 @@ class TrainingClient:
         result = TurnResult(content=text, finish_reason="stop")
         items = [] if finished else turn.get("propose", [])
         if items and tools:
-            payload = {"items": [{"session_id": sessions[0] if sessions else "local", "command": it["command"],
+            # `session`: which open session (0 the first) a step is for; `group`: steps to run together
+            target = lambda it: sessions[min(int(it.get("session", 0)), len(sessions) - 1)] if sessions else "local"  # noqa: E731
+            payload = {"items": [{"session_id": target(it), "command": it["command"], "group": it.get("group", ""),
                                   "purpose": it.get("purpose", ""), "risk": it.get("risk", "read_only"),
                                   "rollback": it.get("rollback", "")} for it in items]}
             result.tool_calls.append(ToolCall(id=f"train_{n_user}", name="propose_commands", arguments=json.dumps(payload)))
