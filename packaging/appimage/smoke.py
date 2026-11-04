@@ -62,57 +62,65 @@ check(ok, f"{NAME}: the app window starts and stays up" + ("" if ok else "\n" + 
 
 # a terminal session, through the server, as the GUI drives it
 proc, base, token = start("--no-open")
-api(base, token, "POST", "/api/case", {"name": f"smoke {NAME}", "sensitivity": "open"})
-sid = api(base, token, "POST", "/api/sessions", {"kind": "local"})["id"]
+try:
+    api(base, token, "POST", "/api/case", {"name": f"smoke {NAME}", "sensitivity": "open"})
+    sid = api(base, token, "POST", "/api/sessions", {"kind": "local"})["id"]
 
+    # What the page's xterm.js answers when a shell asks about the terminal. fish 4 asks for the
+    # device attributes and the cursor position, and reads no line until they are answered.
+    ANSWERS = {b"\x1b[c": "\x1b[?1;2c", b"\x1b[0c": "\x1b[?1;2c", b"\x1b[6n": "\x1b[1;1R"}
 
-async def shell() -> str:
-    import websockets
+    async def shell() -> str:
+        import websockets
 
-    async with websockets.connect(f"ws://127.0.0.1:8790/ws/term/{sid}?t={token}") as ws:
-        await ws.send(json.dumps({"type": "input", "data": "echo AB$((6*7))CD; tty\r"}))
-        seen = b""
-        while b"AB42CD" not in seen:
-            seen += await asyncio.wait_for(ws.recv(), 10)
-        await asyncio.sleep(0.5)
-        try:
-            seen += await asyncio.wait_for(ws.recv(), 1)
-        except asyncio.TimeoutError:
-            pass
-        return seen.decode(errors="replace")
+        async with websockets.connect(f"ws://127.0.0.1:8790/ws/term/{sid}?t={token}") as ws:
+            seen, typed, answered = b"", False, dict.fromkeys(ANSWERS, 0)
+            deadline = time.monotonic() + 30
+            while not (b"AB42CD" in seen and b"/dev/pts/" in seen) and time.monotonic() < deadline:
+                try:
+                    seen += await asyncio.wait_for(ws.recv(), 1)
+                except asyncio.TimeoutError:
+                    if seen and not typed:     # the prompt is up and the shell has gone quiet
+                        # printf, not $((...)): the login shell may be fish
+                        await ws.send(json.dumps({"type": "input", "data": "printf 'AB%sCD\\n' 42; tty\r"}))
+                        typed = True
+                for query, answer in ANSWERS.items():
+                    for _ in range(seen.count(query) - answered[query]):
+                        await ws.send(json.dumps({"type": "input", "data": answer}))
+                    answered[query] = seen.count(query)
+            return seen.decode(errors="replace")
 
-out = asyncio.run(shell())
-check("AB42CD" in out and "/dev/pts/" in out, f"{NAME}: a local terminal session runs commands on a real PTY")
+    out = asyncio.run(shell())
+    check("AB42CD" in out and "/dev/pts/" in out, f"{NAME}: a local terminal session runs commands on a real PTY")
 
-# the page itself, rendered by the host's WebKitGTK through the bundled PyGObject
-sys.path.insert(0, f"{APPDIR}/usr/python/lib/python3.12/site-packages")
-from datoolkit.app import _bundled_girepository  # noqa: E402
+    # the page itself, rendered by the host's WebKitGTK through the bundled PyGObject
+    sys.path.insert(0, f"{APPDIR}/usr/python/lib/python3.12/site-packages")
+    from datoolkit.app import _bundled_girepository  # noqa: E402
 
-_bundled_girepository()
-import gi  # noqa: E402
+    _bundled_girepository()
+    import gi  # noqa: E402
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("WebKit2", "4.1")
-from gi.repository import GLib, Gtk, WebKit2  # noqa: E402
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("WebKit2", "4.1")
+    from gi.repository import GLib, Gtk, WebKit2  # noqa: E402
 
-shot = f"{OUT}/{NAME}.png"
-window = Gtk.OffscreenWindow()
-view = WebKit2.WebView()
-view.set_size_request(1300, 850)
-window.add(view)
-window.show_all()
+    shot = f"{OUT}/{NAME}.png"
+    window = Gtk.OffscreenWindow()
+    view = WebKit2.WebView()
+    view.set_size_request(1300, 850)
+    window.add(view)
+    window.show_all()
 
+    def snap() -> bool:
+        view.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None,
+                          lambda v, r: (v.get_snapshot_finish(r).write_to_png(shot), Gtk.main_quit()))
+        return False
 
-def snap() -> bool:
-    view.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None,
-                      lambda v, r: (v.get_snapshot_finish(r).write_to_png(shot), Gtk.main_quit()))
-    return False
-
-
-view.connect("load-changed", lambda v, e: e == WebKit2.LoadEvent.FINISHED and GLib.timeout_add(2500, snap))
-view.load_uri(f"{base}/?t={token}")
-GLib.timeout_add(30000, Gtk.main_quit)
-Gtk.main()
-check(os.path.exists(shot), f"{NAME}: the page renders ({shot})")
-api(base, token, "POST", "/api/quit")
-proc.wait(10)
+    view.connect("load-changed", lambda v, e: e == WebKit2.LoadEvent.FINISHED and GLib.timeout_add(2500, snap))
+    view.load_uri(f"{base}/?t={token}")
+    GLib.timeout_add(30000, Gtk.main_quit)
+    Gtk.main()
+    check(os.path.exists(shot), f"{NAME}: the page renders ({shot})")
+finally:
+    api(base, token, "POST", "/api/quit")      # after a failure too: nothing is left holding the port
+    proc.wait(10)
