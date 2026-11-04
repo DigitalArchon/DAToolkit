@@ -416,6 +416,34 @@ async def test_guacd_container_lives_only_while_rdp_is_open(container_env):
     assert '"action": "start"' in log and '"action": "stop"' in log
 
 
+async def test_guacd_container_stays_for_an_rdp_session_still_opening(container_env):
+    # host B's first-use prompt is up (it can be for minutes) when session A closes: the
+    # container must stay, or B registers with no guacd behind its tunnel
+    engine, _, rt = container_env
+    server, port = await fake_rdp_server("legacy")
+    engine.cfg.hosts.append(Host("old", "rdp", "127.0.0.1", port=port, user="bob", auth="password"))
+    creds.set_secret("host", "old", "pw")
+    async with server:
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["yes"])
+        a = await opener
+        events_before = len([c for c in rt.calls if c[1] == "stop"])
+        opener = asyncio.create_task(engine.open_rdp("old"))              # B: its prompt waits ...
+        for _ in range(100):
+            if engine._prompts:
+                break
+            await asyncio.sleep(0.01)
+        engine.close_session(a["id"])                                        # ... while A closes
+        await _settle(engine)
+        assert rt.running and len([c for c in rt.calls if c[1] == "stop"]) == events_before
+        await answer_prompts(engine, ["yes"])
+        b = await opener
+        assert rt.running
+    engine.close_session(b["id"])
+    await _settle(engine)
+    assert not rt.running
+
+
 async def test_guacd_container_stops_when_rdp_fails_to_open_and_on_quit(container_env):
     engine, _, rt = container_env
     server, port = await fake_rdp_server("legacy")

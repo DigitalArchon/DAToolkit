@@ -298,6 +298,8 @@ class Engine:
         self.pins = rdpcert.PinStore()
         self.guacd = guac.GuacdContainer()
         self._guacd_lock = asyncio.Lock()
+        self._rdp_opening = 0                 # RDP opens under way (prompts can be up for minutes)
+        self._guacd_stopping: asyncio.Task | None = None
         # model-request log (requests.jsonl): what was sent and what came back, per request
         self._req_system_sha = ""     # system prompt of the last logged request (logged again only when it changes)
         self._req_conv_len = 0        # conversation messages already logged
@@ -1480,6 +1482,8 @@ class Engine:
         """guacd answering on 127.0.0.1:4822, starting our container if that's how it's
         provided here. False when there is none to start (the technician needs install_help)."""
         async with self._guacd_lock:
+            if self._guacd_stopping and not self._guacd_stopping.done():
+                await self._guacd_stopping       # a container on its way out isn't one to adopt
             if await self._guacd_reachable():
                 await asyncio.to_thread(self.guacd.adopt)
                 return True
@@ -1502,12 +1506,12 @@ class Engine:
                             "Is something else using that port?")
 
     def _guacd_idle(self) -> None:
-        """Stop our guacd container once no RDP session needs it."""
-        if not self.guacd.runtime or any(isinstance(s, RdpSession) and not s.exited
-                                         for s in self.sessions.sessions.values()):
+        """Stop our guacd container once no RDP session needs it: none open, none opening."""
+        if not self.guacd.runtime or self._rdp_opening or any(isinstance(s, RdpSession) and not s.exited
+                                                              for s in self.sessions.sessions.values()):
             return
         self.log("guacd_container", action="stop", runtime=self.guacd.runtime)
-        task = asyncio.get_running_loop().create_task(asyncio.to_thread(self.guacd.stop))
+        task = self._guacd_stopping = asyncio.get_running_loop().create_task(asyncio.to_thread(self.guacd.stop))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
@@ -1519,11 +1523,13 @@ class Engine:
         host = self.cfg.host(host_name)
         if not host or host.kind != "rdp":
             raise UserError(f"Unknown RDP host {host_name}")
-        if not await self._ensure_guacd():
-            raise UserError(*guac.install_help())
+        self._rdp_opening += 1
         try:
+            if not await self._ensure_guacd():
+                raise UserError(*guac.install_help())
             return await self._open_rdp(host)
         finally:
+            self._rdp_opening -= 1
             self._guacd_idle()     # not opened after all: the container we started isn't needed
 
     async def _open_rdp(self, host) -> dict:

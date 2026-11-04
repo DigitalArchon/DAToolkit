@@ -681,10 +681,17 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         writer = None
         try:
             try:
-                reader, writer = await guac.connect(5)
+                try:
+                    reader, writer = await guac.connect(5)
+                except OSError:
+                    # our container stopped since this session opened: started again, if that
+                    # is how guacd is provided here
+                    if not await engine._ensure_guacd():
+                        raise
+                    reader, writer = await guac.connect(5)
                 _, names, leftover, decoder = await guac.handshake(reader, writer, "rdp", params, width, height, dpi,
                                                                    _local_timezone())
-            except (OSError, asyncio.TimeoutError, guac.GuacError) as e:
+            except (OSError, asyncio.TimeoutError, guac.GuacError, UserError) as e:
                 msg = str(e) or type(e).__name__
                 engine.rdp_state(sid, False, msg)
                 await ws.send_text(guac.tunnel_uuid() + guac.encode("error", f"Could not start RDP via guacd: {msg}", "519"))
