@@ -234,6 +234,30 @@ async def test_native_search_is_never_used_for_a_confidential_case(aenv):
     assert st["mode"] == "off" and not st.get("native")
 
 
+async def test_native_search_needs_anthropics_api_not_only_its_address(aenv):
+    engine, fake = aenv
+    engine.cfg.settings.search_engine = "native"
+    await start(engine)
+    assert engine.search_status().get("native") is True
+    engine.cfg.providers[0].api = "openai"         # api.anthropic.com through its OpenAI-compatible API
+    st = engine.search_status()
+    assert not st.get("native") and engine._chat_tools()[1] == {}       # no native_search for chat completions
+
+
+async def test_no_other_model_is_chosen_while_a_turn_runs(aenv):
+    engine, fake = aenv
+    await start(engine)
+    model = engine.cfg.active_model
+    engine._turn = asyncio.get_running_loop().create_future()          # a turn still running
+    try:
+        with pytest.raises(UserError, match="Wait for the AI"):
+            engine.select_model("Compat", "claude-sonnet-5-5")
+        assert engine.cfg.active_model == model
+    finally:
+        engine._turn.cancel()
+        engine._turn = None
+
+
 async def test_a_declined_request_runs_no_tools(aenv):
     engine, fake = aenv
     sid = await start(engine)

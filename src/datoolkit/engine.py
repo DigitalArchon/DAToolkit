@@ -840,6 +840,10 @@ class Engine:
             return await client.complete(model, messages, self._params(prov, model))
 
     def select_model(self, provider_name: str, model: str) -> None:
+        if self.busy:
+            # the turn's tools, search and prompt come from the active model, and a new model's
+            # attestation would cancel the one the turn may be waiting on
+            raise UserError("Wait for the AI to finish (or stop it) before choosing another model.")
         prov = self.cfg.provider(provider_name)
         if not prov:
             raise UserError(f"Unknown provider {provider_name}")
@@ -2497,7 +2501,7 @@ class Engine:
         prov = self.cfg.provider(self.cfg.active_provider)
         model = self.cfg.active_model
         if not prov or not model or providers_mod.kind_of(prov.base_url, prov.api) != "anthropic" \
-                or not anthropic_api.is_claude(model):
+                or self._api(prov) != "anthropic" or not anthropic_api.is_claude(model):
             return "Anthropic's own search needs a Claude model on Anthropic's API (an Anthropic provider)."
         if self.case and self.case.sensitivity != "open":
             return f"{self.case.sensitivity.capitalize()} case: Anthropic's search can't ask before each query."
