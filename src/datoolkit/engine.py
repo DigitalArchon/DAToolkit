@@ -162,6 +162,23 @@ def prompt_host(prompt: str) -> str:
     return found[-1].strip("[]").lower().rstrip(".") if found else ""
 
 
+# status the technician may set -> the statuses it may be set from (Engine.update_item)
+_MANUAL_STATUS = {"ran": ("pending",), "inserted": ("pending",), "skipped": ("pending",),
+                  "pending": ("pending", "ran", "inserted", "skipped", "withdrawn")}
+_STATUS_WORDS = {"sent": "sent to the AI", "withdrawn": "withdrawn by the AI"}
+# the message that stands for exchanges the technician removed from the AI's context
+_DROPPED = "[An earlier exchange was removed from your context by the technician to save space.]"
+
+
+def _elide(text: str, limit: int) -> str:
+    """`text`, or its start and end with the middle left out: a command can carry a payload
+    (a WinRM tool transfer embeds the whole file as base64) that would fill the model's context."""
+    if len(text) <= limit:
+        return text
+    head, tail = limit * 2 // 3, limit // 3
+    return f"{text[:head]}… [{len(text) - head - tail:,} characters left out] …{text[-tail:]}"
+
+
 class UserError(Exception):
     """An error to show the technician as-is, with any commands that fix it (shown so they can
     be copied, not as a passing notice)."""
@@ -1755,7 +1772,18 @@ class Engine:
         return {s["id"]: s["kind"] for s in self.sessions.roster()}
 
     def update_item(self, num: int, **fields) -> dict:
-        was_pending = self.queue.get(num).status == "pending"
+        was = self.queue.get(num).status
+        was_pending = was == "pending"
+        if "status" in fields:
+            # what the technician (desktop or phone) may set, and from what: "sent" and
+            # "withdrawn" are set by the engine itself. A dialog or a phone screen can be older
+            # than the item: an item the AI withdrew, or whose results went, is not marked run.
+            status = fields["status"]
+            if status not in _MANUAL_STATUS:
+                raise UserError(f"An item can't be set to {status} by hand.")
+            if was not in _MANUAL_STATUS[status]:
+                raise UserError(f"#{num} is {_STATUS_WORDS.get(was, was)} now, so it can't be marked {status}; "
+                                "nothing was changed.")
         p = self.queue.update(num, session_kinds=self._session_kinds(), **fields)
         if "command" in fields and p.edited:
             self.log("proposal_edited", num=num, command=p.command, original=p.original_command, risk=p.risk,
@@ -2080,10 +2108,11 @@ class Engine:
         summary = (f"Baseline diff for {key} against snapshot taken {base.get('taken', '?')} (case {base.get('case', '?')}).\n"
                    f"Changed sections: {', '.join(changed) or 'none'}. Unchanged: {', '.join(same) or 'none'}."
                    + (f" Not in baseline: {', '.join(missing)}." if missing else ""))
-        text = summary + ("\n\n" + "\n\n".join(parts) if parts else "")
+        # shown for sending to the AI, so redacted first, as Send results and selections are
+        text, redactions = redact(summary + ("\n\n" + "\n\n".join(parts) if parts else ""))
         self.log("baseline_diffed", host=key, baseline=str(path), changed=changed)
         return {"host": key, "baseline": str(path), "taken": base.get("taken"), "changed": changed, "same": same,
-                "missing": missing, "text": text}
+                "missing": missing, "text": text, "redactions": redactions}
 
     # ---------------------------------------------------------------- tool cache
 
@@ -2171,13 +2200,17 @@ class Engine:
         groups = self.context_view()["groups"]
         drop = set()
         for gi in group_indices:
-            g = groups[int(gi)]
+            if not isinstance(gi, int) or not 0 <= gi < len(groups):
+                raise UserError("That exchange is no longer in the AI's context; open the view again.")
+            g = groups[gi]
             drop.update(range(g["start"], g["end"] + 1))
         if not drop:
             return
+        if max(drop) == len(self.conv) - 1:
+            self._last_turn_error = None      # the failed or stopped exchange is gone: nothing to retry
         kept = [m for i, m in enumerate(self.conv) if i not in drop]
         first = min(drop)
-        kept.insert(min(first, len(kept)), {"role": "user", "content": "[An earlier exchange was removed from your context by the technician to save space.]"})
+        kept.insert(min(first, len(kept)), {"role": "user", "content": _DROPPED})
         # never start with a dangling tool reply
         while kept and kept[0].get("role") in ("tool", "assistant"):
             kept.pop(0)
@@ -2944,10 +2977,10 @@ class Engine:
             if p.status in ("withdrawn", "pending", "sent"):
                 continue
             status = p.status if p.status in ("ran", "inserted", "skipped") else "ran"
-            note = str(r.get("note", "") or p.note).strip()
+            note = str(r["note"] if "note" in r else p.note or "").strip()    # an emptied note is no note
             text = str(r.get("text", ""))
             label = {"ran": "RAN", "inserted": "RAN (edited in terminal)", "skipped": "SKIPPED"}[status]
-            head = f"#{p.num} on session `{p.session_id}` {label}: `{p.command}`"
+            head = f"#{p.num} on session `{p.session_id}` {label}: `{_elide(p.command, 2000)}`"
             if p.ran_at:
                 head += f" (started {datetime.fromtimestamp(p.ran_at):%H:%M:%S})"
             if p.group:
@@ -2955,7 +2988,7 @@ class Engine:
             if p.watch:
                 head += " [watch: only changed iterations shown]"
             if p.edited:
-                head += f" (edited by technician; originally `{p.original_command}`)"
+                head += f" (edited by technician; originally `{_elide(p.original_command, 2000)}`)"
             block = [head]
             if note:
                 block.append(f"Technician's note: {note}")
@@ -3070,7 +3103,8 @@ class Engine:
         """The last message got no complete answer: the request failed, was stopped, or the
         app closed before a reply came."""
         return (bool(self.case) and not self.busy and bool(self.conv)
-                and (self.conv[-1].get("role") == "user" or self._last_turn_error is not None))
+                and ((self.conv[-1].get("role") == "user" and self.conv[-1].get("content") != _DROPPED)
+                     or self._last_turn_error is not None))
 
     def retry(self) -> None:
         """Send the last message again, with whichever model is selected now. Nothing is added
@@ -3891,7 +3925,7 @@ class Engine:
             context.append(f"Session: {sess.kind} to {sess.target}; OS/device: {sess.os_hint or 'unknown'}; shell: {sess.shell}")
         if self.hypotheses:
             context.append(prompts.hypotheses_text(self.hypotheses))
-        context.append(f"Command (#{p.num}, labelled {p.risk}): {p.command}\nStated purpose: {p.purpose}")
+        context.append(f"Command (#{p.num}, labelled {p.risk}): {_elide(p.command, 20000)}\nStated purpose: {p.purpose}")
         if p.rollback:
             context.append(f"Stated rollback: {p.rollback}")
         if p.cuts_session:

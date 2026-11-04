@@ -1941,8 +1941,9 @@ async function runItem(num, mode) {
       if (!ok) return;
       w.copiedOk = true;
     }
-    await clipWrite(item.command);
+    // status first: the server refuses an item that changed while a dialog was open (withdrawn)
     await api("POST", `/api/queue/${num}`, { status: "ran" });
+    await clipWrite(item.command);
     activateTab(sess.id, false);
     toast(`#${num} copied: paste it into ${sess.id}.`, "ok", 4000);
     return;
