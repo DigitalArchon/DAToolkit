@@ -134,3 +134,15 @@ def test_escape_sequences_split_across_reads_stay_out_of_the_transcript(tmp_path
         w.write(c)
     w.close()
     assert (tmp_path / "x.log").read_text() == written
+
+
+async def test_a_viewer_that_falls_behind_has_output_skipped_not_kept(tmp_path):
+    from datoolkit.sessions.manager import OutputQueue
+    q = OutputQueue(limit=100)
+    for _ in range(9):
+        q.put_nowait(b"x" * 30)                 # 270 bytes for a viewer that reads nothing
+    got = await q.get()
+    assert b"bytes of output skipped here" in got and q._q.qsize() <= 3
+    q.put_nowait(None)                           # the session's end still arrives
+    while (data := await q.get()) is not None:
+        assert len(data) <= 100

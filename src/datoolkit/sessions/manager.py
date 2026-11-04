@@ -22,6 +22,36 @@ from ..hostenv import host_env
 from .ptyproc import PtyProcess
 
 BACKLOG_BYTES = 512 * 1024
+VIEWER_BEHIND_BYTES = 8 * 1024 * 1024    # output a viewer may fall behind by before it is skipped
+
+
+class OutputQueue:
+    """One viewer's output still to be sent, bounded in bytes. A viewer that falls further
+    behind (a tab in the background while `yes` or a busy tcpdump runs) has what waits dropped
+    for a line saying so, rather than the app's memory growing without end; the transcript
+    keeps all of it. None (the session ended) is never dropped: nothing comes after it."""
+
+    def __init__(self, limit: int = VIEWER_BEHIND_BYTES):
+        self._q: asyncio.Queue = asyncio.Queue()
+        self._bytes, self._limit = 0, limit
+
+    def put_nowait(self, data: bytes | None) -> None:
+        if data is not None and self._bytes + len(data) > self._limit:
+            skipped = self._bytes + len(data)
+            while not self._q.empty():          # in place: the sender is waiting on this queue
+                self._q.get_nowait()
+            data = (f"\r\n\x1b[0;33m[{skipped:,} bytes of output skipped here: this view fell behind. The "
+                    "transcript has all of it.]\x1b[0m\r\n").encode()
+            self._bytes = 0
+        if data is not None:
+            self._bytes += len(data)
+        self._q.put_nowait(data)
+
+    async def get(self) -> bytes | None:
+        data = await self._q.get()
+        if data is not None:
+            self._bytes -= len(data)
+        return data
 
 _ANSI = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC
@@ -297,13 +327,13 @@ class SessionManager:
             sess.exited = True
             self._on_change()
 
-    def subscribe(self, sid: str) -> tuple[bytes, asyncio.Queue]:
+    def subscribe(self, sid: str) -> tuple[bytes, OutputQueue]:
         sess = self.sessions[sid]
-        q: asyncio.Queue = asyncio.Queue()
+        q = OutputQueue()
         sess.subscribers.add(q)
         return bytes(sess.backlog), q
 
-    def unsubscribe(self, sid: str, q: asyncio.Queue) -> None:
+    def unsubscribe(self, sid: str, q: OutputQueue) -> None:
         if sid in self.sessions:
             self.sessions[sid].subscribers.discard(q)
 
