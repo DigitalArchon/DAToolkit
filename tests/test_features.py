@@ -138,6 +138,18 @@ def test_builtin_recipes_are_well_formed():
             "path-latency-linux", "disk-health-windows", "dns-reach-linux", "baseline-linux", "baseline-windows"} <= set(ids)
 
 
+def test_a_malformed_recipe_file_doesnt_break_the_others(tmp_path):
+    # one bad file used to raise out of load_all, which every AI request calls
+    (tmp_path / "a-table.toml").write_text('[recipe]\nid = "one"\nsteps = [{ command = "uptime" }]\n')
+    (tmp_path / "b-strings.toml").write_text('[[recipe]]\nid = "two"\nsteps = ["lpstat -p"]\n')
+    (tmp_path / "c-junk.toml").write_text('recipe = 5\n')
+    (tmp_path / "d-broken.toml").write_text('[[recipe\n')
+    found = {r.id: r for r in recipes.load_all(tmp_path)}
+    assert found["one"].steps[0].command == "uptime"           # a single table is one recipe
+    assert "two" not in found                                   # no usable step
+    assert "disk-usage-linux" in found                         # the built-in ones are all there
+
+
 def test_user_recipe_overrides_builtin(tmp_path):
     (tmp_path / "mine.toml").write_text('''
 [[recipe]]
@@ -668,6 +680,23 @@ def test_replay_reports_rule_changes(tmp_path):
     assert r["risk_changes"][0]["now"] == "disruptive" and "pipe to shell" in r["risk_changes"][0]["reasons"]
     assert r["session_cuts"][0]["num"] == 2
     assert r["redaction_changes"][0]["new_redactions"] == 1 and r["injection_flags"]
+
+
+def test_replay_sees_no_change_in_labels_the_queue_gave_on_purpose(tmp_path):
+    # disruptive because it cuts the session, read-only because it is a rehearsal: both are the
+    # queue's doing under the same rules, not a change of rules
+    d = tmp_path / "20250101-000000-old"
+    d.mkdir()
+    cut = "cuts this session: may block SSH"
+    lines = [
+        {"ts": 1, "event": "session_opened", "id": "web01", "kind": "ssh"},
+        {"ts": 2, "event": "proposal", "num": 1, "session_id": "web01", "command": "sudo ufw enable",
+         "model_risk": "modifying", "risk": "disruptive", "cuts_session": "may block SSH", "risk_reasons": [cut]},
+        {"ts": 3, "event": "proposal", "num": 2, "session_id": "web01", "command": "sudo apt install -s htop",
+         "model_risk": "read_only", "risk": "read_only", "dry_run_of": 3},
+    ]
+    (d / "events.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    assert replay_case(d)["risk_changes"] == []
 
 
 async def test_layout_is_saved_quietly_and_kept_in_range(env, tmp_path):  # noqa: F811

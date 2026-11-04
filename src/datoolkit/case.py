@@ -200,7 +200,7 @@ class Case:
                 if entry.get("text"):
                     out += [entry["text"], ""]
                 for r in entry.get("results", []):
-                    out += [f"**#{r['num']} {r['status'].upper()}** on `{r['session_id']}`: `{r['command']}`", ""]
+                    out += [f"**#{r['num']} {r['status'].upper()}** on `{r['session_id']}`: {inline_code(r['command'])}", ""]
                     if r.get("note"):
                         out += [f"> Note: {r['note']}", ""]
                     if r.get("text"):
@@ -228,9 +228,8 @@ class Case:
             out.append("")
         out += ["## Command queue", "", "| # | Session | Command | Risk | Status | Rollback | Note |", "|---|---|---|---|---|---|---|"]
         for q in queue:
-            cmd = q["command"].replace("|", "\\|").replace("\n", " ")
-            rb = (q.get("rollback") or "").replace("|", "\\|").replace("\n", " ")
-            out.append(f"| {q['num']} | {q['session_id']} | `{cmd}` | {q['risk']} | {q['status']} | {rb} | {q['note']} |")
+            out.append(f"| {q['num']} | {q['session_id']} | {inline_code(_cell(q['command']))} | {q['risk']} | {q['status']} "
+                       f"| {_cell(q.get('rollback'))} | {_cell(q.get('note'))} |")
         path = self.dir / "transcript.md"
         path.write_bytes(utf8("\n".join(out) + "\n"))
         return path
@@ -271,6 +270,19 @@ def _read_meta(d: Path) -> dict | None:
     except (OSError, ValueError):
         pass
     return None
+
+
+def inline_code(text: str) -> str:
+    """`text` as inline code, with a delimiter longer than any backtick run inside: PowerShell
+    escapes with a backtick, and `"`n"` ended a one-backtick span early."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{'`' * (longest + 1)}{pad}{text}{pad}{'`' * (longest + 1)}"
+
+
+def _cell(text: str) -> str:
+    """Text for a Markdown table cell: a | or a line break would end the cell or the row."""
+    return str(text or "").replace("|", "\\|").replace("\n", " ")
 
 
 def fence(text: str, lang: str = "") -> str:

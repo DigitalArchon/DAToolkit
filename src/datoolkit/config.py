@@ -134,6 +134,10 @@ class Settings:
     prompt_cache: str = "1h"
     # generation parameters sent with every request; a missing key means "the model's default"
     generation: dict = field(default_factory=lambda: dict(params.DEFAULTS))
+    # 2 since the default effort moved to medium (Oct 2026): a config without it still holds the
+    # old defaults if untouched, which move to the new ones once (from_dict); a choice made after
+    # that stays, the same values included
+    generation_version: int = 2
     # "provider|model" that describes images for a chat model without vision; empty = none
     vision_model: str = ""
     # extra system-prompt instructions for particular chat models: [{"match": "glm", "text": "..."}],
@@ -190,9 +194,10 @@ def from_dict(data: dict) -> Config:
     cfg = _build(Config, {k: v for k, v in data.items() if k not in ("providers", "hosts", "settings")})
     cfg.providers = [_build(Provider, p) for p in data.get("providers", [])]
     cfg.hosts = [_build(Host, h) for h in data.get("hosts", [])]
-    cfg.settings = _build(Settings, data.get("settings", {}))
-    if cfg.settings.generation in params.OLD_DEFAULTS:
-        cfg.settings.generation = dict(params.DEFAULTS)     # untouched old defaults: the new ones
+    settings = data.get("settings", {})
+    cfg.settings = _build(Settings, settings)
+    if "generation_version" not in settings and cfg.settings.generation in params.OLD_DEFAULTS:
+        cfg.settings.generation = dict(params.DEFAULTS)     # untouched old defaults: the new ones, once
     return cfg
 
 

@@ -118,3 +118,21 @@ def test_reasoning_effort_defaults_to_medium_and_untouched_old_defaults_move_wit
     assert chosen.settings.generation == {"temperature": 0.5, "reasoning_effort": "low"}      # the technician's choice
     high = from_dict({"settings": {"generation": {"temperature": 0.3, "reasoning_effort": "high"}}})
     assert high.settings.generation["reasoning_effort"] == "high"
+
+
+def test_choosing_low_effort_after_the_move_stays_chosen():
+    # the move to the new defaults ran on every load, so "low" (with the default temperature)
+    # chosen in Settings went back to medium at each launch
+    from datoolkit.config import Settings, from_dict
+    s = Settings()
+    s.generation = {"temperature": 0.3, "reasoning_effort": "low"}
+    saved = {"settings": _round_trip(s)}
+    assert from_dict(saved).settings.generation == {"temperature": 0.3, "reasoning_effort": "low"}
+
+
+def _round_trip(settings) -> dict:
+    import tomllib
+    from dataclasses import asdict
+
+    import tomli_w
+    return tomllib.loads(tomli_w.dumps(asdict(settings)))

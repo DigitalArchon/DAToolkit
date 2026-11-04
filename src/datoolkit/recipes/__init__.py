@@ -186,14 +186,22 @@ def user_recipes_dir() -> Path:
 def _from_toml(path: Path) -> list[Recipe]:
     with path.open("rb") as f:
         data = tomllib.load(f)
+    recs = data.get("recipe", [])
+    if isinstance(recs, dict):
+        recs = [recs]                  # [recipe] written for [[recipe]]: one recipe all the same
     out = []
-    for r in data.get("recipe", []):
+    for r in recs if isinstance(recs, list) else []:
+        if not isinstance(r, dict):
+            continue
+        raw = r.get("steps", [])
         steps = [Step(str(s.get("command", "")), str(s.get("purpose", "")), str(s.get("risk", "read_only")), str(s.get("key", "")))
-                 for s in r.get("steps", []) if s.get("command")]
+                 for s in (raw if isinstance(raw, list) else []) if isinstance(s, dict) and s.get("command")]
         if not r.get("id") or not steps:
             continue
+        tags = r.get("tags", [])
         out.append(Recipe(id=str(r["id"]), name=str(r.get("name", r["id"])), os=str(r.get("os", "any")),
-                          steps=steps, description=str(r.get("description", "")), tags=list(r.get("tags", [])),
+                          steps=steps, description=str(r.get("description", "")),
+                          tags=[str(t) for t in tags] if isinstance(tags, list) else [],
                           install=str(r.get("install", "")), install_check=str(r.get("install_check", "")),
                           baseline=bool(r.get("baseline", False)), source=path.name))
     return out
@@ -208,7 +216,7 @@ def load_all(user_dir: Path | None = None) -> list[Recipe]:
             try:
                 for r in _from_toml(path):
                     by_id[r.id] = r
-            except (OSError, ValueError, TypeError):
+            except Exception:  # noqa: BLE001 - one bad file mustn't take every recipe (and every AI turn) with it
                 continue
     return list(by_id.values())
 

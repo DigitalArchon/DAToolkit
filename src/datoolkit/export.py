@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -172,7 +173,8 @@ def build_zip(case: dict, case_dir: Path, requests: list[dict], conv: list[dict]
         put("full-transcript.md", full_transcript(case, requests, conv, chat, system_now))
         for f in sorted(case_dir.glob("img-*")):
             z.write(f, f"images/{f.name}")
-        put("documents/transcript.md", transcript_md)
+        # beside the photos in the case folder, it names them img-1.png...; here they are in images/
+        put("documents/transcript.md", re.sub(r"\]\((img-[^)\s]+)\)", r"](../images/\1)", transcript_md))
         for name in ("ticket-summary.md", "client-update.md", "runbook.md"):
             if (case_dir / name).exists():
                 z.write(case_dir / name, f"documents/{name}")

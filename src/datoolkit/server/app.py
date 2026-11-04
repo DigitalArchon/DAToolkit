@@ -99,7 +99,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     app.state.companion = companion
 
     def check(t: str | None) -> bool:
-        return t is not None and hmac.compare_digest(t, token)
+        # as bytes: compare_digest raises on a str with anything but ASCII in it (a 500, not a 403)
+        return t is not None and hmac.compare_digest(t.encode("utf-8", "surrogateescape"), token.encode())
 
     def auth(request: Request) -> Engine:
         if not check(request.headers.get("x-token")):
@@ -127,9 +128,15 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         # an unknown queue number, session id or prompt id is a stale client, not a crash
         return JSONResponse({"error": f"Not found: {exc.args[0] if exc.args else exc}"}, status_code=400)
 
+    async def bad_value(_: Request, exc: Exception):
+        # a field of the wrong type or form in a request ("delta": "up", a port of "22a")
+        return JSONResponse({"error": f"Invalid request: {exc}"}, status_code=400)
+
     for a in (app, comp):
         a.add_exception_handler(UserError, user_error)
         a.add_exception_handler(KeyError, key_error)
+        a.add_exception_handler(ValueError, bad_value)
+        a.add_exception_handler(TypeError, bad_value)
 
     @app.get("/")
     async def index():
@@ -308,7 +315,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.post("/api/attest")
     async def attest(request: Request, e: Engine = Depends(auth)):
         body = await request.json() if int(request.headers.get("content-length") or 0) else {}
-        return await e.attest_now(str(body.get("slot", "chat")))
+        return await e.attest_now(str(body.get("slot", "chat")) if isinstance(body, dict) else "chat")
 
     @app.post("/api/hosts")
     async def save_host(body: dict, e: Engine = Depends(auth)):
@@ -343,7 +350,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/case")
     async def new_case(body: dict, e: Engine = Depends(auth)):
-        e.new_case(body.get("name", ""), body.get("sensitivity", "open"), body.get("notes", ""),
+        e.new_case(str(body.get("name") or ""), str(body.get("sensitivity") or "open"), str(body.get("notes") or ""),
                    client=str(body.get("client") or ""), history=bool(body.get("history")))
         return {"ok": True}
 

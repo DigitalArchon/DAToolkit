@@ -78,6 +78,8 @@ async def test_full_export_zip(env):  # noqa: F811
                    "**Tool result → AI**", "Root is 99% full.", "(changed)"):
         assert needle in md, needle
     assert "data:image" not in z.read("data/conversation.json").decode()
+    # the transcript lives in documents/, the photos in images/
+    assert "](../images/img-1.jpg)" in z.read("documents/transcript.md").decode()
     assert "exported_full" in (engine.case.dir / "events.jsonl").read_text()
     _, with_terms = engine.export_full(include_terminals=True)
     assert any(n.startswith("terminals/term-") for n in zipfile.ZipFile(io.BytesIO(with_terms)).namelist())
@@ -132,3 +134,17 @@ def test_native_save_dialog_writes_where_chosen(tmp_path):
     assert desktop._window.asked == "case-full-export.zip"      # only a name is suggested, never a path
     desktop._window = FakeWindow(None)                           # cancelled
     assert desktop.save_file("x.md", b"x") is None
+
+
+def test_markdown_keeps_backticks_in_commands_and_pipes_in_notes(tmp_path):
+    from datoolkit.case import Case
+    case = Case.create("md", "open", root=tmp_path)
+    ps = 'Get-PhysicalDisk | ForEach-Object { "$($_.FriendlyName)`n" }'
+    queue = [{"num": 1, "session_id": "dc1", "command": ps, "risk": "read_only", "status": "skipped",
+              "rollback": "", "note": "not on prod | ask Bob\nfirst"}]
+    chat = [{"kind": "user", "text": "", "results": [{"num": 1, "status": "ran", "session_id": "dc1", "command": ps}]}]
+    md = case.export_markdown(chat, queue).read_text(encoding="utf-8")
+    assert '``Get-PhysicalDisk \\| ForEach-Object { "$($_.FriendlyName)`n" }``' in md       # one code span, whole
+    row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
+    assert row.endswith("| not on prod \\| ask Bob first |") and row.count(" | ") == 6
+    assert '``Get-PhysicalDisk | ForEach-Object { "$($_.FriendlyName)`n" }``' in md            # the result line

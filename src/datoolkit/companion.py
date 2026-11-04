@@ -131,7 +131,9 @@ class CompanionServer:
         return self._task is not None and not self._task.done()
 
     def check(self, token: str | None) -> bool:
-        return bool(self.token) and token is not None and hmac.compare_digest(token, self.token)
+        # as bytes: compare_digest raises on a str with anything but ASCII (anyone on the LAN can send one)
+        return bool(self.token) and token is not None and hmac.compare_digest(
+            token.encode("utf-8", "surrogateescape"), self.token.encode())
 
     async def start(self, port: int) -> None:
         if self.running:

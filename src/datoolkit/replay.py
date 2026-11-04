@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .config import data_dir
+from .queue import Proposal, Queue
 from .safety import risk
 from .safety.inject import suspicious
 from .safety.redact import redact
@@ -32,11 +33,18 @@ def replay_case(case_dir: Path) -> dict:
             kinds[e.get("id", "")] = e.get("kind", "local")
         elif ev == "proposal":
             out["proposals"] += 1
-            level, reasons = risk.effective(e.get("model_risk", "modifying"), e.get("command", ""))
+            # classified as the queue does it (a cut session makes it disruptive, a rehearsal is
+            # read-only), so only a change of the rules shows, not how the label came about
+            command, sid = str(e.get("command", "")), str(e.get("session_id", ""))
+            p = Proposal(num=e.get("num") or 0, call_id="", session_id=sid, command=command, purpose="",
+                         model_risk=str(e.get("model_risk", "modifying")), risk="modifying",
+                         original_command=command, dry_run_of=e.get("dry_run_of"))
+            Queue._classify(p, {sid: kinds.get(sid, "local")})
+            level, reasons = p.risk, p.risk_reasons
             if level != e.get("risk"):
                 out["risk_changes"].append({"num": e.get("num"), "command": e.get("command"), "was": e.get("risk"),
                                             "now": level, "reasons": reasons})
-            cut = risk.session_impact(e.get("command", ""), kinds.get(e.get("session_id", ""), "local"))
+            cut = risk.session_impact(command, kinds.get(sid, "local"))
             if cut and not e.get("cuts_session"):
                 out["session_cuts"].append({"num": e.get("num"), "command": e.get("command"), "reason": cut})
             flags = sensitive(e.get("command", ""))

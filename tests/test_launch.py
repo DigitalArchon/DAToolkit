@@ -126,3 +126,28 @@ def test_the_window_icon_is_one_gtk_can_load(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDIR", str(tmp_path))
     (tmp_path / "datoolkit.png").write_bytes(b"not a png")    # unreadable: falls back
     assert window_icon().endswith("icon.svg")
+
+
+async def test_bad_requests_get_a_400_and_a_refused_settings_save_changes_nothing(env, tmp_path):  # noqa: F811
+    engine, _, _ = env
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    app.state.companion.token = "phone"
+    m = {"x-token": "main"}
+    engine.new_case("c", "open")
+    engine.queue.add("c", [{"session_id": "s", "command": "uptime", "risk": "read_only"}])
+    font, scroll = engine.cfg.settings.font_size, engine.cfg.settings.scrollback
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        assert (await c.post("/api/case", json={"name": None}, headers=m)).status_code == 200    # an untitled case
+        engine.queue.add("c", [{"session_id": "s", "command": "uptime", "risk": "read_only"}])
+        for path, body in (("/api/case", {"name": "x", "sensitivity": "secret"}),
+                           ("/api/queue/1/move", {"delta": "up"}), ("/api/settings", {"font_size": "big"}),
+                           ("/api/hosts", {"host": {"name": "h", "kind": "ssh", "host": "h.lan", "port": "22a"}}),
+                           ("/api/settings", {"font_size": 22, "scrollback": 50000, "companion_port": 443})):
+            r = await c.post(path, json=body, headers=m)
+            assert r.status_code == 400 and r.json()["error"], (path, body, r.status_code)
+        assert (engine.cfg.settings.font_size, engine.cfg.settings.scrollback) == (font, scroll)
+        # a token with characters outside ASCII is a wrong token, on both ports, not a crash
+        assert (await c.get("/api/state", headers={"x-token": "tök".encode("latin-1")})).status_code == 403
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:
+        assert (await c.get("/api/companion/state", headers={"x-token": "tök".encode("latin-1")})).status_code == 403

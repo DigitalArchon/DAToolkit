@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import difflib
 import hashlib
 import itertools
@@ -1083,10 +1084,15 @@ class Engine:
         self._changed()
 
     def save_settings(self, data: dict) -> None:
-        s = self.cfg.settings
+        # checked on a copy, kept only if every value holds: a refused one changed nothing, where
+        # the fields before it used to stay set (and were saved with the next change of anything)
+        s = copy.deepcopy(self.cfg.settings)
         for key in ("capture_max_lines", "capture_max_chars", "scrollback", "font_size", "context_warn_tokens"):
             if key in data:
-                value = int(data[key])
+                try:
+                    value = int(data[key])
+                except (TypeError, ValueError):
+                    raise UserError(f"{key} must be a whole number.") from None
                 if value <= 0:
                     raise UserError(f"{key} must be positive.")
                 setattr(s, key, value)
@@ -1152,6 +1158,8 @@ class Engine:
             if want and ("|" not in want or not self.cfg.provider(want.split("|", 1)[0])):
                 raise UserError("The vision helper must be given as provider|model.")
             s.vision_model = want
+        self.cfg.settings = s
+        if "vision_model" in data:
             self._refresh_helper_attestation()
         self._save_config(self.cfg)
         self._changed()
