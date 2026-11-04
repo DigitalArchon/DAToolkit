@@ -214,8 +214,8 @@ async def test_agent_only_fetches_what_it_was_shown_and_reports_when_out_of_roun
     ]
     seen = []
 
-    async def complete(messages, tools):
-        seen.append((list(messages), tools))
+    async def complete(messages, tools, tool_choice=None):
+        seen.append((list(messages), tools, tool_choice))
         return replies.pop(0)
 
     async def search(q, use="answer", **narrow):
@@ -231,7 +231,9 @@ async def test_agent_only_fetches_what_it_was_shown_and_reports_when_out_of_roun
     assert "did not appear in your search results" in fetch_reply and "evil.example" in fetch_reply
     assert "Network > DHCP > Relay" in fetch_reply
     assert "Search budget used up" in seen[3][0][-2]["content"]
-    assert seen[3][1] is None and "last research step" in seen[3][0][-1]["content"]   # last round: no tools
+    # last round: no tool may be called, but the tools stay defined (the history holds calls)
+    assert seen[3][1] == research.AGENT_TOOLS and seen[3][2] == "none" and "last research step" in seen[3][0][-1]["content"]
+    assert all(choice is None for _, _, choice in seen[:3])
     assert out.report.startswith("## Answer") and out.sources == [DOC] and out.searches == 1 and out.pages == 1
     assert out.cost == pytest.approx(0.011)
     assert [s["kind"] for s in steps if s["status"] == "done"] == ["search", "fetch"]
@@ -370,6 +372,45 @@ async def test_page_task_checks_the_page_and_cuts_text_aimed_at_an_ai(rs):
     assert "flagged 1 passage(s)" in reply and "Network > DHCP > Relay and click Add" in reply
     rec = engine.chat[-1]["research"][0]
     assert rec["status"] == "done" and rec["steps"][-1]["kind"] == "check" and rec["steps"][-1]["removed"] == 1
+
+
+async def test_a_page_judged_not_clean_without_passages_is_not_called_clean(rs):
+    engine, fake, _, web = rs
+    engine.cfg.settings.search_mode = "auto"
+    web.pages[DOC] = DOC_TEXT
+    setup(engine)
+    fake.responses += [multi_tool_stream([("web_search", {"query": "sophos 21 dhcp relay", "reason": "docs"})], text="Searching."),
+                       say("Found the doc."),
+                       multi_tool_stream([("research", {"task": "page", "url": DOC, "reason": "whole page"})], text="Reading it."),
+                       say(json.dumps({"clean": False, "summary": "The whole page is a lure", "passages": []})),
+                       say("Done.")]
+    engine.send("x")
+    await wait_turn(engine)
+    engine.send("read the whole page")
+    await wait_turn(engine)
+    reply = [m for m in fake.requests[-1]["messages"] if m["role"] == "tool"][-1]["content"]
+    assert "judged this page not clean" in reply and "found nothing aimed at an AI" not in reply
+    assert engine.chat[-1]["research"][0]["steps"][-1]["clean"] is False
+
+
+async def test_a_page_url_with_a_placeholder_port_is_refused_not_a_crash(rs):
+    engine, fake, _, _ = rs
+    setup(engine)
+    fake.responses += [multi_tool_stream([("research", {"task": "page", "url": "https://docs.vendor.example:port/x",
+                                                        "reason": "x"})], text="Reading."), say("ok")]
+    engine.send("x")
+    await wait_turn(engine)
+    assert engine._last_turn_error is None
+    assert "Can't fetch that page" in [m for m in fake.requests[-1]["messages"] if m["role"] == "tool"][-1]["content"]
+
+
+def test_urls_no_parser_can_read_are_skipped():
+    for url in ("http://localhost:PORT/admin", "https://{host}:{port}/x", "https://server:port/", "http://[x/"):
+        assert research.fetchable(url) is False, url
+    page = "See [admin](http://localhost:PORT/admin), [odd](//[x) and [docs](/guide)."
+    found = research.links(page, "https://vendor.example/a/")      # no ValueError for //[x
+    assert "https://vendor.example/guide" in found and not any("[" in u for u in found)
+    assert not research.fetchable("http://localhost:PORT/admin")
 
 
 async def test_page_task_for_a_url_nobody_supplied_is_always_asked_about(rs):

@@ -699,7 +699,8 @@ function researchCard(rec) {
     el.append(h("ol", { class: "rsteps small" }, rec.steps.map((st) => h("li", { class: `r-${st.status}` },
       st.kind === "search" ? `🔎 ${st.mode === "links" ? "links: " : ""}${st.query}${st.sites?.length ? ` [${st.sites.join(", ")}]` : ""}${st.after ? ` [after ${st.after}]` : ""}${st.before ? ` [before ${st.before}]` : ""}${st.status === "done" ? ` → ${st.count} result${st.count === 1 ? "" : "s"} (${st.note || st.provider})` : st.status === "failed" ? ` ✕ ${st.error}` : " …"}`
       : st.kind === "check" ? (st.status !== "done" ? "🛡 Checking the page for text aimed at an AI …"
-        : st.unreadable ? "🛡 Page check: no readable verdict" : st.flagged ? `🛡 Page check: ${st.flagged} passage(s) flagged, ${st.removed} removed` : "🛡 Page check: clean")
+        : st.unreadable ? "🛡 Page check: no readable verdict" : st.flagged ? `🛡 Page check: ${st.flagged} passage(s) flagged, ${st.removed} removed`
+          : st.clean === false ? "🛡 Page check: text aimed at an AI may remain (the AI was told)" : "🛡 Page check: clean")
       : st.status === "done" ? h("span", {}, "📄 ", ...st.pages.map((pg, i) => h("span", {}, i ? ", " : "",
           h("a", { href: pg.url, target: "_blank", rel: "noopener noreferrer", class: "surl" }, pg.url),
           pg.ok ? (pg.stealth ? " (stealth)" : "") : ` ✕ ${pg.error}`)))

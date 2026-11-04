@@ -173,19 +173,26 @@ def github_raw(url: str) -> str:
 
 
 def links(markdown: str, base: str = "") -> set[str]:
-    """Absolute links in a page, and its relative Markdown links resolved against `base`."""
-    out = {norm_url(u) for u in _LINK.findall(markdown or "")}
-    if base:
-        out |= {norm_url(urljoin(base, u)) for u in _REL_LINK.findall(markdown or "")}
+    """Absolute links in a page, and its relative Markdown links resolved against `base`. A link
+    no URL parser can read (`//[x`, a bad IPv6 address) is left out."""
+    out = set()
+    found = [(u, False) for u in _LINK.findall(markdown or "")]
+    found += [(u, True) for u in _REL_LINK.findall(markdown or "")] if base else []
+    for u, relative in found:
+        try:
+            out.add(norm_url(urljoin(base, u) if relative else u))
+        except ValueError:
+            continue
     return out
 
 
 def fetchable(url: str) -> bool:
     try:
         parts = urlsplit(url)
+        port = parts.port          # raises for a port that isn't a number: localhost:PORT, host:{port}
     except ValueError:
         return False
-    return parts.scheme in ("http", "https") and bool(parts.hostname) and parts.port in (None, 80, 443)
+    return parts.scheme in ("http", "https") and bool(parts.hostname) and port in (None, 80, 443)
 
 
 class Allowlist:
@@ -344,7 +351,9 @@ async def run(brief: str, *, complete: Complete, search: Callable[[str], Awaitab
         if last:
             messages.append({"role": "user", "content": "That was your last research step. Write your report now "
                              "from what you have found, without calling a tool."})
-        result = await complete(messages, None if last else AGENT_TOOLS)
+        # the tools stay defined on the last round, with none allowed: a request whose history
+        # holds tool calls but defines no tools is refused (Anthropic's Messages API)
+        result = await complete(messages, AGENT_TOOLS, **({"tool_choice": "none"} if last else {}))
         _add_usage(out.usage, getattr(result, "usage", None))
         calls = [] if last else result.tool_calls
         msg: dict = {"role": "assistant", "content": result.content or ("" if not calls else None)}

@@ -258,6 +258,26 @@ async def test_no_other_model_is_chosen_while_a_turn_runs(aenv):
         engine._turn = None
 
 
+async def test_a_call_cut_off_by_the_context_window_is_not_queued(aenv):
+    engine, fake = aenv
+    sid = await start(engine)
+    fake.replies.append(_sse([{"type": "text", "text": "Checking."}, propose(sid, "df -h")],
+                             stop="model_context_window_exceeded"))
+    engine.send("disk full")
+    await wait_turn(engine)
+    assert not engine.queue.items                 # its input may be missing fields the parser let go
+
+
+async def test_a_whole_call_before_a_cut_off_block_is_queued(aenv):
+    engine, fake = aenv
+    sid = await start(engine)
+    fake.replies.append(_sse([{"type": "text", "text": "Checking."}, propose(sid, "df -h"),
+                              {"type": "text", "text": "And after that I would"}], stop="max_tokens"))
+    engine.send("disk full")
+    await wait_turn(engine)
+    assert [p.command for p in engine.queue.items] == ["df -h"]
+
+
 async def test_a_declined_request_runs_no_tools(aenv):
     engine, fake = aenv
     sid = await start(engine)

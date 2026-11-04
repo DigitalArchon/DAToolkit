@@ -535,8 +535,11 @@ class AnthropicClient:
             return_calls: list[dict] = []        # never run the tools of a declined turn
         else:
             return_calls = [b for b in native if b.get("type") == "tool_use"]
-            if stop == "max_tokens" and return_calls:
-                return_calls = return_calls[:-1]  # the last one was cut off mid-input
+            # cut off by a limit: the block being written was, and it is dropped if it is a call
+            # (the SDK's lenient parser would pass on the half-written input). A call before it
+            # is whole.
+            if stop in ("max_tokens", "model_context_window_exceeded") and return_calls and native[-1] is return_calls[-1]:
+                return_calls = return_calls[:-1]
         result.tool_calls = [ToolCall(id=b["id"], name=b["name"], arguments=json.dumps(b.get("input") or {}))
                              for b in return_calls]
         yield "done", result

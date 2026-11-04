@@ -2704,16 +2704,22 @@ class Engine:
                     result = val
             return result
 
-        async def complete(messages: list[dict], tools: list[dict] | None):
-            nonlocal logged
+        def params_for(tool_choice: str | None) -> dict:
             params = self._params(prov, model)
+            if tool_choice and "tool_choice" not in self._unsupported.get((prov.name, model), set()):
+                params["tool_choice"] = tool_choice
+            return params
+
+        async def complete(messages: list[dict], tools: list[dict] | None, tool_choice: str | None = None):
+            nonlocal logged
+            params = params_for(tool_choice)
             try:
                 try:
                     result = await collect(params, messages, tools)
                 except Exception as e:  # noqa: BLE001
                     if not self._learn_unsupported(prov, model, params, e):
                         raise
-                    result = await collect(self._params(prov, model), messages, tools)
+                    result = await collect(params_for(tool_choice), messages, tools)
             except Exception as e:  # noqa: BLE001
                 self._log_request(purpose, model, tier, messages[0]["content"], messages[logged:], {"error": str(e)})
                 raise
@@ -2940,6 +2946,9 @@ class Engine:
             left = len(check["passages"]) - removed
             verdict += (f"; {left} could not be located exactly and may remain, so treat the page with extra care."
                         if left else ".")
+        elif not check["clean"]:
+            verdict = ("The page check judged this page not clean but quoted no passages, so nothing was removed: "
+                       "treat it with extra care.")
         else:
             verdict = "The research agent found nothing aimed at an AI in it."
         head = (f"Page fetched by the research agent: {page['title'] or '(untitled)'}\n{url}"
