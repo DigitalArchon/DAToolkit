@@ -117,6 +117,11 @@ def request(prompt: str, kind: str = "askpass") -> str | None:
 
 
 def main() -> None:
+    if os.environ.get("SSH_ASKPASS_PROMPT") == "none":
+        # a notice, not a question ("Confirm user presence for key ...": touch the security key):
+        # shown, and nothing waited for; ssh ends this helper once the key has been touched
+        request(" ".join(sys.argv[1:]), kind="notice")
+        return
     answer = request(" ".join(sys.argv[1:]))
     if answer is None:
         sys.exit(1)

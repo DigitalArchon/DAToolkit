@@ -242,6 +242,41 @@ async def test_a_prompt_naming_no_host_isnt_answered_for_a_host_behind_a_jump_ho
     assert await engine._askpass("inner", "bob@inner.lan's password: ", "askpass") == "inner-pw"
 
 
+async def test_an_ssh_config_alias_still_gets_its_saved_password(env, monkeypatch):
+    # Host web01 / HostName 10.0.0.5 in ~/.ssh/config: ssh's prompt names 10.0.0.5, not web01
+    from datoolkit.sessions import ssh as ssh_mod
+    engine, _, _ = env
+    engine.new_case("x", "open")
+    engine.cfg.hosts.append(Host("aliased", "ssh", "web01", user="bob", auth="password"))
+    creds.set_secret("host", "aliased", "pw-alias")
+    looked_up = []
+    monkeypatch.setattr(ssh_mod, "resolved_hostname", lambda host: looked_up.append(host.host) or "10.0.0.5")
+    engine.sessions.spawn("aliased", ["/bin/cat"], {}, name="aliased", kind="ssh", host_name="aliased")
+    assert await engine._askpass("aliased", "bob@10.0.0.5's password: ", "askpass") == "pw-alias"
+    engine.sessions.sessions["aliased"].used_stored_password = False
+    assert await engine._askpass("aliased", "bob@10.0.0.5's password: ", "askpass") == "pw-alias"
+    assert looked_up == ["web01"]                                         # once per host
+
+
+def test_resolved_hostname_reads_what_ssh_would_use(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    from datoolkit.sessions import ssh as ssh_mod
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **k: seen.append(argv) or SimpleNamespace(
+        stdout="user bob\nhostname 10.0.0.5\nport 22\n"))
+    assert ssh_mod.resolved_hostname(Host("a", "ssh", "web01", user="bob", port=2222)) == "10.0.0.5"
+    assert seen[0][:2] == ["ssh", "-G"] and seen[0][-2:] == ["--", "web01"] and "2222" in seen[0]
+
+
+async def test_a_notice_from_ssh_is_shown_not_asked(env):
+    engine, _, events = env
+    engine.new_case("x", "open")
+    assert await engine._askpass("web01", "Confirm user presence for key ED25519-SK SHA256:abc", "notice") == ""
+    assert not engine._prompts and any(e["type"] == "toast" and "Confirm user presence" in e["text"] for e in events)
+
+
 def test_prompt_host():
     from datoolkit.engine import prompt_host
 

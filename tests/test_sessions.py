@@ -146,3 +146,22 @@ async def test_a_viewer_that_falls_behind_has_output_skipped_not_kept(tmp_path):
     q.put_nowait(None)                           # the session's end still arrives
     while (data := await q.get()) is not None:
         assert len(data) <= 100
+
+
+async def test_a_security_key_touch_notice_is_shown_not_asked(tmp_path):
+    # ssh runs askpass with SSH_ASKPASS_PROMPT=none to say "touch your key": nothing is waited for
+    calls = []
+
+    async def handler(sid, prompt, kind):
+        calls.append((prompt, kind))
+        return "" if kind == "notice" else None
+
+    bridge = AskpassBridge(tmp_path / "rt", handler)
+    await bridge.start()
+    try:
+        env = {**os.environ, **bridge.env_for("web01"), "SSH_ASKPASS_PROMPT": "none"}
+        done = await asyncio.to_thread(subprocess.run, [str(bridge.script_path), "Confirm user presence for key ED25519-SK"],
+                                       env=env, capture_output=True, text=True, timeout=20)
+        assert done.returncode == 0 and calls == [("Confirm user presence for key ED25519-SK", "notice")]
+    finally:
+        await bridge.stop()

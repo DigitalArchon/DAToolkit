@@ -46,6 +46,7 @@ from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
 from .sessions import guac, rdpcert, winrm, xwindow
+from .sessions import ssh as ssh_mod
 from .sessions.askpass import AskpassBridge
 from .sessions.manager import RdpSession, SessionManager, WindowSession
 from .sessions.ssh import ssh_argv, target_label
@@ -342,6 +343,7 @@ class Engine:
         # Service call (and may raise the unlock dialog), and a snapshot asks about every
         # provider and host, so the answers are kept until a secret is stored or removed here.
         self._secret_cache: dict[tuple[str, str], bool] = {}
+        self._ssh_hostnames: dict[tuple, str] = {}      # a host's settings -> the address ssh resolves them to
         self._review_slots = asyncio.Semaphore(REVIEW_CONCURRENCY)
         self._reviewer_attest = asyncio.Lock()          # one attestation of a TEE reviewer, not one per review
 
@@ -1801,6 +1803,10 @@ class Engine:
     # ---------------------------------------------------------------- credential prompts
 
     async def _askpass(self, sid: str, prompt: str, kind: str) -> str | None:
+        if kind == "notice":          # ssh shows something and waits for nothing (a security key's touch)
+            self.emit("toast", level="info", text=f"{sid}: {prompt.strip()}")
+            self.log("credential_notice", session_id=sid, prompt=prompt)
+            return ""
         sess = self.sessions.sessions.get(sid)
         host = self.cfg.host(sess.host_name) if sess and sess.host_name else None
         secret = kind == "password" or bool(re.search(r"password|passphrase|passcode|\bpin\b|secret", prompt, re.I))
@@ -1812,7 +1818,14 @@ class Engine:
         # not a part of it) is not ours to answer from the keyring, and what the technician
         # types for it is not this host's password: it is never offered for saving under it.
         named = prompt_host(prompt)
-        other_host = bool(host and named and named != host.host.strip().lower().rstrip("."))
+        own = host.host.strip().lower().rstrip(".") if host else ""
+        if host and host.kind == "ssh" and named and named != own:
+            # an alias in ~/.ssh/config: the prompt names its HostName (looked up once per host)
+            key = (host.name, host.host, host.port, host.user, host.jump, tuple(host.ssh_options))
+            if key not in self._ssh_hostnames:
+                self._ssh_hostnames[key] = await asyncio.to_thread(ssh_mod.resolved_hostname, host)
+            own = named if named == self._ssh_hostnames[key] else own
+        other_host = bool(host and named and named != own)
         # A prompt naming no host may be the jump host's (OpenSSH before 8.4 names none for
         # keyboard-interactive): with one on the way, the target's password isn't offered to it.
         other_host = other_host or bool(host and host.jump and not named)

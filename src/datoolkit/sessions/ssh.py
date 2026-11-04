@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 from ..config import Host
 
 
@@ -33,6 +35,23 @@ def ssh_options(host: Host) -> list[str]:
         if opt:
             argv += ["-o", opt]
     return argv
+
+
+def resolved_hostname(host: Host) -> str:
+    """The address ssh connects to for this host after ~/.ssh/config (an alias's HostName),
+    lower-cased, or "" when ssh can't say: `ssh -G` prints the settings it would use and
+    connects to nothing. A password prompt names this address, not the alias."""
+    argv = (["ssh", "-G"] + (["-p", str(host.port)] if host.port else []) + (["-l", host.user] if host.user else [])
+            + ssh_options(host) + ["--", host.host])
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in out.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "hostname":
+            return value.strip().lower().rstrip(".")
+    return ""
 
 
 def target_label(host: Host) -> str:

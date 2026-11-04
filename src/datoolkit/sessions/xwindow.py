@@ -388,7 +388,10 @@ def capture(xid: int) -> tuple[bytes, dict]:
         if not info.visible:
             raise WindowError("The window is minimised or on another workspace: bring it back on screen, "
                               "then take the screenshot again.")
-        w, h, depth = x.geometry(xid)
+        geometry = x.geometry(xid)
+        if geometry is None:          # closed after info() saw it
+            raise WindowError("The window has closed.")
+        w, h, depth = geometry
         if not (0 < w <= MAX_SIDE and 0 < h <= MAX_SIDE):
             raise WindowError(f"The window has an unusable size ({w}×{h}).")
         bpp = x.bpp.get(depth)
