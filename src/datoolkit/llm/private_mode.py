@@ -26,7 +26,9 @@ pinned exactly in pyproject.toml. The design follows SealedLore's providers/priv
    Mode, and a stream that ends without its final chunk. What the relay says in an error is
    never sealed, so it is said to be the relay's, short and on one line. Nothing is ever sent
    unsealed and nothing falls back to the plain endpoint (`LLMClient` refuses `private/*`).
-   The last two from DA Vibe Manager's copy of this module (Nov 2026).
+   The last two from DA Vibe Manager's copy of this module (Nov 2026). Anything else of the
+   relay's an error quotes (a preflight refusal, an attestation bundle, the title of a key
+   mismatch) goes the same way, through `relay_said`, without what can't be seen.
 
 The attestation is redone once it is five minutes old, and once more if the enclave says the
 key has changed.
@@ -56,6 +58,7 @@ from urllib.parse import urlparse
 import httpx
 from openai.types.chat import ChatCompletionChunk
 
+from ..safety.hidden import visible
 from .capabilities import norm_id
 from .client import StreamAccumulator, is_private_mode, openai_messages
 
@@ -95,6 +98,16 @@ class ModelRetired(PrivateModeError):
                          f"choose another end-to-end encrypted model", status_code, body)
         self.model = model
         self.offered = [m for m in offered if m != model]
+
+
+def relay_said(text: str, limit: int = 200) -> str:
+    """What NanoGPT's relay wrote, or an SDK error quoting it, as an error may say it: never
+    sealed, and shown, logged and, when a research run fails, given to the chat model as its
+    tool's result. So on one line, short, and without what can't be seen (safety/hidden.py:
+    control, bidi, zero-width and tag characters), so it can't pass for the model's words or
+    carry an instruction to it that the technician doesn't see. Cut before it is cleaned: an
+    error body can be 64 MiB."""
+    return " ".join(visible(re.sub(r"[\x00-\x1f\x7f\x85\u2028\u2029]", " ", text[:4096])).split())[:limit]
 
 
 def private_ids_in(body: object) -> list[str]:
@@ -241,8 +254,9 @@ class Enclave:
                 except PrivateModeError:
                     raise
                 except Exception as e:  # noqa: BLE001 - the SDK's own errors
-                    raise PrivateModeError(
-                        f"the private model's enclave couldn't be attested: {e}; nothing was sent") from e
+                    # the SDK's errors can quote the bundle, which came through the relay
+                    raise PrivateModeError(f"the private model's enclave couldn't be attested: "
+                                           f"{relay_said(str(e), 500)}; nothing was sent") from e
                 self._at = self._clock()
             return self._verified
 
@@ -362,7 +376,7 @@ class PrivateModeClient:
             # just that it was refused.
             await self.check_offered(model, fresh=True, status_code=resp.status_code, body=resp.text)
             raise PrivateModeError(f"NanoGPT refused the Private Mode request (HTTP {resp.status_code}): "
-                                   f"{resp.text[:300]}", resp.status_code, resp.text)
+                                   f"{relay_said(resp.text, 300)}", resp.status_code, resp.text)
         try:
             data = resp.json()
         except ValueError as e:
@@ -392,7 +406,8 @@ class PrivateModeClient:
                 return
             except KeyConfigMismatchError as e:
                 if started or attempt:
-                    raise PrivateModeError(f"the enclave refused our key twice: {e}") from e
+                    # its title is the relay's: the 422 that says so isn't sealed
+                    raise PrivateModeError(f"the enclave refused our key twice: {relay_said(str(e))}") from e
             except PrivateModeError as e:
                 missing_seal = e.status_code == 400 and "missing_encrypted_body_header" in e.body
                 if started or attempt or not missing_seal:
@@ -424,9 +439,8 @@ class PrivateModeClient:
                 if resp.status_code >= 400:
                     text = (await resp.aread()).decode(errors="replace")
                     # written by NanoGPT's relay, not the enclave: never sealed, so said as that, and short
-                    said = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", text).split())[:200]
                     raise PrivateModeError(f"Private Mode request failed (HTTP {resp.status_code}); NanoGPT's relay "
-                                           f"said (unauthenticated): {said}", resp.status_code, text)
+                                           f"said (unauthenticated): {relay_said(text)}", resp.status_code, text)
                 from ehbp.protocol import RESPONSE_NONCE_HEADER
                 # EHBP passes a reply that isn't a success through as it came, unsealed: one the relay made
                 # itself (a 302 with an answer in it) would pass for the enclave's. Only a sealed one counts.
