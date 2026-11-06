@@ -625,7 +625,7 @@ edit. Sovereign cases do neither.
 **How E2EE works** (`src/datoolkit/llm/private_mode.py`, following SealedLore's implementation):
 
 1. **Attest.** Before anything is sent (even NanoGPT's billing check), the enclave is attested
-   with Tinfoil's own verifier, pinned as `tinfoil==0.14.0`.
+   with Tinfoil's own verifier, pinned as `tinfoil==0.15.0`.
    - The hardware report (AMD SEV-SNP or Intel TDX) must match the router release Tinfoil
      published, as recorded by Sigstore.
    - The report must bind the key that requests are sealed to.
@@ -634,10 +634,17 @@ edit. Sovereign cases do neither.
    X25519 + AES-GCM), including the conversation, the tool definitions and a private
    prompt-cache secret. The reply comes back sealed.
 3. **Refuse** anything that doesn't fit:
-   - a reply that isn't sealed or isn't marked Private Mode;
+   - a reply that isn't sealed or isn't marked Private Mode, whatever its HTTP status (NanoGPT's
+     relay can't read what it carries, but it could answer a request itself, with a redirect);
    - a stream that ends early;
    - a failed attestation. Nothing is sent, and a `private/` model never falls back to the
      plain endpoint.
+
+   What the relay writes in an error is never sealed. So the error says it is the relay's
+   ("NanoGPT's relay said (unauthenticated): …") and shows it on one line, short and without
+   invisible characters. Whatever of the relay's a refused billing check or a failed
+   attestation quotes is shown the same way, because an error can reach the AI: a research
+   run that fails reports its error to it.
 4. **Show and log it.**
    - The top bar shows **🔐 attested**; hover for the enclave, release and key fingerprint,
      and click to re-check.
