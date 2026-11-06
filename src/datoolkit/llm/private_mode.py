@@ -20,9 +20,13 @@ pinned exactly in pyproject.toml. The design follows SealedLore's providers/priv
    sha256 as NanoGPT requires, but the sealed body carries **our own** random cache secret, so
    no one else (NanoGPT included) can probe our prompt cache.
 3. **Seal** the body with EHBP (HPKE X25519 + AES-GCM) to the attested key and decrypt the reply.
-   The transport refuses a 2xx reply that isn't sealed; we also refuse one NanoGPT doesn't mark
-   as Private Mode, and a stream that ends without its final chunk. Nothing is ever sent
+   The transport refuses a 2xx reply that isn't sealed; we refuse any other reply that isn't
+   (EHBP passes one through as it came, so a reply the relay made itself, a 302 with a model's
+   answer in it, would otherwise pass for the enclave's), one NanoGPT doesn't mark as Private
+   Mode, and a stream that ends without its final chunk. What the relay says in an error is
+   never sealed, so it is said to be the relay's, short and on one line. Nothing is ever sent
    unsealed and nothing falls back to the plain endpoint (`LLMClient` refuses `private/*`).
+   The last two from DA Vibe Manager's copy of this module (Nov 2026).
 
 The attestation is redone once it is five minutes old, and once more if the enclave says the
 key has changed.
@@ -42,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 from dataclasses import asdict, dataclass
@@ -418,8 +423,16 @@ class PrivateModeClient:
                                      json=body, headers=headers) as resp:
                 if resp.status_code >= 400:
                     text = (await resp.aread()).decode(errors="replace")
-                    raise PrivateModeError(f"Private Mode request failed (HTTP {resp.status_code}): {text[:300]}",
-                                           resp.status_code, text)
+                    # written by NanoGPT's relay, not the enclave: never sealed, so said as that, and short
+                    said = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", text).split())[:200]
+                    raise PrivateModeError(f"Private Mode request failed (HTTP {resp.status_code}); NanoGPT's relay "
+                                           f"said (unauthenticated): {said}", resp.status_code, text)
+                from ehbp.protocol import RESPONSE_NONCE_HEADER
+                # EHBP passes a reply that isn't a success through as it came, unsealed: one the relay made
+                # itself (a 302 with an answer in it) would pass for the enclave's. Only a sealed one counts.
+                if not 200 <= resp.status_code < 300 or RESPONSE_NONCE_HEADER not in resp.headers:
+                    raise PrivateModeError(f"the reply wasn't sealed by the enclave (HTTP {resp.status_code}); refused",
+                                           resp.status_code)
                 if resp.headers.get("x-nanogpt-private-mode") != "tinfoil":
                     raise PrivateModeError("the reply didn't come back through Private Mode; refused")
                 async for line in resp.aiter_lines():
