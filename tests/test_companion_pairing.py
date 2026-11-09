@@ -55,8 +55,19 @@ def test_wrong_codes_spend_the_code_after_a_few():
     for _ in range(companion.CODE_FAILURES):
         assert refused(lambda: p.claim("wrong", "x")) == 403
     assert refused(lambda: p.claim(code, "x")) == 410
-    p.open()
-    assert refused(lambda: p.claim("ünïcode", "x")) == 403        # whatever is sent, a refusal, not a crash
+
+
+def test_a_code_beyond_ascii_is_a_wrong_try_not_a_crash():
+    """compare_digest raises TypeError on a str with a non-ASCII character in it: the claim would
+    answer 500, and the try go uncounted, so the five wrong tries could be had again and again.
+    (SealedLore's test, bb08f33.)"""
+    p = Pairing(Clock())
+    code = p.open()
+    for wrong in ("é" * 26, code[:-1] + "ß", "\udcff", "ｃｏｄｅ"):
+        assert refused(lambda w=wrong: p.claim(w, "x")) == 403
+    assert refused(lambda: p.claim("wrong", "x")) == 403  # the fifth
+    assert refused(lambda: p.claim(code, "x")) == 410, "spent: every one counted"
+    assert companion.device_for("\ud800", [("one", token_hash("x"))]) is None     # nor a token
 
 
 def test_claims_are_limited_per_minute():

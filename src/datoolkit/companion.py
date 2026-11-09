@@ -106,7 +106,7 @@ def new_token() -> str:
 
 
 def token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8", "surrogateescape")).hexdigest()
+    return hashlib.sha256(token.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def device_for(token: str | None, devices: Iterable[tuple[str, str]]) -> str | None:
@@ -191,7 +191,10 @@ class Pairing:
         self._recent.append(now)
         if self._code is None:
             raise PairingRefused(410, "Pairing isn't open on the computer. Show the connect code there and scan it again.")
-        if not isinstance(code, str) or not hmac.compare_digest(code.strip().lower().encode(), self._code.encode()):
+        # As bytes: compare_digest refuses a str with anything beyond ASCII in it (TypeError, a 500,
+        # and the try uncounted); surrogatepass, so a lone surrogate is a wrong try too
+        if not isinstance(code, str) or not hmac.compare_digest(
+                code.strip().lower().encode("utf-8", "surrogatepass"), self._code.encode("ascii")):
             self._failures += 1
             if self._failures >= CODE_FAILURES:
                 self._code = None
