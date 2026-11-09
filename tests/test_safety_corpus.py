@@ -166,6 +166,22 @@ def test_changing_forms_still_raise(cmd, level):
     ("Authorization: Negotiate YIIGhgYGKwYBBQUCoIIGejCCBnag", "YIIGhgYGKwYBBQUCoIIGejCCBnag"),
     ("mysql -u root -pHunter2Mysql -h db app", "Hunter2Mysql"), ("sshpass -p Hunter2Ssh ssh bob@web01", "Hunter2Ssh"),
     ("Server=db;Uid=sa;Pwd=OdbcSecret1;", "OdbcSecret1"), ("password=123456", "123456"),
+    ('Authorization: Digest username="bob", response="6629fae49393a05397450978507c4ef1"', "6629fae49393a05397450978507c4ef1"),
+    ("Authorization: NTLM TlRMTVNTUAABAAAAB4IIog==", "TlRMTVNTUAABAAAAB4IIog=="),
+    # in quotes, as JSON and Python print them (DA Vibe Manager's)
+    ('{"password": "hunter2", "api_key": "abc123def456"}', "hunter2"),
+    ('{"password": "hunter2", "api_key": "abc123def456"}', "abc123def456"),
+    ("{'client_secret': 'S3cr3tValue'}", "S3cr3tValue"),
+    ('{"auths": {"ghcr.io": {"auth": "dXNlcjpodW50ZXIy"}}}', "dXNlcjpodW50ZXIy"),     # docker's config.json
+    # PGP's private keys, and one cut short (the head of a key file, or output shortened); these keys
+    # are in two pieces, joined again when the test runs: a file that seems to hold real keys can't be
+    # pushed to GitHub
+    ("-----BEGIN PGP PRIVATE " "KEY BLOCK-----\n\nlQOYBF1234secret\n=abcd\n-----END PGP PRIVATE " "KEY BLOCK-----", "lQOYBF1234secret"),
+    ("-----BEGIN OPENSSH PRIVATE " "KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUA", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUA"),
+    ("gl" "pat-abcdefghijklmnopqrst", "abcdefghijklmnopqrst"),
+    ("STRIPE=sk_" "live_51HabcdefghijklmnopqrstuvwxYZ in .env", "51HabcdefghijklmnopqrstuvwxYZ"),
+    ("stripe key: rk_" "live_51HabcdefghijklmnopqrstuvwxYZ", "51HabcdefghijklmnopqrstuvwxYZ"),
+    ("key AIza" "SyA-abcdefghijklmnopqrstuvwxyz12345", "AIza" "SyA-abcdefghijklmnopqrstuvwxyz12345"),
 ])
 def test_secrets_in_these_forms_are_redacted(text, secret):
     out, n = redact(text)
@@ -179,6 +195,7 @@ def test_secrets_in_these_forms_are_redacted(text, secret):
     ("Password last set            1/2/2025 10:00:00 AM", "Password last set"),
     ("PWD=/home/bob\nOLDPWD=/home/bob/src", "OLDPWD=/home/bob/src"),
     ("kubectl get secret db-creds -o yaml", "db-creds"), ("db:\n  password:\n    host: db", "host: db"),
+    ("TOKEN=\nNEXT_KEY=value", "NEXT_KEY=value"),
 ])
 def test_diagnostic_output_is_not_mangled(text, kept):
     out, n = redact(text)

@@ -37,7 +37,8 @@ def _key_value(m: re.Match) -> str:
 
 
 RULES: list[tuple[re.Pattern, object]] = [
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*?-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----", re.S),
+    # PGP's too (PRIVATE KEY BLOCK), and a key cut short (head of a key file, output shortened): to its end
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)", re.S),
      "[REDACTED PRIVATE KEY]"),
     # an Authorization header, whatever its scheme (Bearer, Basic, Negotiate, NTLM, Digest...)
     (re.compile(r"(\bauthorization[ \t]*:[ \t]*)([A-Za-z][\w-]*)[ \t]+(?!\[REDACTED)[^\r\n]+", _I), r"\1\2 " + MASK),
@@ -47,6 +48,9 @@ RULES: list[tuple[re.Pattern, object]] = [
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), MASK),
     (re.compile(r"\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}"), MASK),
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), MASK),
+    (re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"), MASK),                    # GitLab
+    (re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}"), MASK),        # Stripe's secret and restricted keys
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), MASK),                       # Google's API keys
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), MASK),  # JWT
     # crypt(3) hashes as in /etc/shadow
     (re.compile(r"\$(1|2[abxy]?|5|6|y|gy|7)\$[^\s:]{8,}"), "[REDACTED HASH]"),
@@ -78,8 +82,9 @@ RULES: list[tuple[re.Pattern, object]] = [
     # a YAML value on the line under its key (`password:` then `  s3cret`), not a mapping under it
     (re.compile(rf"^(([ \t]*)[A-Za-z0-9_.-]*(?:{_SECRET_WORDS})[A-Za-z0-9_.-]*[ \t]*:[ \t]*\n\2[ \t]+)"
                 r"(?![^\n]*:(?:[ \t]|$))(?!-[ \t])(?!\[REDACTED)\S[^\n]*", _I | re.M), r"\1" + MASK),
-    # key=value / key: value (env files, config files, JSON, URLs, RouterOS password=)
+    # key=value / key: value (env files, config files, JSON, a Python dict, URLs, RouterOS password=)
     (_KEY_VALUE, _key_value),
+    (re.compile(r"([\"']auth[\"'][ \t]*:[ \t]*)(?!\[REDACTED)(\"[^\"]*\"|'[^']*')", _I), r"\1" + MASK),     # docker's config.json
     # credentials in URLs: scheme://user:pass@host
     (re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]+:)[^\s@/]+@", _I), r"\1" + MASK + "@"),
 ]
