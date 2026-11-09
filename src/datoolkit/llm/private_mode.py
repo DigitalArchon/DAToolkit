@@ -63,6 +63,7 @@ import httpx
 from openai.types.chat import ChatCompletionChunk
 
 from ..safety.hidden import visible
+from . import netguard, sdk_guard
 from .capabilities import norm_id
 from .client import StreamAccumulator, is_private_mode, openai_messages
 from .dcap import since_boot
@@ -185,10 +186,13 @@ def _hardware(document: dict) -> str:
 
 
 def tinfoil_verify(relay: str, cache_secret: str) -> Verified:
-    """Attest Tinfoil's router through NanoGPT's relay. Blocking network I/O: run in a thread."""
+    """Attest Tinfoil's router through NanoGPT's relay. Blocking network I/O: run in a thread.
+    The SDK's own fetches (the release and its Sigstore bundle, AMD's and Intel's collateral)
+    follow no redirect off https, nor one from the internet into this network (llm/sdk_guard.py)."""
     from tinfoil import SecureClient
     from tinfoil.github import fetch_latest_release
 
+    sdk_guard.guard(netguard.is_local)
     # The cache secret is passed explicitly, or the SDK would create one under ~/.tinfoil;
     # this client only verifies, it never sends a request.
     client = SecureClient(base_url=relay + "/", attestation_bundle_url=relay, transport="ehbp",
