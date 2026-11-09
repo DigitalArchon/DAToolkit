@@ -585,7 +585,7 @@ function makeStorage() {
 
 // The frontend in a fresh page: `app.run(code)` evaluates in the page (its `const`s, such as S,
 // are only reachable that way); `app.call(name, ...args)` calls one of its functions.
-function loadApp({ token = "tok", port = 48599 } = {}) {
+function loadApp({ token = "tok", port = 48599, inFragment = false } = {}) {
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   const source = fs.readFileSync(path.join(WEB, "app.js"), "utf8");
   const document = new Document(html);
@@ -708,8 +708,10 @@ function loadApp({ token = "tok", port = 48599 } = {}) {
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
     requestAnimationFrame: (fn) => clock.setTimeout(() => fn(clock.now), 16), cancelAnimationFrame: clock.clearTimeout,
     document,
-    location: { search: `?t=${token}`, host: `127.0.0.1:${port}`, hostname: "127.0.0.1", port: String(port),
-      protocol: "http:", origin: `http://127.0.0.1:${port}`, href: `http://127.0.0.1:${port}/?t=${token}`, reload() {} },
+    // the token as the app window has it (?t=), or as the browser's launch page hands it on (#t=)
+    location: { search: inFragment ? "" : `?t=${token}`, hash: inFragment ? `#t=${token}` : "", host: `127.0.0.1:${port}`,
+      hostname: "127.0.0.1", port: String(port), protocol: "http:", origin: `http://127.0.0.1:${port}`,
+      href: `http://127.0.0.1:${port}/${inFragment ? "#" : "?"}t=${token}`, reload() {} },
     history: { replaceState: (state, title, url) => { app.historyUrl = url; } },
     sessionStorage: makeStorage(),
     localStorage: makeStorage(),

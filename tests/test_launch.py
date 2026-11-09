@@ -2,6 +2,7 @@
 the programs it starts (it may run from an AppImage)."""
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -151,3 +152,43 @@ async def test_bad_requests_get_a_400_and_a_refused_settings_save_changes_nothin
         assert (await c.get("/api/state", headers={"x-token": "tök".encode("latin-1")})).status_code == 403
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:
         assert (await c.get("/api/companion/state", headers={"x-token": "tök".encode("latin-1")})).status_code == 403
+
+
+def test_the_browser_is_handed_a_private_page_not_the_address_with_the_token(tmp_path, monkeypatch, capsys):
+    """webbrowser.open ran xdg-open, and the browser, with the address and its token on their
+    command lines, which every user of this computer can read (/proc/<pid>/cmdline). The browser
+    gets a page's path now, a file only this user can read, which moves on to the address with
+    the token in its fragment (Jupyter's redirect file); it goes when DA Toolkit ends."""
+    import os
+    import re
+    import stat
+    import webbrowser
+    from urllib.parse import unquote, urlparse
+
+    import uvicorn
+
+    class Server:                      # starts, and is done at once
+        def __init__(self, config):
+            self.started, self.should_exit = False, False
+
+        def run(self):
+            self.started = True
+
+    seen = {}
+
+    def open_(url):
+        path = Path(unquote(urlparse(url).path))
+        seen.update(url=url, page=path.read_text(), mode=stat.S_IMODE(os.stat(path).st_mode),
+                    folder=stat.S_IMODE(os.stat(path.parent).st_mode), path=path)
+        return True
+
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    monkeypatch.setattr(webbrowser, "open", open_)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    app_mod.main(["--browser", "--port", "48577"])
+    token = re.search(r"#t=([\w-]+)", seen["page"]).group(1)
+    assert len(token) > 30 and token not in seen["url"] and seen["url"].startswith(f"file://{tmp_path}/")
+    assert f'location.replace("http://127.0.0.1:48577/#t={token}")' in seen["page"]
+    assert (seen["mode"], seen["folder"]) == (0o600, 0o700)
+    assert not seen["path"].exists() and not seen["path"].parent.exists()      # gone when it ended
+    assert f"http://127.0.0.1:48577/#t={token}" in capsys.readouterr().out     # to open by hand

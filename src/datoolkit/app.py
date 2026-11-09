@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import html
+import json
 import os
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -19,6 +23,28 @@ from . import config
 from .engine import Engine
 from .hostenv import set_for_self
 from .server.app import create_app, runtime_dir
+
+
+def launch_file(url: str) -> Path:
+    """A page that moves on to `url` at once, in a folder of its own that only this user can read
+    (0700, its name random, under XDG_RUNTIME_DIR), the file 0600: the browser is handed this
+    file's path rather than the address (Jupyter's redirect file). The address carries the token,
+    which grants terminal access, and xdg-open's and the browser's command lines can be read by
+    every user of this computer (/proc/<pid>/cmdline). The token rides in the address's fragment,
+    which the browser never sends; the page keeps it for its tab and takes it out of the address
+    bar (app.js). Remove the folder when done (shutil.rmtree(path.parent))."""
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    folder = Path(tempfile.mkdtemp(prefix="datoolkit-launch-", dir=base if base and os.path.isdir(base) else None))
+    path = folder / "open.html"
+    shown = html.escape(url, quote=True)
+    page = (f'<!doctype html>\n<html><head><meta charset="utf-8"><title>DA Toolkit</title>\n'
+            f'<meta http-equiv="refresh" content="0;url={shown}"></head>\n'
+            f'<body><p><a href="{shown}">Open DA Toolkit</a></p>\n'
+            f'<script>location.replace({json.dumps(url)});</script></body></html>\n')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(page)
+    return path
 
 
 def _free_port() -> int:
@@ -235,14 +261,18 @@ def main(argv: list[str] | None = None) -> None:
         time.sleep(0.05)
 
     url = f"http://127.0.0.1:{port}/?t={token}"
+    launch = None
     try:
         if use_browser:
+            # the token in the fragment: never in a request's first line (so in no log of the server's)
+            url = f"http://127.0.0.1:{port}/#t={token}"
             print(f"DA Toolkit running. Open this URL (keep it private - it grants terminal access):\n{url}",
                   flush=True)
             if not args.no_open:
                 import webbrowser
 
-                webbrowser.open(url)
+                launch = launch_file(url)
+                webbrowser.open(launch.as_uri())   # not the address: see launch_file
             while thread.is_alive():  # until Quit in the page, or Ctrl+C
                 thread.join(0.5)
         else:
@@ -273,6 +303,8 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+        if launch is not None:
+            shutil.rmtree(launch.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":

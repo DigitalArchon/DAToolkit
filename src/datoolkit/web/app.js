@@ -13,8 +13,11 @@ const DESKTOP = (() => {
   } catch { return fromUrl; }
 })();
 
+// The token comes in the address, kept for this tab and taken out of the address bar: in the
+// query from the app window, in the fragment from the browser's launch page (app.launch_file),
+// which the browser never sends to the server.
 const TOKEN = (() => {
-  const fromUrl = new URLSearchParams(location.search).get("t");
+  const fromUrl = new URLSearchParams(location.search).get("t") || new URLSearchParams((location.hash || "").slice(1)).get("t");
   try {
     if (fromUrl) sessionStorage.setItem("dat-token", fromUrl);
     const t = fromUrl || sessionStorage.getItem("dat-token");

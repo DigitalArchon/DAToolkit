@@ -44,6 +44,14 @@ test("the page starts against the real index.html: its case, terminal and queue"
   assert.equal(app.$("#queue-list").querySelectorAll(".qitem").length, 4);
 });
 
+test("the token handed on in the address's fragment, as the browser's launch page does, is taken and hidden", async () => {
+  const app = loadApp({ token: "frag", inFragment: true });
+  await app.event({ type: "state", state: state("a") });
+  assert.equal(app.events().url, "ws://127.0.0.1:48599/ws/events?t=frag");
+  assert.equal(app.historyUrl, "/");
+  assert.equal(app.window.sessionStorage.getItem("dat-token"), "frag");
+});
+
 test("every element app.js looks up by id is on the page or made by app.js", () => {
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   const js = fs.readFileSync(path.join(WEB, "app.js"), "utf8");
