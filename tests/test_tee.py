@@ -423,6 +423,25 @@ def test_the_whole_real_attestation_is_full(real, monkeypatch):
     assert result.signing_address == real["signing_address"]
 
 
+REDPILL = {"api_version": "aci/1", "service_capabilities": {"serving": "aggregator"},
+           "attestation": {"workload_keyset": {"not_after": 4102444800}}}      # (2100)
+
+
+def test_redpills_gateway_is_attested_only_in_part_and_its_expired_keys_are_refused(real, monkeypatch):
+    """RedPill's gateway passes each request on to the model's host: its quote and the GPUs' evidence
+    hold, but not that the model itself runs in an enclave, so it isn't called "full". (DA Vibe
+    Manager's test.)"""
+    result = _real_client(real, monkeypatch, extra=REDPILL).attest()
+    assert result.level == "partial" and result.shortfalls == ["the model's own enclave unchecked (RedPill's gateway)"]
+    assert "this is RedPill's gateway" in result.detail
+    assert result.gpus == 8 and result.tcb_status == "UpToDate"
+    for shape in ({"api_version": "aci/1"}, {"service_capabilities": {"serving": "aggregator"}}):
+        assert _real_client(real, monkeypatch, extra=shape).attest().level == "partial"
+    expired = {**REDPILL, "attestation": {"workload_keyset": {"not_after": 1_700_000_000}}}
+    with pytest.raises(TeeRefused, match="attested keys expired on 2023-11-14"):
+        _real_client(real, monkeypatch, extra=expired).attest()
+
+
 def test_the_real_quote_for_another_nonce_is_refused(real):
     """The same genuine quote, replayed against a fresh request."""
     client = TeeClient(
