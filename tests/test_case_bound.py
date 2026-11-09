@@ -40,7 +40,7 @@ def gated_complete(engine, reply: str, sent: list | None = None):
     """engine._complete held until the returned event is set."""
     gate = asyncio.Event()
 
-    async def complete(client, prov, model, messages):
+    async def complete(client, prov, model, messages, replies=None):
         if sent is not None:
             sent.append((model, messages))
         await gate.wait()

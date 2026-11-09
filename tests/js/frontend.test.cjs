@@ -541,3 +541,42 @@ test("the model picker says how many models it isn't showing", async () => {
   assert.equal(list.querySelectorAll(".model-row").length, 10);
   assert.equal(list.querySelectorAll(".model-row").length, list.children.length, "no note under ten models");
 });
+
+test("whatever else a TEE model wrote carries the reply's mark: a description, a second opinion, research, a write-up, a summary", async () => {
+  const app = await page("a");
+  const tee = { tee_attested: "Intel TDX quote verified", tee_signature: "failed" };
+  const marks = (el) => el.querySelectorAll(".tee-badge").map((b) => [b.textContent, b.getAttribute("class")]);
+  const failed = ["🛡 TEE · ✖ check failed", "tee-badge bad"];
+
+  const user = app.call("renderEntry", { kind: "user", text: "look", images: ["img-1.png"],
+    image_notes: { "img-1.png": { model: "TEE/kimi-k3", text: "A console menu.", ...tee, tee_signature: "verified" } } });
+  assert.deepEqual(marks(user.querySelector("summary")), [["🛡 TEE · ✔ verified", "tee-badge ok"]]);
+
+  const item = { num: 3, command: "uptime", review: { status: "done", level: "care", verdict: "proceed with care",
+    summary: "shows the load", model: "TEE/glm-5.3", tier: "tee", text: "SUMMARY: shows the load", ...tee } };
+  assert.deepEqual(marks(app.call("reviewLine", item)), [failed]);
+  app.call("showReview", item);
+  assert.deepEqual(marks(app.$(".modal")), [failed]);
+  button(app.$(".modal"), "Close").click();
+  await app.clock.tick(0);
+
+  const card = app.call("researchCard", { id: "1", task: "research", status: "done", brief: "dhcp relay", model: "TEE/glm-5.3",
+    searches: 1, pages: 1, cost: 0.01, steps: [], ...tee });
+  assert.deepEqual(marks(card.querySelector(".phead")), [failed]);
+  assert.deepEqual(marks(app.call("researchCard", { id: "2", task: "research", status: "done", brief: "b", model: "x/y",
+    searches: 0, pages: 0, steps: [] })), []);                         // a model that isn't TEE: no mark
+
+  app.routes["POST /api/export/summary"] = () => ({ text: "Ticket: VPN restored.", path: "/cases/a/ticket-summary.md", ...tee });
+  await app.call("doExport", "summary");
+  assert.deepEqual(marks(app.$(".modal")), [failed]);
+  assert.equal(app.$(".modal textarea").value, "Ticket: VPN restored.");
+  assert.doesNotMatch(app.$(".modal .content").textContent, /null/);
+  button(app.$(".modal"), "Close").click();
+  await app.clock.tick(0);
+
+  app.routes["POST /api/context/compact"] = () => ({ summary: "Problem: VPN.", model: "TEE/glm-5.3", exchanges: 2, kept: 1,
+    summarised_tokens: 900, summary_tokens: 100, after_tokens: 400, limit: null, truncated: false, ...tee });
+  await app.call("openCompactPreview", 1);
+  assert.deepEqual(marks(app.$(".modal")), [failed]);
+  assert.match(app.$(".modal").textContent, /This summary isn't what the attested enclave signed/);
+});

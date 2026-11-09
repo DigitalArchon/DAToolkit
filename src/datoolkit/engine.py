@@ -60,6 +60,9 @@ CAPS_RETRY_SECONDS = 30
 # A TEE model's attestation is made again, with a fresh nonce, before a send once it is this old,
 # on a clock that runs on while the machine sleeps (dcap.since_boot; time.monotonic stops).
 TEE_REATTEST_SECONDS = 900
+# What a TEE reply's check found (llm/tee.py check_reply), the worst first: a turn, a research run
+# or a write-up is marked with its worst reply's.
+TEE_OUTCOMES = ("failed", "unchecked", "unsigned", "signed", "verified")
 MAX_TOOL_ROUNDS = 6          # rounds per turn: searches and the no-message nudge each take one
 # Compaction: the summary may use about this share of the tokens it replaces, within these bounds.
 COMPACT_RATIO, COMPACT_MIN, COMPACT_MAX = 0.15, 600, 6000
@@ -348,6 +351,10 @@ class Engine:
         # TEE models (llm/tee.py): (provider, model) -> (attested client, when, attestation shown)
         self._tee: dict[tuple[str, str], tuple[tee_mod.TeeClient, float, dict]] = {}
         self._tee_factory: Callable | None = None      # tests: (base_url, key, model) -> TeeClient
+        # TEE models a reply of failed its check: attested again before their next request
+        self._tee_doubted: set[tuple[str, str]] = set()
+        # checks of TEE models' replies still running, which their next request waits for (_tee_guard)
+        self._tee_checking: dict[tuple[str, str], set[asyncio.Task]] = {}
         self._background: set[asyncio.Task] = set()     # reply-signature checks and automatic reviews still running
         # (kind, name) -> whether the keyring holds it. Each lookup is a synchronous Secret
         # Service call (and may raise the unlock dialog), and a snapshot asks about every
@@ -938,15 +945,30 @@ class Engine:
         self._changed()
         return key
 
-    async def _complete(self, client, prov: Provider, model: str, messages: list[dict]) -> str:
-        """A one-off completion with the generation settings, dropping one the provider refuses."""
+    async def _complete(self, client, prov: Provider, model: str, messages: list[dict],
+                        replies: list | None = None) -> str:
+        """A one-off completion with the generation settings, dropping one the provider refuses.
+        `replies`, for a TEE model: the request is streamed, every byte of the reply hashed, and
+        the reply (its TurnResult) added there for its check, as a turn's replies are (llm/tee.py
+        check_reply). The record a reply is checked against names the hash of the bytes a stream
+        carried; a reply that isn't streamed has never been compared with one."""
+        async def once(params: dict) -> str:
+            if replies is None or not isinstance(client, LLMClient):
+                return await client.complete(model, messages, params)
+            result = None
+            async for kind, val in client.stream(model, messages, None, params, receipts=True):
+                if kind == "done":
+                    result = val
+            replies.append(result)
+            return result.content
+
         params = self._params(prov, model)
         try:
-            return await client.complete(model, messages, params)
+            return await once(params)
         except Exception as e:  # noqa: BLE001
             if not self._learn_unsupported(prov, model, params, e):
                 raise
-            return await client.complete(model, messages, self._params(prov, model))
+            return await once(self._params(prov, model))
 
     def select_model(self, provider_name: str, model: str) -> None:
         if self.busy:
@@ -1030,45 +1052,112 @@ class Engine:
             client.close()
             raise
         self._tee[(prov.name, model)] = (client, since_boot(), att.to_dict())
+        self._tee_doubted.discard((prov.name, model))
         return att
 
     async def _tee_guard(self, prov: Provider, model: str, slot: str) -> tuple[tee_mod.TeeClient, dict] | None:
         """Nothing goes to a TEE model whose enclave hasn't attested (as SealedLore). An
-        attestation older than TEE_REATTEST_SECONDS is made again first. Returns the attested
-        client and its attestation, for reply signatures; None for a model that isn't TEE."""
+        attestation older than TEE_REATTEST_SECONDS, or one a reply of failed its check under, is
+        made again first; a check of its replies still running is waited for, since what it finds
+        decides that. Returns the attested client and its attestation, for checking the replies
+        (_reply_checks); None for a model that isn't TEE."""
         if detect_tier(model, prov.base_url, prov.tier_overrides) != "tee":
             return None
-        hit = self._tee.get((prov.name, model))
-        if hit and since_boot() - hit[1] < TEE_REATTEST_SECONDS:
+        key = (prov.name, model)
+        checking = [t for t in self._tee_checking.get(key, ()) if not t.done()]
+        if checking:
+            await asyncio.wait(checking)
+        hit = self._tee.get(key)
+        doubted = key in self._tee_doubted
+        if hit and not doubted and since_boot() - hit[1] < TEE_REATTEST_SECONDS:
             return hit[0], hit[2]
         task = {"chat": self._attest_task, "helper": self._helper_attest_task}.get(slot)
         shown = {"chat": self.attestation, "helper": self.helper_attestation}.get(slot) or {}
-        if task and not task.done() and shown.get("model") == model:
+        if not doubted and task and not task.done() and shown.get("model") == model:
             result = await asyncio.shield(task)       # a check already under way for this model
         else:
             result = await self._attest(prov, model, slot)
         if result["status"] != "verified":
             raise UserError(f"{model}'s TEE attestation didn't hold, so nothing was sent to it: {result['error']}")
-        hit = self._tee[(prov.name, model)]
+        hit = self._tee[key]
         return hit[0], hit[2]
 
+    @staticmethod
+    def _reply_record(result) -> tuple:
+        """What a TEE reply's check needs of it (llm/tee.py check_reply): the completion's id, the
+        receipt its headers named, the sha256 of every byte its stream carried, nano-gpt's route."""
+        return result.id, result.receipt_id, result.body_hash, result.tee_route
+
+    async def _reply_outcome(self, key: tuple[str, str], client: tee_mod.TeeClient, record: tuple) -> str:
+        """Was this reply the attested enclave's, as received? Checked off the event loop (it waits
+        for a receipt): "verified": its record was signed by the enclave's key, for the exact bytes
+        this app got, its receipt (where read) holding; "signed": signed, the bytes not comparable;
+        "failed"; "unchecked": no record could be read; "unsigned": the provider signs none. A
+        failed one has its model, `key`, attested again before its next request (_tee_guard)."""
+        rid, receipt_id, body_hash, route = record
+        try:
+            outcome = await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
+                                              body_hash=body_hash, route=route)
+        except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
+            outcome = "unsigned" if client.signing_address is None else "unchecked"
+        if outcome == "failed":
+            self._tee_doubted.add(key)
+        return outcome
+
+    def _tee_pending(self, key: tuple[str, str], task: asyncio.Task) -> asyncio.Task:
+        """A check of a TEE model's replies, kept until it ends: the model's next request waits
+        for it (_tee_guard)."""
+        running = self._tee_checking.setdefault(key, set())
+        running.add(task)
+        task.add_done_callback(running.discard)
+        return task
+
+    def _reply_checks(self, prov: Provider, model: str, tee: tuple | None, results: list) -> list[asyncio.Task]:
+        """The checks of these replies (TurnResults) of a TEE model (`tee`: what _tee_guard
+        returned for it), started now and run while the work goes on, each task's result its
+        outcome (_reply_outcome). As in a turn, a reply that carried no id has nothing to be
+        looked up by. None for a model that isn't TEE."""
+        if not tee:
+            return []
+        key = (prov.name, model)
+        return [self._tee_pending(key, asyncio.create_task(self._reply_outcome(key, tee[0], self._reply_record(r))))
+                for r in results if r is not None and (r.id or r.receipt_id)]
+
+    async def _tee_marks(self, prov: Provider, model: str, tee: tuple | None, checks: list[asyncio.Task], what: str,
+                         case: Case | None = None) -> dict:
+        """What a TEE model's reply outside the chat keeps, as a turn's entry does: the
+        attestation it was sent under ("tee_attested") and the worst of its replies' checks
+        ("tee_signature", once `checks` are done), logged in `case` (the open one by default).
+        A failure is said. Nothing for a model that isn't TEE."""
+        if not tee:
+            return {}
+        marks = {"tee_attested": tee[1]["summary"]}
+        if checks:
+            await asyncio.wait(checks)          # waited for, never cancelled: a failed one is acted on
+            outcomes = ["unchecked" if t.cancelled() else t.result() for t in checks]
+            result = marks["tee_signature"] = next(o for o in TEE_OUTCOMES if o in outcomes)
+            log = case.log if case else self.log
+            log("tee_reply_signature", purpose=what, model=model, result=result, replies=len(outcomes))
+            if result == "failed":
+                self._tee_failed(model, what)
+        return marks
+
+    def _tee_failed(self, model: str, what: str) -> None:
+        self.emit("toast", level="error", text=(
+            f"{model}'s {what} didn't match the record its attested enclave signed: it wasn't signed by that "
+            "enclave's key, or isn't the bytes that were signed, or its receipt doesn't hold. Treat it with "
+            "suspicion. The enclave is attested again before anything more is sent to it."))
+
     async def _check_signatures(self, entry: dict, client: tee_mod.TeeClient, replies: list[tuple],
-                                case: Case, chat: list[dict]) -> None:
-        """Was each reply of this turn the attested enclave's, as received (llm/tee.py check_reply)?
-        "verified": its record was signed by the enclave's key, for the exact bytes this app got,
-        its receipt (where read) holding; "signed": signed, the bytes not comparable; "failed";
-        "unchecked": no record could be read; "unsigned": the provider signs none. A turn takes
-        the worst of its replies. `case` and `chat` are the turn's: the check takes seconds (a
-        receipt is waited for), and another case may be open by then."""
-        outcomes = []
-        for rid, receipt_id, body_hash, route in replies:
-            try:
-                outcomes.append(await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
-                                                        body_hash=body_hash, route=route))
-            except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
-                outcomes.append("unsigned" if client.signing_address is None else "unchecked")
-        result = entry["tee_signature"] = next(
-            o for o in ("failed", "unchecked", "unsigned", "signed", "verified") if o in outcomes)
+                                case: Case, chat: list[dict], key: tuple[str, str]) -> None:
+        """Was each reply of this turn the attested enclave's, as received (_reply_outcome)? A
+        turn takes the worst of its replies, and a failure is said. `case` and `chat` are the
+        turn's: the check takes seconds (a receipt is waited for), and another case may be open
+        by then. `key`: the turn's (provider, model)."""
+        outcomes = [await self._reply_outcome(key, client, record) for record in replies]
+        result = entry["tee_signature"] = next(o for o in TEE_OUTCOMES if o in outcomes)
+        if result == "failed":
+            self._tee_failed(entry.get("model") or key[1], "reply")
         if self.case is case:
             self.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(replies))
             self._changed()
@@ -2520,7 +2609,9 @@ class Engine:
         client = self._client(prov, model)
         if isinstance(client, PrivateModeClient):
             await client.attest(model)     # nothing is sent until the enclave has proved itself
-        await self._tee_guard(prov, model, "chat")
+        tee = await self._tee_guard(prov, model, "chat")
+        # a TEE model's summary is checked as a turn's replies are (_reply_checks)
+        stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
         conv = await self._conv_for_model(self.vision_status())
         ttl = self._cache_ttl(prov, model, tier) if whole else ""
         static, state = self._prompt_parts()
@@ -2547,7 +2638,7 @@ class Engine:
             refused = self._unsupported.get((prov.name, model), set())
             params = {**self._params(prov, model), **{k: v for k, v in extra.items() if k not in refused}}
             try:
-                async for kind, val in client.stream(model, messages, tools, params):
+                async for kind, val in client.stream(model, messages, tools, params, **stream_kw):
                     if kind == "done":
                         result = val
                 break
@@ -2571,8 +2662,10 @@ class Engine:
             "content": text, "reasoning": result.reasoning if result else "",
             "finish_reason": result.finish_reason if result else None, "usage": result.usage if result else None},
             conv_index=start, case=case)
+        checks = self._reply_checks(prov, model, tee, [result])
         if not text:
             raise UserError(f"{model} returned no summary. Try again, or remove exchanges instead.")
+        marks = await self._tee_marks(prov, model, tee, checks, "summary for compaction", case)
         if self._conv_sha(self.conv) != sha:
             raise UserError("The conversation changed while the summary was being written; compact again.")
         est = (len(text) + 3) // 4
@@ -2581,7 +2674,7 @@ class Engine:
                 "summarised_tokens": summarised, "summary_tokens": est,
                 "after_tokens": view["total_tokens"] - summarised + est, "limit": limit,
                 "truncated": bool(result and result.finish_reason == "length"), "whole": whole,
-                "usage": result.usage if result else None}
+                "usage": result.usage if result else None, **marks}
 
     def compact_apply(self, summary: str) -> None:
         """Replace the exchanges summarised by compact_preview with the (possibly edited)
@@ -2937,20 +3030,25 @@ class Engine:
         model = self._research_auto[prov.name]
         return prov, model, detect_tier(model, prov.base_url, prov.tier_overrides)
 
-    async def _research_complete(self, prov: Provider, model: str, tier: str, purpose: str):
-        """A complete(messages, tools) -> TurnResult for the research agent: no prompt caching,
-        the generation settings (less any the model refuses), every request logged."""
+    async def _research_complete(self, prov: Provider, model: str, tier: str, purpose: str, checks: list):
+        """(complete, tee): a complete(messages, tools) -> TurnResult for the research agent (no
+        prompt caching, the generation settings less any the model refuses, every request
+        logged), and what _tee_guard returned for its model. A TEE model's replies are checked as
+        a turn's are, each as it comes, while the agent goes on: the checks go in `checks`
+        (_reply_checks), for _tee_marks."""
         client = self._client(prov, model)
         if isinstance(client, PrivateModeClient):
             await client.attest(model)
-        await self._tee_guard(prov, model, "research")
+        tee = await self._tee_guard(prov, model, "research")
+        stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
         logged = 1
 
         async def collect(params, messages, tools):
             result = None
-            async for kind, val in client.stream(model, messages, tools, params):
+            async for kind, val in client.stream(model, messages, tools, params, **stream_kw):
                 if kind == "done":
                     result = val
+            checks.extend(self._reply_checks(prov, model, tee, [result]))
             return result
 
         def params_for(tool_choice: str | None) -> dict:
@@ -2978,7 +3076,7 @@ class Engine:
                 "finish_reason": result.finish_reason, "usage": result.usage})
             logged = len(messages)
             return result
-        return complete
+        return complete, tee
 
     def _research_cache(self) -> research.ReportCache:
         return research.ReportCache(data_dir() / "research")
@@ -3153,14 +3251,17 @@ class Engine:
 
     async def _run_research(self, rec: dict, brief: str, prov: Provider, model: str, tier: str) -> str:
         search_, fetch_, step = self._research_tools(rec)
-        complete = await self._research_complete(prov, model, tier, "research")
+        checks: list[asyncio.Task] = []
+        complete, tee = await self._research_complete(prov, model, tier, "research", checks)
         out = await research.run(brief, complete=complete, search=search_, fetch=fetch_, step=step)
+        marks = await self._tee_marks(prov, model, tee, checks, "research report")
         rec.update(status="done", report=out.report, sources=out.sources, cost=round(out.cost, 4),
-                   searches=out.searches, pages=out.pages)
+                   searches=out.searches, pages=out.pages, **marks)
         self.emit("research", research=dict(rec))
         self.log("research", task="research", brief=brief, model=model, status="done", searches=out.searches,
-                 pages=out.pages, cost=rec["cost"], sources=out.sources, report=out.report, usage=out.usage)
-        if out.sources:
+                 pages=out.pages, cost=rec["cost"], sources=out.sources, report=out.report, usage=out.usage, **marks)
+        # one whose replies weren't the attested enclave's isn't handed to later cases as a report
+        if out.sources and marks.get("tee_signature") != "failed":
             try:
                 self._research_cache().save(brief, out.report, out.sources, model)
             except OSError as e:
@@ -3188,17 +3289,20 @@ class Engine:
         cut = len(page["markdown"]) > research.FULL_PAGE_CHARS
         check_step = {"kind": "check", "status": "running"}
         step(check_step)
-        complete = await self._research_complete(prov, model, tier, "page_check")
+        checks: list[asyncio.Task] = []
+        complete, tee = await self._research_complete(prov, model, tier, "page_check", checks)
         result = await complete([{"role": "system", "content": research.PAGE_CHECK_PROMPT},
                                  {"role": "user", "content": f"Page: {url}\n\n{text}"}], None)
+        marks = await self._tee_marks(prov, model, tee, checks, "page check")
         check = research.parse_check(result.content)
         text, removed = research.strip_passages(text, check["passages"])
         warn = suspicious(text)
         check_step.update(status="done", clean=check["clean"] and not warn, flagged=len(check["passages"]),
                           removed=removed, unreadable=bool(check.get("unreadable")), summary=check["summary"])
-        rec.update(status="done", sources=[url], pages=1)
+        rec.update(status="done", sources=[url], pages=1, **marks)
         self.emit("research", research=dict(rec))
-        self.log("research", task="page", url=url, model=model, status="done", cost=rec["cost"], check=check_step)
+        self.log("research", task="page", url=url, model=model, status="done", cost=rec["cost"], check=check_step,
+                 **marks)
         if check.get("unreadable"):
             verdict = "The page check gave no readable verdict, so treat this page with extra care."
         elif check["passages"]:
@@ -3560,7 +3664,7 @@ class Engine:
                 usage = result.usage
                 self._turn_extras(entry, prov, model, result)
                 if tee and (result.id or result.receipt_id):
-                    replies.append((result.id, result.receipt_id, result.body_hash, result.tee_route))
+                    replies.append(self._reply_record(result))
                 self._log_request("chat", model, tier, system, sent, {
                     "content": result.content, "reasoning": entry["reasoning"][round_reasoning:],
                     "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls],
@@ -3648,7 +3752,9 @@ class Engine:
                      questions=entry.get("questions", []))
             if tee and replies:
                 entry["tee_signature"] = "checking"
-                task = asyncio.create_task(self._check_signatures(entry, tee[0], replies, self.case, self.chat))
+                key = (prov.name, model)
+                task = self._tee_pending(key, asyncio.create_task(
+                    self._check_signatures(entry, tee[0], replies, self.case, self.chat, key)))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
         self._last_turn_error = error
@@ -3997,14 +4103,16 @@ class Engine:
             tee = await self._tee_guard(hprov, hmodel, "helper")
         except UserError as e:
             raise UserError(f"The vision helper {hmodel} could not be attested, so the image was not sent: {e}") from e
+        replies: list | None = [] if tee else None
         try:
-            text = await self._complete(client, hprov, hmodel, messages)
+            text = await self._complete(client, hprov, hmodel, messages, replies)
         except Exception as e:  # noqa: BLE001
             self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"error": str(e)})
             raise UserError(f"The vision helper {hmodel} failed: {e}") from e
         self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"content": text})
-        desc = {"model": hmodel, "text": text.strip(), **({"sealed": sealed} if sealed else {}),
-                **({"tee_attested": tee[1]["summary"]} if tee else {})}
+        marks = await self._tee_marks(hprov, hmodel, tee, self._reply_checks(hprov, hmodel, tee, replies or []),
+                                      f"description of {name}")
+        desc = {"model": hmodel, "text": text.strip(), **({"sealed": sealed} if sealed else {}), **marks}
         self._img_desc[name] = desc
         for e in self.chat:
             if e.get("kind") == "user" and name in (e.get("images") or []):
@@ -4094,22 +4202,25 @@ class Engine:
         prov, model, tier = self._require_model()
         messages = [{"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Case: {case.name}\n\n" + self._transcript_for_model()}]
-        await self._tee_guard(prov, model, "chat")
+        tee = await self._tee_guard(prov, model, "chat")
         tier = self._still_open(case, prov, model)
         case.log("sent_to_ai", purpose=purpose, provider=prov.name, model=model, tier=tier)
+        replies: list | None = [] if tee else None
         try:
-            text = await self._complete(self._client(prov, model), prov, model, messages)
+            text = await self._complete(self._client(prov, model), prov, model, messages, replies)
         except Exception as e:  # noqa: BLE001
             self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)}, case=case)
             raise UserError(f"{purpose} request " + (self._overflow_message(prov, model, e) or f"failed: {e}")) from e
         self._log_request(purpose, model, tier, system_prompt, messages[1:], {"content": text}, case=case)
+        marks = await self._tee_marks(prov, model, tee, self._reply_checks(prov, model, tee, replies or []),
+                                      purpose.replace("_", " "), case)
         path = case.dir / filename
         try:
             path.write_bytes(utf8(text + "\n"))
-            case.log(purpose, path=str(path), text=text)
+            case.log(purpose, path=str(path), text=text, **marks)
         except OSError as e:          # the case was deleted while the AI wrote
             raise UserError(f"Could not save {filename} in {case.name}: {e}") from e
-        return {"text": text, "path": str(path)}
+        return {"text": text, "path": str(path), **marks}
 
     async def ticket_summary(self) -> dict:
         return await self._document("ticket_summary", prompts.SUMMARY_PROMPT, "ticket-summary.md")
@@ -4220,22 +4331,25 @@ class Engine:
         messages = [{"role": "system", "content": prompts.REVIEW_PROMPT}, {"role": "user", "content": "\n\n".join(context)}]
         if different:
             async with self._reviewer_attest:
-                await self._tee_guard(prov, model, "reviewer")
+                tee = await self._tee_guard(prov, model, "reviewer")
         else:
-            await self._tee_guard(prov, model, "chat")
+            tee = await self._tee_guard(prov, model, "chat")
         if queue is not self.queue:
             raise UserError("The case changed before the review ran.")
         tier = self._still_open(case, prov, model)
         case.log("sent_to_ai", purpose="second_opinion", provider=prov.name, model=model, tier=tier, num=num, auto=auto)
+        replies: list | None = [] if tee else None
         try:
-            text = await self._complete(self._client(prov, model), prov, model, messages)
+            text = await self._complete(self._client(prov, model), prov, model, messages, replies)
         except Exception as e:  # noqa: BLE001
             self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)},
                               case=case)
             raise UserError(f"Review request failed: {e}") from e
         self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"content": text}, case=case)
+        marks = await self._tee_marks(prov, model, tee, self._reply_checks(prov, model, tee, replies or []),
+                                      f"second opinion on #{num}", case)
         out = {"num": num, "model": model, "tier": tier, "different_model": different, "text": text.strip(),
-               **self._parse_review(text), "auto": auto}
+               **self._parse_review(text), "auto": auto, **marks}
         case.log("second_opinion", **out)
         if queue is self.queue and p.command == command and p.session_id == session_id:
             p.review = {"status": "done", **{k: v for k, v in out.items() if k != "num"}, "at": time.time()}

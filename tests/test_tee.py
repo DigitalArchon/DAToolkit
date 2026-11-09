@@ -1022,12 +1022,14 @@ def receipt_server(
     not_ready: int = 0,
     seen: list | None = None,
     not_after: int = 4_000_000_000,
+    streams: dict[str, bytes] | None = None,
 ):
     """nano-gpt as live (Nov 4 2026): the attestation's quote binds the signing
     key; the keyset beside it lists that key as its e2ee key ("e2ee"), or the
     quote binds the keyset itself ("statement"), or neither ("none"); the
     signature lookup returns the record the signing key signed and RedPill's
-    receipt, signed by the keyset's Ed25519 key, for `stream`'s bytes."""
+    receipt, signed by the keyset's Ed25519 key, for `stream`'s bytes, or, with
+    `streams`, for the bytes of the reply each lookup names (its receipt id)."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from datoolkit.llm import tee
@@ -1087,7 +1089,13 @@ def receipt_server(
             if pending[0]:
                 pending[0] -= 1
                 return httpx.Response(404, json={"error": "not yet"})
-            text = f"{request_hash}:{response_hash}"
+            reply_hash = response_hash
+            if streams is not None:
+                served = streams.get(request.url.path.rsplit("/", 1)[-1])
+                if served is None:
+                    return httpx.Response(404, json={"error": "no such reply"})
+                reply_hash = hashlib.sha256(served).hexdigest()
+            text = f"{request_hash}:{reply_hash}"
             receipt = {
                 "api_version": "aci/1",
                 "receipt_id": "rcpt-1",
@@ -1103,7 +1111,7 @@ def receipt_server(
                         "session_id": "s",
                         "model_id": "m",
                     },
-                    {"type": "response.returned", "body_hash": f"sha256:{response_hash}"},
+                    {"type": "response.returned", "body_hash": f"sha256:{reply_hash}"},
                 ],
             }
             receipt["signature"] = signer.sign(tee._canonical(receipt)).hex()

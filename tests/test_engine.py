@@ -47,6 +47,7 @@ class FakeAPI:
         self.refusal = {}     # model -> what that refusal says, when not "does not support <setting>"
         self.overflow = None  # an error message for "too long for the context window" (HTTP 400)
         self.stream_headers = {}  # more headers on each stream (a TEE reply's X-Receipt-Id, say)
+        self.receipt_ids = []     # a TEE reply's X-Receipt-Id for each stream in turn, while there are any
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
@@ -67,8 +68,9 @@ class FakeAPI:
             return httpx.Response(200, json={"id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
                                              "choices": [{"index": 0, "finish_reason": "stop",
                                                           "message": {"role": "assistant", "content": self.completions.pop(0)}}]})
+        receipt = {"X-Receipt-Id": self.receipt_ids.pop(0)} if self.receipt_ids else {}
         return httpx.Response(200, text=self.responses.pop(0),
-                              headers={"content-type": "text/event-stream", **self.stream_headers})
+                              headers={"content-type": "text/event-stream", **self.stream_headers, **receipt})
 
 
 @pytest.fixture

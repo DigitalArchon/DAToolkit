@@ -552,7 +552,7 @@ const TEE_SIGNATURE = {
   checking: ["checking reply…", "", "Asking NanoGPT for this reply's signed record…"],
   verified: ["✔ verified", "ok", "The attested enclave's key signed this reply's record, and the record is for the exact bytes this app received. Where the gateway keeps a signed receipt it was read too, saying the model the reply came from was verified; that part is only as strong as the receipt's key, which the attestation names when the hardware's quote doesn't bind it."],
   signed: ["signed, text not compared", "", "The attested enclave's key signed this reply's record, but the reply's text can't be compared with it (NanoGPT rebuilds this model's replies), so a change on the way here wouldn't show."],
-  failed: ["✖ check failed", "bad", "This reply doesn't match its record: not signed by the attested enclave's key, not the bytes that were signed, or its receipt doesn't hold (another key, another reply, or a model that wasn't verified). Treat it with suspicion and re-check the attestation."],
+  failed: ["✖ check failed", "bad", "This reply doesn't match its record: not signed by the attested enclave's key, not the bytes that were signed, or its receipt doesn't hold (another key, another reply, or a model that wasn't verified). Treat it with suspicion. The enclave is attested again before anything more is sent to it."],
   unsigned: ["unsigned", "", "This model's provider signs no replies; every instance that could answer was attested before sending instead."],
   unchecked: ["⚠ reply not verified", "warn", "No signed record of this reply could be read (the provider kept none, it was out of reach, or the gateway's keys changed since it was attested), so nothing shows it came from the enclave that was attested. That is not a failed check."],
 };
@@ -561,6 +561,9 @@ function teeBadge(e) {
   return h("span", { class: `tee-badge ${cls}`, title: `Attested before sending: ${e.tee_attested}.${why ? `\n\nReply: ${why}` : ""}\n\n${TEE_CLEAR}` },
     "🛡 TEE", text ? ` · ${text}` : "");
 }
+// The same mark on whatever else a TEE model wrote, each checked as a turn's replies are: an
+// image's description, a write-up, a second opinion, a research report, a compaction summary.
+function teeMark(r) { return r?.tee_attested ? teeBadge(r) : null; }
 
 // Can images be used with the current model? native: it reads them; helper: a vision model
 // describes them first (slower); none: image features are disabled, with the reason.
@@ -705,8 +708,9 @@ function renderEntry(e, live = false) {
       }
       box.append(strip);
       for (const [name, d] of Object.entries(e.image_notes || {})) {
-        box.append(h("details", {}, h("summary", { title: d.sealed ? `End-to-end encrypted: ${d.sealed}` : d.tee_attested ? `TEE attested before sending: ${d.tee_attested}` : "" },
-          `👁 ${name} as described by ${d.model} for the chat model${d.sealed ? " · 🔐" : d.tee_attested ? " · 🛡 TEE" : ""}`), h("pre", {}, d.text)));
+        box.append(h("details", {}, h("summary", { title: d.sealed ? `End-to-end encrypted: ${d.sealed}` : "" },
+          `👁 ${name} as described by ${d.model} for the chat model${d.sealed ? " · 🔐" : ""}`, d.tee_attested ? [" ", teeMark(d)] : null),
+          h("pre", {}, d.text)));
       }
     }
     return box;
@@ -865,7 +869,7 @@ function researchCard(rec) {
     : rec.status === "failed" || rec.status === "unavailable" ? `not done: ${rec.error}` : RESEARCH_STATE[rec.status] || rec.status;
   const el = h("div", { class: `scard rcard s-${rec.status}` },
     h("div", { class: "phead" }, h("span", {}, page ? "📄 Read a page" : "🔬 Research"), h("span", { class: "muted small" }, rec.model || ""),
-      h("span", { class: "spacer" }), h("span", { class: "small sstate" }, state)));
+      teeMark(rec), h("span", { class: "spacer" }), h("span", { class: "small sstate" }, state)));
   if (rec.status === "awaiting") {
     const input = cardInput(`research:${rec.id}`, page ? h("input", { type: "text", spellcheck: "false" })
       : h("textarea", { rows: 4, spellcheck: "false" }), page ? rec.url : rec.brief);
@@ -2034,7 +2038,7 @@ function reviewLine(item) {
   const lv = REVIEW_LEVEL[r.level] || { icon: "•", label: `Reviewer: ${r.verdict || "no verdict"}` };
   return h("div", { class: `qreview ${r.level || ""}`, title: `${r.model}${r.auto ? " (automatic)" : ""} — click for the full review`,
     onclick: () => showReview(item) },
-    h("b", {}, `${lv.icon} ${lv.label}`), r.summary ? ` — ${r.summary}` : "",
+    h("b", {}, `${lv.icon} ${lv.label}`), r.summary ? ` — ${r.summary}` : "", r.tee_attested ? [" ", teeMark(r)] : null,
     r.data ? h("div", { class: "qreview-data" }, `🔍 Reviewer: ${r.data}`) : null);
 }
 
@@ -2042,7 +2046,8 @@ function showReview(item) {
   const r = item.review || {};
   modal({ title: `Second opinion on #${item.num}`, wide: true, body: h("div", {},
     h("pre", { class: "prompt-text" }, item.command),
-    h("div", { class: "muted small" }, `Reviewer: ${r.model} (${r.tier})${r.auto ? " · automatic" : ""}${r.different_model ? "" : " — same model as the proposer"}`),
+    h("div", { class: "muted small" }, `Reviewer: ${r.model} (${r.tier})${r.auto ? " · automatic" : ""}${r.different_model ? "" : " — same model as the proposer"}`,
+      r.tee_attested ? [" ", teeMark(r)] : null),
     h("div", { class: "pre" }, r.text)), buttons: [{ label: "Close" }] });
 }
 
@@ -2217,7 +2222,8 @@ async function runItemNow(num, mode, { readOnly = false } = {}) {
   if (!sess || sess.exited) throw new Error(`Session ${item.session_id} is not open. Pick another target.`);
   const rv = item.review?.status === "done" ? item.review : null;
   const rvBox = rv ? h("div", { class: `qreview ${rv.level || ""}` }, h("b", {}, `${(REVIEW_LEVEL[rv.level] || { icon: "•" }).icon} Second opinion (${rv.model}): `),
-    rv.summary || rv.verdict, rv.data ? h("div", { class: "qreview-data" }, `🔍 ${rv.data}`) : null) : null;
+    rv.summary || rv.verdict, rv.tee_attested ? [" ", teeMark(rv)] : null,
+    rv.data ? h("div", { class: "qreview-data" }, `🔍 ${rv.data}`) : null) : null;
   if (item.risk !== "disruptive" && rv?.level === "stop") {
     const ok = await confirmModal("The reviewer said not to run this", h("div", {}, rvBox,
       h("pre", { class: "prompt-text" }, item.command), h("div", { class: "pre small" }, rv.text),
@@ -2236,7 +2242,12 @@ async function runItemNow(num, mode, { readOnly = false } = {}) {
         h("p", {}, `Target: ${sess.id} (${sess.target})`),
         h("button", { type: "button", class: "small", onclick: async (e) => {
           e.target.disabled = true; review.classList.remove("hidden"); review.textContent = "Asking the reviewer…";
-          try { const r = await api("POST", `/api/queue/${num}/review`); review.replaceChildren(h("b", {}, `Second opinion (${r.model}${r.different_model ? "" : ", same model as the proposer"}): `), h("div", { class: "pre" }, r.text)); }
+          try {
+            const r = await api("POST", `/api/queue/${num}/review`);
+            review.replaceChildren();
+            add(review, h("b", {}, `Second opinion (${r.model}${r.different_model ? "" : ", same model as the proposer"}): `),
+              teeMark(r), h("div", { class: "pre" }, r.text));
+          }
           catch (err) { review.textContent = err.message; }
         } }, rv ? "Ask again" : "Get a second opinion"), review),
       mode === "run" ? "Run it" : "Insert it", "danger");
@@ -2568,6 +2579,8 @@ async function openCompactPreview(upto) {
       h("div", { class: "muted small" }, `${r.model} summarised ${r.exchanges} exchange(s), ~${fmtTokens(r.summarised_tokens)} tokens, in ~${fmtTokens(r.summary_tokens)} tokens. `
         + `About ${fmtTokens(r.after_tokens)} tokens will be sent next turn${r.limit ? ` of ${fmtTokens(r.limit.tokens)}` : ""}; ${r.kept} exchange(s) stay word for word. `
         + "Check it keeps what matters, especially changes made to systems, and edit if needed."),
+      r.tee_attested ? h("div", { class: "small" }, teeMark(r)) : null,
+      r.tee_signature === "failed" ? h("div", { class: "warnbox" }, "This summary isn't what the attested enclave signed. Read it closely before you apply it, or cancel and compact again.") : null,
       r.truncated ? h("div", { class: "warnbox" }, "The summary was cut off at the model's output limit. Edit it, or cancel and compact fewer exchanges.") : null,
       ta),
     buttons: [{ label: "Cancel" }, { label: "Apply", kind: "primary", onClick: async () => {
@@ -3974,7 +3987,10 @@ async function doExport(act) {
       const r = await api("POST", `/api/export/${act}`);
       const ta = h("textarea", { rows: 18, value: r.text });
       const file = { summary: "ticket-summary", client: "client-update", runbook: "runbook" }[act];
-      m.box.querySelector(".content").replaceChildren(ta, h("div", { class: "muted small" }, `A copy is in the case folder: ${r.path}`),
+      const content = m.box.querySelector(".content");
+      content.replaceChildren();
+      add(content, r.tee_attested ? h("div", { class: "small" }, teeMark(r)) : null, ta,
+        h("div", { class: "muted small" }, `A copy is in the case folder: ${r.path}`),
         h("div", { class: "row" },
           h("button", { class: "primary", onclick: () => { clipWrite(ta.value); toast("Copied.", "ok"); } }, "Copy"),
           h("button", { onclick: () => guarded(() => saveFile(`${S.state.case.id}-${file}.md`, new Blob([ta.value], { type: "text/markdown" }))) }, "Save as…")));

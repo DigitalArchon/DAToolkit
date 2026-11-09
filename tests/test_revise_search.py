@@ -521,7 +521,7 @@ async def test_the_timeline_says_what_a_request_other_than_the_chat_was_for(env)
     setup(engine)
     engine.conv = [{"role": "user", "content": "disk full"}, {"role": "assistant", "content": "ok"}]
 
-    async def complete(client, prov, model, messages):
+    async def complete(client, prov, model, messages, replies=None):
         return "Summary."
     engine._complete = complete
     await engine.ticket_summary()
