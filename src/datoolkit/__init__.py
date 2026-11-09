@@ -1,3 +1,3 @@
 """DAToolkit - gated AI diagnostic console."""
 
-__version__ = "0.1.0b24"
+__version__ = "0.1.0b25"
