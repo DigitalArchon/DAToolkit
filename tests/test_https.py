@@ -51,6 +51,34 @@ def test_an_ipv4_address_dressed_as_ipv6_is_judged_as_what_it_is():
     assert netguard.problem("http://[::ffff:8.8.8.8]/v1") is not None
 
 
+def test_an_escape_in_the_host_is_not_a_way_round():
+    """An address cut at its "%" read as local, though httpx asks DNS for the name whole: sent
+    over plain http, with the key and the case, to a name anyone can register under evil.com.
+    (DA Assistant's and SealedLore's tests of the same rule.)"""
+    import httpx
+
+    from datoolkit.config import Host
+    from datoolkit.llm.client import is_local_url
+    from datoolkit.sessions import winrm
+
+    assert httpx.URL("http://127.0.0.1%2e.evil.com/v1").host == "127.0.0.1%2e.evil.com"   # what DNS is asked
+    for url in ("http://127.0.0.1%2eevil.com/v1", "http://127.0.0.1%2e.evil.com/v1",
+                "http://192.168.1.10%2Eattacker.example:11434/v1", "http://10.0.0.1%2Fx.evil.com/v1",
+                "http://127.0.0.1%25.evil.com/", "http://192.168.1.1%.attacker.example/v1",
+                "http://localhost%2eevil.com/", "http://evil%2ecom.local/", "http://printer%2f.local/v1"):
+        assert netguard.problem(url) is not None, url
+        assert not is_local_url(url), url
+    # A zone is the one "%" an address may have, and https is judged by its scheme.
+    assert netguard.problem("http://[fe80::1%25eth0]:11434/v1") is None
+    assert netguard.is_local("fe80::1%eth0") and netguard.is_local("studio.local.") and netguard.is_local("dev.localhost")
+    assert netguard.problem("https://127.0.0.1%2eexample.com/v1") is None
+    # The Local tier and WinRM's plain HTTP are judged the same way.
+    assert is_local_url("http://[fe80::1%25eth0]:11434/v1") and is_local_url("https://ollama.lan/v1")
+    assert not is_local_url("https://box%2f.lan/v1")
+    assert winrm.problem(Host("dc", "winrm", "10.0.0.5%2e.evil.com", auth="ntlm", winrm_ssl=False)) is not None
+    assert winrm.problem(Host("dc", "winrm", "10.0.0.5", auth="ntlm", winrm_ssl=False)) is None
+
+
 def test_what_is_not_a_web_address_at_all_is_refused():
     for url in ("", "   ", None, "nano-gpt.com/api", "ftp://example.com/x", "file:///etc/passwd", "http://",
                 "https://", "javascript:alert(1)"):

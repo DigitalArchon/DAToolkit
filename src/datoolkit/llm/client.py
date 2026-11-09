@@ -46,10 +46,12 @@ def is_local_url(base_url: str) -> bool:
     if base_url.startswith("training://"):
         return True  # scripted training provider: nothing leaves the machine
     host = (urlparse(base_url).hostname or "").lower()
-    if host in ("localhost", "") or host.endswith(".local") or host.endswith(".lan"):
+    if host in ("localhost", ""):
         return True
+    if host.endswith((".local", ".lan")):
+        return netguard.is_dns_name(host)          # "%2e" and the like would reach DNS as another name
     try:
-        ipaddress.ip_address(host.split("%", 1)[0])
+        ipaddress.ip_address(host.strip("[]"))
     except ValueError:
         return False
     # the networks netguard allows plain http to, not Python's is_private: that also counts

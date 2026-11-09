@@ -19,11 +19,18 @@ A name is judged as written. It is not looked up to see where it points: an addr
 resolves to this network today can resolve elsewhere tomorrow. Settings refuses such a URL,
 and the engine checks again where each request leaves from (Engine._secure), so a config
 file edited by hand sends nothing either. Ported from DA Assistant's netguard.py.
+
+And it is judged whole, as httpx will send it: `http://127.0.0.1%2e.evil.com/v1` is not
+127.0.0.1 but a name, one DNS is asked for whole (a name under evil.com), so it is not local.
+Only an IPv6 address has a "%" of its own, its zone ("fe80::1%eth0", %25 in a URL), and a
+.local or .localhost name must be a plain DNS name for the same reason. (From SealedLore's
+models/config.py and DA Assistant's netguard.py, Nov 2026.)
 """
 
 from __future__ import annotations
 
 import ipaddress
+import re
 from urllib.parse import urlparse
 
 LOCAL_NAMES = ("localhost",)
@@ -31,21 +38,31 @@ LOCAL_SUFFIXES = (".localhost", ".local")
 LOCAL_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
     "169.254.0.0/16", "fe80::/10", "fc00::/7"))
+# a name a resolver reads as written: "%", "/" and the like in a name could reach DNS as another
+_DNS_NAME = re.compile(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*")
 
 
 class InsecureURL(ValueError):
     pass
 
 
+def is_dns_name(host: str | None) -> bool:
+    """Whether `host` is a plain DNS name, which a resolver reads as written."""
+    return bool(_DNS_NAME.fullmatch((host or "").strip().lower().rstrip(".")))
+
+
 def is_local(host: str | None) -> bool:
-    """Whether `host`, as written, is on this machine or its own network."""
+    """Whether `host`, as written, is on this machine or its own network. Read whole: an IPv6
+    zone ("fe80::1%eth0") is part of its address, and anything else after a "%"
+    ("127.0.0.1%2e.evil.com") makes it a name, which DNS would resolve wherever it likes. It was
+    cut at the "%", so that name passed for 127.0.0.1."""
     host = (host or "").strip().lower().rstrip(".")
     if not host:
         return False
     if host in LOCAL_NAMES or host.endswith(LOCAL_SUFFIXES):
-        return True
+        return is_dns_name(host)
     try:
-        address = ipaddress.ip_address(host.strip("[]").split("%", 1)[0])
+        address = ipaddress.ip_address(host.strip("[]"))
     except ValueError:
         return False
     mapped = getattr(address, "ipv4_mapped", None)
