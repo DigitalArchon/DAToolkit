@@ -242,3 +242,37 @@ def test_console_scripts_that_name_the_build_python_are_left_out(tmp_path):
     subprocess.run(["bash", "-c", f"set -euo pipefail\n{loop}"], check=True,
                    env={"PATH": os.environ.get("PATH", ""), "W": str(tmp_path)})
     assert sorted(os.listdir(bin_dir)) == ["pydoc3.12", "python3", "python3.12"]
+
+
+
+# ---------------------------------------------------------------- what is installed, and from where
+
+def test_nothing_is_installed_but_from_a_lock_with_its_hashes_or_built_here():
+    """The lock run installed "pip==26.2.2" "pip-tools==7.6.1": versions, not files, and what they
+    pull in (build, click, packaging, pyproject-hooks, setuptools, wheel) as it came on the day."""
+    installs = 0
+    for line in _commands(BUILD):
+        command = line.split(" #", 1)[0].strip()
+        if command.startswith("#") or not re.search(r'pip"? install ', command):
+            continue
+        installs += 1
+        if re.search(r' -r "[^"]+\.lock"', command):
+            assert "--require-hashes" in command, command
+        else:
+            assert re.search(r'pip"? install( -[-\w]+)* "\$W/wheels"/\S+\.whl$', command), command
+    assert installs >= 5
+    assert '--require-hashes --no-deps -r "$P/lock-requirements.lock"' in BUILD
+    assert re.search(r"for name in [^;]*\block-requirements\b[^;]*; do", BUILD)
+
+
+def test_every_locked_package_carries_a_hash_and_the_lock_tools_are_named_exactly():
+    for name in ("requirements", "build-requirements", "sdists", "lock-requirements"):
+        entries = re.findall(r"^([\w.-]+)==([^\s]+)((?:\s*\\\s*--hash=sha256:\w+)*)",
+                             (PACKAGING / f"{name}.lock").read_text(), re.M)
+        assert entries, name
+        for package, version, hashes in entries:
+            assert "--hash=sha256:" in hashes, f"{name}.lock: {package}=={version}"
+    wanted = (PACKAGING / "lock-requirements.in").read_text()
+    locked = (PACKAGING / "lock-requirements.lock").read_text()
+    for pin in ("pip==26.2.2", "pip-tools==7.6.1"):
+        assert re.search(rf"(?m)^{re.escape(pin)}$", wanted) and re.search(rf"(?m)^{re.escape(pin)} ", locked), pin
