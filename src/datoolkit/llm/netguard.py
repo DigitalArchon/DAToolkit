@@ -147,6 +147,18 @@ def scrubbed(text) -> str:
     return _ADDRESS_IN_TEXT.sub(lambda found: shown(found.group(0)), str(text or ""))
 
 
+def key_problem(key, name: str = "the provider") -> str | None:
+    """Why `key` can't be sent as an API key, or None. A key is plain ASCII with no spaces in it;
+    one pasted with a line break, or a zero-width space from a web page, was refused by the HTTP
+    library in words that quoted it whole (h11: "Illegal header value b'Bearer sk-…'"), and those
+    were shown in the chat and logged. Says what is wrong and nothing of the key.
+    (DA Assistant's netguard.key_problem, Nov 2026.)"""
+    if key and (not key.isascii() or UNSAFE.search(key) or " " in key):
+        return (f"The API key for {name} has a space, a line break or another character no API key has "
+                f"in it, picked up where it was copied from, perhaps. Enter it again in Settings → Providers.")
+    return None
+
+
 def check(url: str | None) -> str:
     """Raise InsecureURL unless `url` may be used. Returns it stripped."""
     found = problem(url)

@@ -236,3 +236,42 @@ def test_a_server_on_this_computer_may_redirect_on_it():
     with _redirecting(handler, "http://127.0.0.1:8080/v1") as client:
         assert client.get("http://127.0.0.1:8080/v1/x").status_code == 200
     assert seen[-1] == "http://localhost:9000/v1/x"
+
+
+# --- an API key no HTTP header can carry (netguard.key_problem) ------------------------------
+# From DA Assistant's tests of the same check: h11 refused such a key in words that quoted it
+# whole ("Illegal header value b'Bearer sk-…'"), and those were shown in the chat and logged.
+
+BAD_KEYS = ("sk-live-ABCDEF\nGHIJKL", "sk-live-ABCDEF\u200bGHIJKL", "sk-live ABCDEF", "sk-live-ABCDEF\r\nX-Evil: 1")
+
+
+def test_a_key_no_header_can_carry_is_refused_without_quoting_it():
+    import h11
+
+    with pytest.raises(h11.LocalProtocolError, match="ABCDEF"):         # why: the library's own words
+        h11.Request(method="GET", target="/", headers=[("Host", "x"), ("Authorization", f"Bearer {BAD_KEYS[0]}")])
+    for key in BAD_KEYS:
+        found = netguard.key_problem(key, "NanoGPT")
+        assert "Enter it again" in found and "ABCDEF" not in found, repr(key)
+    assert netguard.key_problem("sk-live-ABCDEF_GHIJKL-0123") is None
+    assert netguard.key_problem("") is None and netguard.key_problem(None) is None
+
+
+async def test_settings_refuse_such_a_key_and_nothing_is_built_with_one_stored_before(tmp_path):
+    engine = engine_with(tmp_path, Provider("NanoGPT", "https://nano-gpt.com/api/v1"))
+    for key in BAD_KEYS:
+        with pytest.raises(UserError, match="Enter it again") as refused:
+            engine.save_provider({"name": "NanoGPT", "base_url": "https://nano-gpt.com/api/v1"}, key, "NanoGPT")
+        assert "ABCDEF" not in str(refused.value)
+    assert creds.get_secret("provider", "NanoGPT") == "sk-test"           # left as it was
+    # one an older version stored: no client is made with it, nor a TEE attestation, nor a search
+    creds.set_secret("provider", "NanoGPT", BAD_KEYS[0])
+    prov = engine.cfg.provider("NanoGPT")
+    for make in (lambda: engine._client(prov, "z-ai/glm-5.3"), lambda: engine._client(prov, "private/glm-5-3")):
+        with pytest.raises(UserError, match="Enter it again") as refused:
+            make()
+        assert "ABCDEF" not in str(refused.value)
+    with pytest.raises(UserError, match="Enter it again"):
+        await engine._attest_tee(prov, "TEE/glm-5.3")
+    with pytest.raises(UserError, match="Enter it again"):
+        await engine._run_search("anything")

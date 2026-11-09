@@ -520,6 +520,9 @@ class Engine:
         base_url = str(data.get("base_url", "")).strip().rstrip("/")
         if not name or not base_url:
             raise UserError("Provider needs a name and base URL.")
+        found = netguard.key_problem(api_key, name)
+        if found:
+            raise UserError(f"Provider not saved. {found}")
         found = None if is_training_url(base_url) else netguard.problem(base_url)
         if found:
             raise UserError(f"Provider not saved. {found}")
@@ -661,7 +664,7 @@ class Engine:
         if is_training_url(provider.base_url):
             return TrainingClient(provider.base_url)
         self._secure(provider)
-        key = creds.get_secret("provider", provider.name)
+        key = self._provider_key(provider)
         if self._api(provider) == "anthropic":
             return AnthropicClient(provider.base_url, key, caps=self._caps.get(provider.name),
                                    http_client=self._anthropic_http)
@@ -1009,7 +1012,7 @@ class Engine:
         """A TEE model's enclave, checked now with a fresh nonce. Raises TeeRefused when it
         doesn't hold; then nothing may be sent to it."""
         self._secure(prov)
-        key = creds.get_secret("provider", prov.name) or ""
+        key = self._provider_key(prov) or ""
         make = self._tee_factory or tee_mod.TeeClient
         client = make(prov.base_url, key, model)
         try:
@@ -1920,10 +1923,26 @@ class Engine:
         return answer
 
     def _get_secret_safe(self, kind: str, name: str) -> str | None:
+        """The secret, or None when the keyring can't be read. A provider's key that no HTTP header
+        can carry raises UserError (netguard.key_problem), saying so without quoting it."""
         try:
-            return creds.get_secret(kind, name)
+            value = creds.get_secret(kind, name)
         except Exception:  # noqa: BLE001
             return None
+        found = netguard.key_problem(value, name) if kind == "provider" else None
+        if found:
+            raise UserError(found)
+        return value
+
+    def _provider_key(self, prov: Provider) -> str | None:
+        """The provider's API key, before any request is built with it: one with a character no
+        HTTP header can carry (a line break, a zero-width space) raises UserError, which says so
+        without quoting it; the HTTP library's own error quoted it whole."""
+        key = creds.get_secret("provider", prov.name)
+        found = netguard.key_problem(key, prov.name)
+        if found:
+            raise UserError(found)
+        return key
 
     async def ask_user(self, sid: str, prompt: str, secret: bool, can_save: bool, host_name: str = "") -> str | None:
         """Ask the technician. With `can_save`, a "save" tick keeps the answer as the password of
