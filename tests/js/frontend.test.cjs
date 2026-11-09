@@ -52,6 +52,20 @@ test("the token handed on in the address's fragment, as the browser's launch pag
   assert.equal(app.window.sessionStorage.getItem("dat-token"), "frag");
 });
 
+test("a browser the app opened exchanges its one-time code for the token, once, before anything else", async () => {
+  const app = loadApp({ hash: "#c=onetime", routes: { "POST /api/launch": () => ({ token: "real" }) } });
+  await app.clock.tick(0);
+  assert.deepEqual(plain(app.posts("/api/launch")[0].body), { code: "onetime" });
+  assert.equal(app.historyUrl, "/");                                     // the code is out of the address
+  assert.equal(app.events().url, "ws://127.0.0.1:48599/ws/events?t=real");
+  assert.equal(app.window.sessionStorage.getItem("dat-token"), "real");
+  assert.ok(app.calls.filter((c) => c.path !== "/api/launch").every((c) => c.headers["X-Token"] === "real"));
+  const used = loadApp({ hash: "#c=used", routes: { "POST /api/launch": () => ({ __status: 403, body: { error: "This link has been used already, or is too old." } }) } });
+  await used.clock.tick(0);
+  assert.match(used.window.document.body.textContent, /This link can't open DA Toolkit.*used already/s);
+  assert.equal(used.sockets.length, 0);
+});
+
 test("every element app.js looks up by id is on the page or made by app.js", () => {
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   const js = fs.readFileSync(path.join(WEB, "app.js"), "utf8");

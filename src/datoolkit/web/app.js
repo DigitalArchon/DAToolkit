@@ -13,10 +13,13 @@ const DESKTOP = (() => {
   } catch { return fromUrl; }
 })();
 
-// The token comes in the address, kept for this tab and taken out of the address bar: in the
-// query from the app window, in the fragment from the browser's launch page (app.launch_file),
-// which the browser never sends to the server.
-const TOKEN = (() => {
+// The window's token: given in the app window's address (?t=, which no command line shows), or in
+// the fragment of the address printed to open by hand (#t=); in a browser the app opened, exchanged
+// once for the one-time code its address carries (#c=: what a browser is opened with is on its
+// command line, for every user of this computer to read; app.browser_opener). Kept for this tab,
+// and the address cleared of all of them. (DA Vibe Manager's, Nov 2026.)
+const LAUNCH = /(?:^#|&)c=([\w-]+)/.exec(location.hash || "")?.[1] || null;
+let TOKEN = (() => {
   const fromUrl = new URLSearchParams(location.search).get("t") || new URLSearchParams((location.hash || "").slice(1)).get("t");
   try {
     if (fromUrl) sessionStorage.setItem("dat-token", fromUrl);
@@ -25,6 +28,15 @@ const TOKEN = (() => {
     return t;
   } catch { return fromUrl; }
 })();
+
+async function launchToken(code) {
+  const res = await fetch("/api/launch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
+  let data = {};
+  try { data = await res.json(); } catch { /* empty */ }
+  if (!res.ok || !data.token) throw new Error(data.error || data.detail || `${res.status} ${res.statusText}`);
+  try { sessionStorage.setItem("dat-token", data.token); } catch { /* kept for this page only */ }
+  return data.token;
+}
 
 const S = {
   state: null,
@@ -4109,7 +4121,15 @@ function init() {
     await api("POST", "/api/quit");
     document.body.replaceChildren(h("div", { class: "quit-note" }, h("h2", {}, "DA Toolkit has quit."), h("p", {}, "You can close this tab.")));
   }));
-  api("GET", "/api/phone").then((i) => { S.phoneRunning = i.running; S.phones = i.phones; renderPhoneBtn(); }).catch(() => {});
+  const started = () => {        // what needs the token
+    api("GET", "/api/phone").then((i) => { S.phoneRunning = i.running; S.phones = i.phones; renderPhoneBtn(); }).catch(() => {});
+    connectEvents();
+  };
+  if (LAUNCH) {
+    launchToken(LAUNCH).then((t) => { TOKEN = t; started(); }, (e) => {
+      document.body.replaceChildren(h("div", { class: "quit-note" }, h("h2", {}, "This link can't open DA Toolkit."), h("p", {}, e.message)));
+    });
+  }
   $("#vision-btn").addEventListener("click", () => openSettings("model"));
   $("#export-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu($("#export-menu")); });
   $("#export-menu").addEventListener("click", (e) => { const a = e.target.closest("button")?.dataset.act; if (a) doExport(a); });
@@ -4143,7 +4163,7 @@ function init() {
   $("#hyp-toggle").addEventListener("click", () => $("#hyp-list").classList.toggle("hidden"));
   $("#send-selection-btn").addEventListener("click", () => guarded(sendSelection));
   $("#show-done").addEventListener("change", renderQueue);
-  connectEvents();
+  if (!LAUNCH) started();
 }
 
 init();

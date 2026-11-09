@@ -154,18 +154,24 @@ async def test_bad_requests_get_a_400_and_a_refused_settings_save_changes_nothin
         assert (await c.get("/api/companion/state", headers={"x-token": "tök".encode("latin-1")})).status_code == 403
 
 
-def test_the_browser_is_handed_a_private_page_not_the_address_with_the_token(tmp_path, monkeypatch, capsys):
-    """webbrowser.open ran xdg-open, and the browser, with the address and its token on their
-    command lines, which every user of this computer can read (/proc/<pid>/cmdline). The browser
-    gets a page's path now, a file only this user can read, which moves on to the address with
-    the token in its fragment (Jupyter's redirect file); it goes when DA Toolkit ends."""
-    import os
-    import re
-    import stat
+def test_the_browser_is_opened_on_a_one_time_code_never_the_token(monkeypatch, capsys):
+    """A browser's command line shows every user of this computer what it was opened with: it was the
+    token (?t=…), which gave them terminal access for as long as the app ran. (DA Vibe Manager's test.)"""
     import webbrowser
-    from urllib.parse import unquote, urlparse
 
     import uvicorn
+
+    from datoolkit.app import browser_opener
+    from datoolkit.server.app import Launches
+
+    opened, launches = [], Launches()
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+    browser_opener(8123, launches)()
+    browser_opener(8123, launches)()                     # a second launch: a code of its own
+    assert all(u.startswith("http://127.0.0.1:8123/#c=") and "t=" not in u for u in opened)
+    first, second = (u.split("#c=")[1] for u in opened)
+    assert first != second and launches.take(second) and launches.take(first)
+    assert not launches.take(first)                       # once
 
     class Server:                      # starts, and is done at once
         def __init__(self, config):
@@ -174,24 +180,68 @@ def test_the_browser_is_handed_a_private_page_not_the_address_with_the_token(tmp
         def run(self):
             self.started = True
 
-    seen = {}
-
-    def open_(url):
-        path = Path(unquote(urlparse(url).path))
-        seen.update(url=url, page=path.read_text(), mode=stat.S_IMODE(os.stat(path).st_mode),
-                    folder=stat.S_IMODE(os.stat(path.parent).st_mode), path=path)
-        return True
-
+    opened.clear()
     monkeypatch.setattr(uvicorn, "Server", Server)
-    monkeypatch.setattr(webbrowser, "open", open_)
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     app_mod.main(["--browser", "--port", "48577"])
-    token = re.search(r"#t=([\w-]+)", seen["page"]).group(1)
-    assert len(token) > 30 and token not in seen["url"] and seen["url"].startswith(f"file://{tmp_path}/")
-    assert f'location.replace("http://127.0.0.1:48577/#t={token}")' in seen["page"]
-    assert (seen["mode"], seen["folder"]) == (0o600, 0o700)
-    assert not seen["path"].exists() and not seen["path"].parent.exists()      # gone when it ended
-    assert f"http://127.0.0.1:48577/#t={token}" in capsys.readouterr().out     # to open by hand
+    assert len(opened) == 1 and opened[0].startswith("http://127.0.0.1:48577/#c=")
+    printed = capsys.readouterr().out                      # to open by hand, in the user's own terminal
+    token = printed.split("#t=", 1)[1].split()[0]
+    assert len(token) > 30 and token not in opened[0]
+
+
+def test_a_launch_code_is_good_once_briefly_and_only_to_this_user(monkeypatch):
+    import os
+
+    from datoolkit.server import app as server_mod
+
+    launches = server_mod.Launches()
+    code = launches.new()
+    assert not launches.take("guessed") and not launches.take(code + "x")
+    monkeypatch.setattr(server_mod, "peer_uid", lambda peer, server: os.getuid() + 1)
+    assert not launches.take(code, ("127.0.0.1", 40000), ("127.0.0.1", 8123))     # another user's process
+    monkeypatch.setattr(server_mod, "peer_uid", lambda peer, server: os.getuid())
+    assert launches.take(code, ("127.0.0.1", 40001), ("127.0.0.1", 8123))         # still this user's to use
+    late = launches.new()
+    monkeypatch.setattr(server_mod.time, "monotonic",
+                        lambda real=server_mod.time.monotonic: real() + server_mod.LAUNCH_SECONDS + 1)
+    assert not launches.take(late)
+
+
+def test_the_peer_of_a_loopback_connection_is_known_by_its_user():
+    import os
+    import socket
+
+    from datoolkit.server.app import peer_uid
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    client = socket.create_connection(server.getsockname())
+    try:
+        assert peer_uid(client.getsockname(), server.getsockname()) == os.getuid()
+        assert peer_uid(("127.0.0.1", 1), server.getsockname()) is None
+    finally:
+        client.close()
+        server.close()
+
+
+async def test_the_page_exchanges_its_code_for_the_token_and_nothing_else_does(env, tmp_path):  # noqa: F811
+    from datoolkit.server.app import Launches
+
+    engine, _, _ = env
+    launches = Launches()
+    app: FastAPI = create_app("secret", lambda emit: engine, companion_dir=tmp_path, launches=launches)
+    app.state.engine = engine
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as c:
+        code = launches.new()
+        r = await c.post("/api/launch", json={"code": code})
+        assert r.status_code == 200 and r.json() == {"token": "secret"}
+        r = await c.post("/api/launch", json={"code": code})
+        assert r.status_code == 403 and "used already" in r.json()["error"]
+        assert (await c.post("/api/launch", json={"code": "nope"})).status_code == 403
+        assert (await c.post("/api/launch", content=b"x" * 2000)).status_code == 413     # nothing big read
+        assert (await c.post("/api/launch", content=b"{")).status_code == 403
+        assert (await c.post("/api/state", headers={})).status_code == 403              # the rest needs the token
 
 
 def test_the_app_window_lets_no_file_page_read_other_files():

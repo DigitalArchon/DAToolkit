@@ -7,7 +7,11 @@ import asyncio
 import hmac
 import json
 import os
+import secrets
 import shutil
+import socket
+import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
@@ -35,6 +39,65 @@ PAIR_PATH = "/api/companion/pair"
 MAX_WINDOW_BODY = 48 * 1024 * 1024
 # a file saved through the app window's Save dialog (/api/desktop/save): a case's full export
 MAX_SAVED_FILE = 1024 * 1024 * 1024
+# A browser is opened with a one-time code, never the token (app.browser_opener): this long to be used
+LAUNCH_SECONDS = 120
+LAUNCH_PATH = "/api/launch"
+MAX_LAUNCH_BODY = 1024
+
+
+def peer_uid(peer: tuple | None, server: tuple | None) -> int | None:
+    """The user whose socket at `peer` is connected to `server` on this computer (a loopback TCP
+    connection), as the kernel's table of TCP sockets has it; None where that can't be said.
+    (DA Vibe Manager's server/app.py, Nov 2026.)"""
+    if not peer or not server or not all(isinstance(at[1], int) for at in (peer, server)):
+        return None
+
+    def written(host: str, port: int) -> str:
+        try:
+            raw = socket.inet_aton(host)
+        except OSError:
+            return ""
+        return f"{(raw[::-1] if sys.byteorder == 'little' else raw).hex().upper()}:{port:04X}"
+    local, remote = written(peer[0], peer[1]), written(server[0], server[1])
+    try:
+        with open("/proc/net/tcp", encoding="ascii") as f:
+            lines = f.read().splitlines()[1:]
+    except OSError:
+        return None
+    for line in lines:
+        fields = line.split()
+        if len(fields) > 7 and fields[1] == local and fields[2] == remote:
+            return int(fields[7])
+    return None
+
+
+class Launches:
+    """The one-time codes the browser is opened with (http://127.0.0.1:PORT/#c=CODE), each exchanged once
+    for the window's token (POST /api/launch). A browser's command line shows every user of this computer
+    what it was opened with, and the token in it gave another user the app for as long as it ran (Nov 2026:
+    it was ?t=TOKEN). A code is good once, for LAUNCH_SECONDS, and only to a process of this user's: one
+    taken first by anyone else would be refused. (DA Vibe Manager's, 41f957d, Nov 2026.)"""
+
+    def __init__(self) -> None:
+        self._codes: dict[str, float] = {}
+
+    def new(self) -> str:
+        code = secrets.token_urlsafe(24)
+        now = time.monotonic()
+        self._codes = {c: at for c, at in self._codes.items() if now - at < LAUNCH_SECONDS}
+        self._codes[code] = now
+        return code
+
+    def take(self, code: str, peer: tuple | None = None, server: tuple | None = None) -> bool:
+        """Whether `code` is one given out, not used yet, still current, and asked for by this user."""
+        found = next((c for c in self._codes if hmac.compare_digest(c.encode(), str(code).encode("utf-8", "replace"))), None)
+        if found is None:
+            return False
+        uid = peer_uid(peer, server)
+        if uid is not None and uid != os.getuid():
+            return False                    # another user's process: refused, and the code stands for this one's
+        at = self._codes.pop(found)
+        return time.monotonic() - at < LAUNCH_SECONDS
 
 
 class TokenGate:
@@ -131,12 +194,14 @@ class SecurityHeaders:
 
 def window_limit(path: str) -> int:
     """The largest body the window's app takes at `path`."""
+    if path == LAUNCH_PATH:
+        return MAX_LAUNCH_BODY
     return MAX_SAVED_FILE if path == "/api/desktop/save" else MAX_WINDOW_BODY
 
 
 def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
                desktop=None, companion_dir: Path | None = None,
-               on_quit: Callable[[], None] | None = None) -> FastAPI:
+               on_quit: Callable[[], None] | None = None, launches: Launches | None = None) -> FastAPI:
     """The GUI's app, for 127.0.0.1 only. It also builds the phone companion's app, which
     app.state.companion (companion.CompanionServer) serves on its own port over TLS when the
     technician starts it: that one can see chat, queue and hypotheses, mark items
@@ -144,7 +209,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     terminal.
     `desktop` (app.Desktop, only in the app window) serves the clipboard and the Save dialog.
     `companion_dir` holds the companion's certificate (default: the config directory).
-    `on_quit` ends the process (POST /api/quit): in the browser, closing the tab doesn't."""
+    `on_quit` ends the process (POST /api/quit): in the browser, closing the tab doesn't.
+    `launches`: the one-time codes a browser is opened with, exchanged for the token (POST /api/launch)."""
     listeners: set[asyncio.Queue] = set()
 
     def emit(event: dict) -> None:
@@ -178,8 +244,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         return request.app.state.engine
 
     # the token, and the size, judged on the headers before FastAPI reads a body (TokenGate);
-    # auth above still stands behind it on every route
-    app.add_middleware(TokenGate, check=check, limit=window_limit)
+    # auth above still stands behind it on every route. The one request without the token is the
+    # browser's exchange of its one-time code for it (Launches), held to MAX_LAUNCH_BODY.
+    app.add_middleware(TokenGate, check=check, limit=window_limit, open_paths=(LAUNCH_PATH,))
 
     def auth_companion(request: Request) -> Engine:
         if not companion.check(request.headers.get("x-token")):
@@ -211,6 +278,20 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         a.add_exception_handler(KeyError, key_error)
         a.add_exception_handler(ValueError, bad_value)
         a.add_exception_handler(TypeError, bad_value)
+
+    @app.post(LAUNCH_PATH)
+    async def launch(request: Request):
+        """The token, once, for the one-time code a browser was opened with (Launches)."""
+        try:
+            code = str((await request.json()).get("code") or "")
+        except (ValueError, AttributeError):
+            code = ""
+        client = request.client
+        if launches is None or not launches.take(code, (client.host, client.port) if client else None,
+                                                 request.scope.get("server")):
+            return JSONResponse({"error": "This link has been used already, or is too old. Start DA Toolkit "
+                                          "again: it opens a new one."}, status_code=403)
+        return {"token": token}
 
     @app.get("/")
     async def index():
