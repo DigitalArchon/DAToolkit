@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import os
+import pwd
 import shutil
 import subprocess
 import uuid as uuid_mod
@@ -33,6 +34,13 @@ GUACD_IMAGE = ("docker.io/guacamole/guacd:1.6.0"
 CONTAINER = "datoolkit-guacd"     # the container DA Toolkit runs while an RDP session is open
 CONTAINER_START_WAIT = 20         # seconds for guacd to answer once the container runs
 GUACD_BINARIES = ("/usr/sbin/guacd", "/usr/bin/guacd", "/usr/local/sbin/guacd")
+# The kernel's tables of TCP sockets, each with its owner's uid: who guacd's port belongs to
+PROC_TABLES = ("/proc/net/tcp", "/proc/net/tcp6")
+LOGIN_DEFS = "/etc/login.defs"
+LISTEN = "0A"
+# Local addresses, as the tables write them, where a connection to 127.0.0.1 can land: 127.0.0.1,
+# 0.0.0.0, :: (taking IPv4 too) and ::ffff:127.0.0.1
+_TAKES_LOOPBACK = frozenset({"0100007F", "00000000", "0" * 32, "0000000000000000FFFF00000100007F"})
 
 
 class GuacError(Exception):
@@ -191,8 +199,86 @@ def _container_help(why: str, which, install_podman: str) -> tuple[str, list[str
     return text, ([install_podman] if install_podman and not runtime else []) + [f"podman pull {GUACD_IMAGE}"]
 
 
+def _sockets(tables=None):
+    """(local address, local port, remote address, remote port, state, owner's uid) of each TCP
+    socket in the kernel's tables."""
+    for table in tables or PROC_TABLES:
+        try:
+            lines = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            f = line.split()
+            try:
+                (la, lp), (ra, rp) = (x.split(":") for x in f[1:3])
+                yield la.upper(), int(lp, 16), ra.upper(), int(rp, 16), f[3].upper(), int(f[7])
+            except (ValueError, IndexError):
+                continue
+
+
+def _uid_min(path: str | None = None) -> int:
+    """The first ordinary user's id (UID_MIN in /etc/login.defs; 1000 where it doesn't say)."""
+    try:
+        for line in Path(path or LOGIN_DEFS).read_text().splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "UID_MIN":
+                return int(parts[1])
+    except (OSError, ValueError):
+        pass
+    return 1000
+
+
+def _owner_problem(uid: int, port: int) -> str | None:
+    """Why guacd's port, held by `uid`, isn't one to hand a connection to; None when it is: this
+    user's (guacd run by hand, or rootless podman's port forwarder, which runs as the user), or a
+    system account's (root's, as Docker's forwarder is, or a service's: the guacd package's).
+    None of those can another user of this computer run as."""
+    if uid == os.getuid() or uid < _uid_min():
+        return None
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        name = f"user id {uid}"
+    return (f"What listens on 127.0.0.1:{port} is {name}'s, another user of this computer, not guacd as you or "
+            f"the system run it, so nothing was sent to it: no RDP host, user name or password. Stop it, or run "
+            f"guacd yourself or as a system service.")
+
+
+def check_listener(port: int | None = None, tables=None) -> None:
+    """Raise GuacError when a socket listening where a connection to guacd would land belongs to
+    another user of this computer. guacd's link is plain, unauthenticated TCP carrying the RDP
+    host, user and password: anyone else who took 127.0.0.1:4822 first would be handed them."""
+    port = GUACD[1] if port is None else port
+    for local, lport, _remote, _rport, state, uid in _sockets(tables):
+        if state == LISTEN and lport == port and local in _TAKES_LOOPBACK:
+            problem = _owner_problem(uid, port)
+            if problem:
+                raise GuacError(problem)
+
+
+def check_peer(local_port: int, port: int | None = None, tables=None) -> None:
+    """Once connected, the socket that accepted the connection from `local_port` (its owner is the
+    listener's) is held to the same: one that took the port after check_listener isn't trusted."""
+    port = GUACD[1] if port is None else port
+    for local, lport, remote, rport, _state, uid in _sockets(tables):
+        if lport == port and rport == local_port and local in _TAKES_LOOPBACK and remote in _TAKES_LOOPBACK:
+            problem = _owner_problem(uid, port)
+            if problem:
+                raise GuacError(problem)
+            return
+
+
 async def connect(timeout: float) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    return await asyncio.wait_for(asyncio.open_connection(*GUACD), timeout)
+    """A connection to guacd, made only when what listens there is this user's or the system's
+    (check_listener, check_peer): never handed to another user's. Raises GuacError then."""
+    check_listener()
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(*GUACD), timeout)
+    try:
+        check_peer(writer.get_extra_info("sockname")[1])
+    except GuacError:
+        writer.close()
+        raise
+    return reader, writer
 
 
 def encode(*elements) -> str:

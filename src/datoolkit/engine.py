@@ -1691,8 +1691,11 @@ class Engine:
             raise UserError(f"Unknown RDP host {host_name}")
         self._rdp_opening += 1
         try:
-            if not await self._ensure_guacd():
-                raise UserError(*guac.install_help())
+            try:
+                if not await self._ensure_guacd():
+                    raise UserError(*guac.install_help())
+            except guac.GuacError as e:          # guacd's port is another user's: nothing was sent
+                raise UserError(str(e)) from e
             return await self._open_rdp(host)
         finally:
             self._rdp_opening -= 1

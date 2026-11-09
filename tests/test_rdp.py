@@ -652,3 +652,86 @@ def test_desktop_resizes_only_when_asked_and_can_be_maximized():
     assert re.search(r"\.rdp-view \{[^}]*isolation: isolate", css)
     # the remote pointer is the local pointer, not a drawn copy left behind at its last position
     assert "display.showCursor(false)" in js and "mouse.setCursor(canvas, x, y)" in js
+
+
+# ---------------------------------------------------------------- whose guacd it is
+
+HEAD = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n")
+
+
+def _table(tmp_path, name, *rows):
+    """A /proc/net/tcp-shaped table: rows of (local, remote, state, uid), addresses as written there."""
+    lines = [f"   {i}: {local} {remote} {state} 00000000:00000000 00:00000000 00000000 {uid:5d}        0 {4000 + i} 1"
+             for i, (local, remote, state, uid) in enumerate(rows)]
+    path = tmp_path / name
+    path.write_text(HEAD + "\n".join(lines) + "\n")
+    return str(path)
+
+
+@pytest.fixture
+def as_user(tmp_path, monkeypatch):
+    """This process runs as uid 1000, ordinary users starting at 1000."""
+    defs = tmp_path / "login.defs"
+    defs.write_text("# shadow\nUID_MIN\t\t\t 1000\nUID_MAX\t\t\t60000\n")
+    monkeypatch.setattr(guac, "LOGIN_DEFS", str(defs))
+    monkeypatch.setattr(guac.os, "getuid", lambda: 1000)
+
+
+def test_guacds_port_held_by_another_user_is_refused_and_ours_or_the_systems_is_not(tmp_path, as_user):
+    """DA Toolkit took whatever answered on 127.0.0.1:4822 for guacd and handed it the RDP host,
+    user name and password, over plain TCP: another user of this computer who took the port first
+    was given them."""
+    port = 4822
+    listen = lambda addr, uid: (f"{addr}:{port:04X}", "00000000:0000", "0A", uid)            # noqa: E731
+    for rows in ([listen("0100007F", 1001)],                                    # 127.0.0.1, another user's
+                 [listen("00000000", 1001)],                                    # every address
+                 [listen("0100007F", 1000), listen("00000000", 1001)]):         # ours, and another's too
+        with pytest.raises(guac.GuacError, match="another user of this computer.*nothing was sent"):
+            guac.check_listener(port, [_table(tmp_path, "tcp", *rows)])
+    six = _table(tmp_path, "tcp6", (f"{'0' * 32}:{port:04X}", f"{'0' * 32}:0000", "0A", 1001))      # [::], dual stack
+    with pytest.raises(guac.GuacError, match="user id 1001|another user"):
+        guac.check_listener(port, [six])
+    # this user's (guacd by hand, rootless podman's forwarder), root's (Docker's forwarder), a
+    # service's (the guacd package's own user), or a port no connection to 127.0.0.1 reaches
+    for rows in ([listen("0100007F", 1000)], [listen("0100007F", 0)], [listen("00000000", 115)],
+                 [listen("0200007F", 1001)], [(f"0100007F:{port + 1:04X}", "00000000:0000", "0A", 1001)],
+                 [(f"0100007F:{port:04X}", "0100007F:C350", "01", 1001)]):     # not listening: judged by check_peer
+        guac.check_listener(port, [_table(tmp_path, "tcp", *rows)])
+    # once connected: the socket that took our connection, from port 50000 (0xC350), is the listener's
+    took = _table(tmp_path, "tcp", (f"0100007F:{port:04X}", "0100007F:C350", "01", 1001),
+                  ("0100007F:C350", f"0100007F:{port:04X}", "01", 1000))
+    with pytest.raises(guac.GuacError, match="another user"):
+        guac.check_peer(50000, port, [took])
+    guac.check_peer(50001, port, [took])                                        # not ours: nothing said
+
+
+async def test_the_socket_that_took_a_connection_is_found_in_the_real_tables(monkeypatch):
+    async def serve(reader, writer):
+        await reader.read(1)
+        writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", port))
+    async with server:
+        reader, writer = await guac.connect(3)                                 # ours: connected
+        local = writer.get_extra_info("sockname")[1]
+        mine = guac.os.getuid()
+        monkeypatch.setattr(guac.os, "getuid", lambda: mine + 1)               # now it's "another user's"
+        monkeypatch.setattr(guac, "_uid_min", lambda path=None: 0)
+        with pytest.raises(guac.GuacError, match="another user"):
+            guac.check_peer(local)
+        writer.close()
+
+
+async def test_an_rdp_host_isnt_opened_through_another_users_guacd(env, tmp_path, monkeypatch, as_user):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("rdp", "open")
+    engine.cfg.hosts.append(Host("dc01", "rdp", "dc01.corp", user="bob", auth="password"))
+    creds.set_secret("host", "dc01", "hunter2")
+    monkeypatch.setattr(guac, "PROC_TABLES", (_table(tmp_path, "tcp", ("0100007F:12D6", "00000000:0000", "0A", 1001)),))
+    connected = []
+    monkeypatch.setattr(guac.asyncio, "open_connection", lambda *a, **k: connected.append(a))
+    with pytest.raises(UserError, match="127.0.0.1:4822 is user id 1001's|another user of this computer"):
+        await engine.open_rdp("dc01")
+    assert connected == [] and not engine.sessions.sessions
