@@ -24,8 +24,14 @@ DA Toolkit opens in its own window, which uses your system's WebKitGTK (see the
 display, it opens in your default web browser instead, with a banner saying why and what to
 install. To always use the browser, set **Settings → General → Open DA Toolkit in** (it applies
 from the next start); from a terminal, `datoolkit --browser` or `--window` overrides that for one
-run, and `--no-open` just prints the local URL. In the browser, use **Quit** in the top bar to end
-DA Toolkit: closing the tab leaves it running. The app window's clipboard and Save dialog are
+run, and `--no-open` just prints the local URL. The browser is opened on a one-time code, not
+the app's token, since what a browser is opened with is on its command line for every user of
+the computer to read: the page exchanges the code once, within two minutes, for the token, and
+only a program of yours can. The address printed to open by hand carries the token after a
+`#`, which the browser never sends. In the browser, use **Quit** in the top bar to end
+DA Toolkit: closing the tab leaves it running. Nothing dropped on the app window replaces the
+app: a file or a link dropped on it is refused (text dropped into a field still goes in). The
+app window's clipboard and Save dialog are
 the system's own; in the browser they're the browser's.
 
 1. **Start a case.** The app offers this when it opens. Choose **Not now** to set it up
@@ -410,7 +416,7 @@ A request without the phone's token is refused on its headers, before any of its
 so nobody on the network can tie the app up by sending it data.
 
 **Pairing takes two scans**, so that nothing secret crosses the network before you have
-checked who the phone is talking to:
+checked who the phone is talking to, and the computer allows each phone itself:
 
 1. **Check the certificate.** Press **Start** and scan the first code. It opens a page with
    no secret on it. The browser warns that the connection isn't private: DA Toolkit uses a
@@ -420,24 +426,34 @@ checked who the phone is talking to:
    fingerprint** with the one in the dialog, every pair of it. If anything differs, press
    **It doesn't match: stop**: someone may be intercepting traffic on that network.
 2. **Connect.** Press **Fingerprint matches** and scan the second code in the same browser.
-   It carries the token. The browser has already accepted this exact certificate, so it must
-   not warn again. If it does, don't continue: go back to step 1 and check the certificate.
+   It carries a pairing code, good once and for five minutes. The browser has already
+   accepted this exact certificate, so it must not warn again. If it does, don't continue:
+   go back to step 1 and check the certificate.
+3. **Allow it.** The phone shows a four-digit number, and the computer asks **Allow this
+   phone?** with a number of its own. Allow it only if the two match: a code photographed and
+   used from somewhere else shows another number. **Refuse** is the default. Allowed, the phone
+   is given a token of its own, which only it has (DA Toolkit keeps only a hash of it).
 
-**A phone that is already paired** can skip straight to step 2 (**Already paired: skip**).
-Its browser accepted this certificate before, so it connects without a warning. If it warns
-anyway, treat it like any other warning and go back to step 1: browsers forget accepted
-certificates after a while, and a new phone or someone in the middle produces the same
-warning. The browser shows that warning before it sends the request, so refusing it keeps the
-token on this machine.
+**A phone that is already paired** stays paired while the companion runs. A phone pairing
+again can skip straight to step 2 (**Already paired: skip**). Its browser accepted this
+certificate before, so it connects without a warning. If it warns anyway, treat it like any
+other warning and go back to step 1: browsers forget accepted certificates after a while, and a
+new phone or someone in the middle produces the same warning. The browser shows that warning
+before it sends the request, so refusing it keeps the pairing code on this machine.
 
 The certificate is kept (`~/.config/datoolkit/companion-cert.pem`, key readable only by you),
 so its fingerprint stays the same and each phone checks it once (until its browser forgets). **New certificate** makes a new one (every
 phone checks again); a new one is also made when it expires, after about two years.
 
-- The token changes every time the companion starts. **New code** disconnects phones paired
-  with the old one; **Stop** disconnects all of them. The button shows how many are connected.
-- The token is only in the second code's `#` fragment, which the browser never sends in a
-  request, and the page removes it from the address bar and history.
+- The dialog lists the paired phones, each with **Disconnect**, which stops its token
+  working. **New code** makes a new pairing code (the one shown before stops working) and
+  leaves paired phones as they are; **Stop** disconnects all of them, and they pair again
+  when the companion starts again. The button shows how many phone pages are open.
+- The pairing code is only in the second code's `#` fragment, which the browser never sends in
+  a request, and the page removes it from the address bar and history; the phone keeps its
+  token for its tab only.
+- Every answer on the companion's port says it may not be cached, framed by another page or
+  sent on as a referrer.
 - The companion's port serves only the phone's page and its API: the case name, the last 30
   chat messages, the queue, the hypothesis board and the list of open sessions. It can mark
   queue items ran, skipped or pending (with a note), mark hypotheses, and send a photo with a
@@ -524,7 +540,11 @@ fill in what the provider doesn't report (local models, mostly): one row per mod
 **tier**, whether it **reads images**, its **context window** (32768, 32k or 1M; match the
 server's own setting, such as Ollama's `num_ctx`) and, on NanoGPT and OpenRouter, its **route**.
 **Load the model list** fills the model boxes' suggestions and shows what is detected for each
-column (on Auto). A tier can be set to Standard, TEE or Local, never E2EE: only NanoGPT's
+column (on Auto). A provider's list that can't be read (NanoGPT's, OpenRouter's or Anthropic's,
+which say which models see images, which efforts they take, their prices and windows) is asked
+for again when a model is chosen or a message sent, half a minute after the last try at the
+soonest; a list read once is kept. A tier can be set to Standard, TEE or Local, never E2EE:
+only NanoGPT's
 `private/` models are sealed. Marking a cloud model Local lets Confidential and Sovereign
 cases use it, so do that only for a model on your own hardware.
 
@@ -557,7 +577,12 @@ Settings → Model sets what goes with every request: temperature (default 0.3),
 effort (default medium), max output tokens, top-p, frequency and presence penalty, and seed.
 Blank means the model's own default. Reasoning effort is sent only to reasoning models and is
 moved to the nearest level each model accepts (Kimi and GLM take low / high / max; Opus low to
-max). The same settings apply through NanoGPT Private Mode. On Anthropic's API, effort goes as
+max), the cheaper of two as near, but never to none, which would turn reasoning off. The same
+settings apply through NanoGPT Private Mode, where every `private/` model is held to the levels
+every private build takes (low, high, max), whatever its `TEE/` twin's listing says: private
+DeepSeek V4.1 Flash refuses medium. A model that refuses the level it was sent and names the
+ones it takes is asked once more with the nearest of those, and sent it from then on; a note
+in the chat says so. On Anthropic's API, effort goes as
 Anthropic's own (none and minimal become low: its newer models always think), and temperature
 and top-p go only to models that take them; frequency and presence penalty and seed aren't
 Anthropic settings.
@@ -604,7 +629,18 @@ only for this machine and its local network: `localhost`, `127.x`, `10.x`, `172.
 is reached. For any other address, Settings → AI providers will not save it, and a
 `config.toml` edited by hand to hold one sends nothing (chat, model list, attestation, web
 search and research alike): the app says why instead. The address is never rewritten to
-https for you, and certificates are always checked.
+https for you, and certificates are always checked. An address is judged whole:
+`http://127.0.0.1%2e.example.com/` is a name under example.com, not this machine, and is
+refused; so is one with a space, a backslash or a control character in it.
+
+A user name and password written into an address (`https://user:pass@host/v1`, a model server
+behind one) are kept in the keyring, as the API key is: `config.toml` has the address without
+them, and no message, notice or log shows them (the address is shown as
+`https://…@host/v1`). They are put back only while the file's address is that same one, so
+editing the file to another server doesn't hand it the password; taking the password out of
+the address in Settings takes it out of the keyring. An API key with a line break, a space or
+another character no API key has (picked up where it was copied from) is refused when saved,
+and one stored before is refused before anything is sent with it, saying so without quoting it.
 
 **Local trusts your network.** A base URL counts as Local when its host is `localhost`, a
 private or link-local IP, or a name ending `.local` or `.lan`, so Confidential and Sovereign
@@ -766,7 +802,11 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
   and Mint, and upstream's container on Debian, Arch and CachyOS). If guacd isn't there,
   opening an RDP host shows the commands for your distribution in a dialog you can copy them
   from. DA Toolkit only connects to guacd on this machine, since that link isn't encrypted,
-  and does the connection handshake itself, so the password never reaches the page. Add RDP
+  and does the connection handshake itself, so the password never reaches the page. And only
+  to a guacd that is yours or the system's: what listens on port 4822 must belong to you
+  (guacd run by hand, or rootless podman's port forwarder) or to a system account (root's, as
+  Docker's is, or the guacd package's service user). One another user of the computer started
+  is refused, saying whose it is, and is sent nothing. Add RDP
   hosts under Settings → Hosts with the security mode and keyboard layout.
   - **The container runs only while you need it.** Where guacd comes from upstream's
     container, DA Toolkit starts it (as `datoolkit-guacd`, with podman, or Docker if that's
@@ -854,7 +894,7 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
 | Config (no secrets; providers, hosts, clients, settings) | `~/.config/datoolkit/config.toml` |
 | Pinned RDP and WinRM certificates | `~/.config/datoolkit/rdp_pins.json` |
 | Companion certificate and key | `~/.config/datoolkit/companion-cert.pem`, `companion-key.pem` (0600) |
-| Secrets | OS keyring, service `datoolkit` |
+| Secrets (API keys, host passwords, a password written into a provider's address) | OS keyring, service `datoolkit`; only one that keeps them safe: with none running but one that writes a plain file, nothing is stored and Settings says so |
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |
 | Research reports (reused for 30 days) | `~/.local/share/datoolkit/research/` |
 
@@ -888,7 +928,10 @@ meant to steer the model. Three layers deal with that:
   embeds, and a Content-Security-Policy that only allows this origin), so a steered model
   cannot leak data by making the page fetch a URL. Links open in your browser, and only when
   you click them: a steered model could still write a link whose address carries case data,
-  so look at where a link goes before you follow it.
+  so look at where a link goes before you follow it. A link to a plain `http://` address
+  anywhere but this machine, its network or a Tor onion service is marked **⚠ not secure**
+  (judged from where it really goes, so link text that reads `https://` doesn't hide it), and
+  opening it first asks, naming the full address; Cancel is the default.
 
 Local risk rules raise a command to **disruptive** when it fetches and runs code
 (`curl … | sh`, `curl … | sudo -E bash -`, `bash <(wget …)`, `base64 -d | sh`,
