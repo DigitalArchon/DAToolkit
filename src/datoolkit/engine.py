@@ -332,6 +332,7 @@ class Engine:
         self._img_desc: dict[str, dict] = {}           # image file -> {"model", "text"} from the vision helper
         self._last_turn_error: str | None = None
         self._unsupported: dict[tuple[str, str], set[str]] = {}   # generation settings a model's route refused
+        self._efforts: dict[tuple[str, str], tuple[str, ...]] = {}  # the efforts a model said it takes, refusing another
         self._learned_ctx: dict[tuple[str, str], int] = {}        # context windows named in overflow errors
         self._overflowed = False                                  # the last chat request was too long for the model
         self.compactions: list[dict] = []    # applied compactions, newest last (backup file, messages replaced)
@@ -599,7 +600,7 @@ class Engine:
         for cache in (self._caps, self._enclaves, self._research_auto, self._models):
             if old in cache:
                 cache[new] = cache.pop(old)
-        for cache in (self._unsupported, self._learned_ctx, self._hosts):
+        for cache in (self._unsupported, self._efforts, self._learned_ctx, self._hosts):
             for key in [k for k in cache if k[0] == old]:
                 cache[(new,) + key[1:]] = cache.pop(key)
         self._forget_tee(old)
@@ -827,7 +828,15 @@ class Engine:
         return {"mode": "none", "model": model, "why": f"{what} {helper}"}
 
     def _params(self, prov: Provider, model: str) -> dict:
-        out = params_mod.for_model(self.cfg.settings.generation or {}, self.caps_for(prov, model))
+        caps = self.caps_for(prov, model)
+        learned = self._efforts.get((prov.name, model))
+        if caps and learned:
+            caps = {**caps, "efforts": list(learned)}       # what it said it takes, refusing another
+        elif caps and is_private_mode(model):
+            # every private model takes these; its TEE twin's listing doesn't hold for it (private
+            # DeepSeek V4.1 Flash refuses medium, which NanoGPT lists for TEE/deepseek-v4.1-flash)
+            caps = {**caps, "efforts": list(params_mod.PRIVATE_EFFORTS)}
+        out = params_mod.for_model(self.cfg.settings.generation or {}, caps)
         out.update(routing.body(self._kind(prov), self._route(prov, model)))
         for key in self._unsupported.get((prov.name, model), ()):
             out.pop(key, None)
@@ -843,9 +852,27 @@ class Engine:
     def _learn_unsupported(self, prov: Provider, model: str, params: dict, err: Exception) -> str | None:
         """A provider that refuses one of the generation settings for this model (live: "Kimi K3
         does not support temperature on the selected route"): leave it out for this model from
-        now on, and say so. Returns the setting, or None when the error is something else."""
+        now on, and say so. One that refuses the reasoning effort it was sent and names those the
+        model takes (live: private Kimi K3, "supports thinking_effort values: low, high, max";
+        private DeepSeek V4.1 Flash, "reasoning_effort must be low, high, xhigh, max, or …"): the
+        nearest of those is sent from now on. Returns the setting, or None when the error is
+        something else."""
+        sent = params.get("reasoning_effort")
+        takes = params_mod.efforts_named(str(err), sent) if sent else ()
+        instead = params_mod.nearest_effort(sent, list(takes)) if takes else sent
+        if takes and instead != sent:
+            self._efforts[(prov.name, model)] = takes
+            self.log("effort_unsupported", model=model, effort=sent, instead=instead, takes=list(takes),
+                     error=str(err)[:300])
+            self.chat.append({"kind": "note", "text": f"{model} doesn't take the {sent} reasoning effort (it takes "
+                                                      f"{', '.join(takes)}), so it is sent {instead} from now on; "
+                                                      f"the request was sent again."})
+            self._changed()
+            return "reasoning_effort"
         key = next((m.group(1).lower() for pat in _REFUSED_SETTING for m in pat.finditer(str(err))
                     if m.group(1).lower() in params), "")
+        if not key and sent and params_mod.effort_unsupported(str(err)):
+            key = "reasoning_effort"
         if not key:
             return None
         self._unsupported.setdefault((prov.name, model), set()).add(key)

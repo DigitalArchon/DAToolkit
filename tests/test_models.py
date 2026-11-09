@@ -56,6 +56,70 @@ def test_generation_settings_validate_and_shape_per_model():
     assert params.for_model({"max_tokens": 500000}, opus) == {"max_tokens": 128000}
 
 
+def test_the_nearest_effort_never_turns_reasoning_off_and_refusals_name_what_a_model_takes():
+    # ties still go to the cheaper level (deliberate, Oct 2026), but never to "none": low on a
+    # model listing none, high and max (NanoGPT's deepseek/deepseek-v4-pro) went as none
+    assert params.nearest_effort("low", ["none", "high", "max"]) == "high"
+    assert params.nearest_effort("medium", ["none", "low", "high"]) == "low"
+    assert params.nearest_effort("none", ["none", "low"]) == "none"
+    assert params.nearest_effort("medium", ["none"]) == "medium"          # nothing else listed: as asked
+    assert params.nearest_effort("medium", list(params.PRIVATE_EFFORTS)) == "low"
+    kimi = ('Private Mode request failed (HTTP 400): {"error":{"message":"Kimi K3 supports thinking_effort values: '
+            'low, high, max (parameter=thinking_effort, value=medium)"}}')
+    deepseek = "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, or an integer within [1, 100]"
+    assert params.efforts_named(kimi, "medium") == ("low", "high", "max")
+    assert params.efforts_named(deepseek, "medium") == ("low", "high", "xhigh", "max")
+    assert params.efforts_named("HTTP 400: max_tokens is too high", "low") == ()
+    assert params.efforts_named("reasoning effort is too high for this model", "max") == ()
+    assert params.effort_unsupported("Unsupported parameter: 'reasoning_effort' is not supported with this model.")
+    assert not params.effort_unsupported("reasoning_effort must be low, high, xhigh, max")
+
+
+PRIVATE_TWIN = [{"id": "TEE/deepseek-v4.1-flash", "capabilities": {"vision": True, "reasoning": True},
+                 "reasoning_efforts": ["none", "low", "medium", "high", "max"]}]
+
+
+async def test_a_private_model_takes_the_private_efforts_not_its_tee_twins(env):  # noqa: F811
+    """NanoGPT lists medium for TEE/deepseek-v4.1-flash; the private build refuses it (HTTP 400,
+    every request: the chat model's and the vision helper's)."""
+    engine, _, _ = env
+    engine._caps["Fake"] = capabilities.parse(PRIVATE_TWIN)
+    prov = engine.cfg.provider("Fake")
+    engine.cfg.settings.generation = {"reasoning_effort": "medium"}
+    assert engine._params(prov, "TEE/deepseek-v4.1-flash")["reasoning_effort"] == "medium"   # its listing holds there
+    assert engine._params(prov, "private/deepseek-v4-1-flash")["reasoning_effort"] == "low"
+    engine.cfg.settings.generation = {"reasoning_effort": "xhigh"}
+    assert engine._params(prov, "private/deepseek-v4-1-flash")["reasoning_effort"] == "high"
+
+
+async def test_a_model_that_refuses_an_effort_and_names_those_it_takes_is_sent_the_nearest(env):  # noqa: F811
+    engine, fake, _ = env
+    model = "deepseek/deepseek-v4.1-flash"
+    engine._caps["Fake"] = capabilities.parse([{**PRIVATE_TWIN[0], "id": model}])
+    engine.new_case("e", "open")
+    engine.select_model("Fake", model)
+    engine.cfg.settings.generation = {"temperature": 0.3, "reasoning_effort": "medium"}
+    fake.refuse[model] = "reasoning_effort=medium"
+    fake.refusal[model] = "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, or an integer within [1, 100]"
+    fake.responses += [sse(({"role": "assistant", "content": "Hello."}, "stop")),
+                       sse(({"role": "assistant", "content": "Again."}, "stop"))]
+    engine.send("hi")
+    await wait_turn(engine)
+    assert [r.get("reasoning_effort") for r in fake.requests] == ["medium", "low"]      # asked once more
+    assert engine.chat[-1]["text"] == "Hello." and not engine._last_turn_error
+    assert any("doesn't take the medium reasoning effort (it takes low, high, xhigh, max), so it is sent low"
+               in e.get("text", "") for e in engine.chat if e["kind"] == "note")
+    engine.send("and now?")
+    await wait_turn(engine)
+    assert [r.get("reasoning_effort") for r in fake.requests] == ["medium", "low", "low"]   # from then on
+    prov = engine.cfg.provider("Fake")
+    # a refusal naming only the level sent, or no levels, isn't one to learn from
+    assert engine._learn_unsupported(prov, "m", {"reasoning_effort": "low"}, RuntimeError("effort low is too low")) is None
+    assert engine._learn_unsupported(prov, "m", {"reasoning_effort": "low"},
+                                     RuntimeError("reasoning_effort: extra inputs are not permitted")) == "reasoning_effort"
+    assert "reasoning_effort" not in engine._params(prov, "m")
+
+
 def test_private_mode_body_carries_settings_and_glm_thinking_follows_effort():
     body = shape_body("private/glm-5-3", "glm-5-3", [{"role": "user", "content": "x"}], None, "s",
                       {"temperature": 0.3, "reasoning_effort": "none", "seed": 7})

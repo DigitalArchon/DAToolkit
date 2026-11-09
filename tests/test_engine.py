@@ -44,6 +44,7 @@ class FakeAPI:
         self.completions = []  # queued texts for non-streaming requests
         self.requests = []    # captured request JSON
         self.refuse = {}      # model -> a setting its route rejects with HTTP 400 (as NanoGPT does)
+        self.refusal = {}     # model -> what that refusal says, when not "does not support <setting>"
         self.overflow = None  # an error message for "too long for the context window" (HTTP 400)
         self.stream_headers = {}  # more headers on each stream (a TEE reply's X-Receipt-Id, say)
 
@@ -58,8 +59,8 @@ class FakeAPI:
         assert request.headers["authorization"] == "Bearer sk-test"
         setting, _, value = self.refuse.get(body["model"], "").partition("=")   # "key" or "key=value"
         if setting and setting in body and (not value or str(body[setting]) == value):
-            return httpx.Response(400, json={"error": {"message": f"{body['model']} does not support {setting} on the "
-                                                                  "selected route. Omit it or select another model."}})
+            return httpx.Response(400, json={"error": {"message": self.refusal.get(body["model"]) or (
+                f"{body['model']} does not support {setting} on the selected route. Omit it or select another model.")}})
         if self.overflow:
             return httpx.Response(400, json={"error": {"message": self.overflow, "code": "context_length_exceeded"}})
         if not body.get("stream"):                  # plain completion (write-ups, vision helper)
