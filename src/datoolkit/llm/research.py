@@ -25,6 +25,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 import httpx
 
 from ..config import private_dir
+from ..safety.hidden import visible
 from ..safety.inject import suspicious
 from .websearch import clean_date, clean_sites, format_for_model
 
@@ -384,7 +385,7 @@ async def run(brief: str, *, complete: Complete, search: Callable[[str], Awaitab
 
 
 async def _search(args: dict, out: Outcome, budget: Budget, allowed: Allowlist, search, step) -> str:
-    query = str(args.get("query", "")).strip()[:300]
+    query = " ".join(visible(str(args.get("query", ""))).split())[:300]      # as it is checked and sent
     if not query:
         return "web_search needs a query."
     if out.searches >= budget.searches:

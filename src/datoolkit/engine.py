@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from urllib.parse import unquote_plus
 
 from . import config as config_mod
 from . import creds, recipes, search, tools_cache
@@ -43,6 +44,7 @@ from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
 from .safety import images as images_mod
 from .safety import watch as watch_mod
+from .safety.hidden import visible
 from .safety.inject import suspicious
 from .safety.redact import redact
 from .safety.truncate import head_tail
@@ -2830,7 +2832,9 @@ class Engine:
             args = call.parsed()
         except ValueError as e:
             return f"Invalid web_search arguments ({e})."
-        query, n_redacted = redact(str(args.get("query", "")).strip()[:300])
+        # without what no one can see, redacted and sent alike: a zero-width space inside a key or an
+        # address hid it from redaction, and the search provider reads past it
+        query, n_redacted = redact(" ".join(visible(str(args.get("query", ""))).split())[:300])
         rec = {"id": str(next(self._search_ids)), "query": query, "reason": str(args.get("reason", ""))[:300],
                "provider": self.search_status().get("provider", self.cfg.settings.search_provider), "status": "pending",
                "results": []}
@@ -2870,7 +2874,7 @@ class Engine:
                             "without it, or ask them whether to search.")
                 return "The technician declined this search. Carry on without it, or ask them."
             if edited and edited != query:
-                query, more = redact(edited[:300])
+                query, more = redact(" ".join(visible(edited).split())[:300])
                 n_redacted += more
                 rec["edited"] = True
         update(status="running", query=query)
@@ -2998,7 +3002,7 @@ class Engine:
         task = args.get("task")
         if task not in ("research", "page"):
             task = "page" if args.get("url") and not args.get("brief") else "research"
-        brief, _ = redact(str(args.get("brief", "")).strip()[:2000])
+        brief, _ = redact(visible(str(args.get("brief", ""))).strip()[:2000])
         url = research.norm_url(str(args.get("url", "")))[:2000]
         rec = {"id": str(next(self._research_ids)), "task": task, "brief": brief if task == "research" else "",
                "url": url if task == "page" else "", "reason": str(args.get("reason", ""))[:300], "status": "pending",
@@ -3061,7 +3065,7 @@ class Engine:
                             "without it, or ask them whether to research it.")
                 return "The technician declined this research. Carry on without it, or ask them."
             if task == "research" and edited and edited != brief:
-                brief, _ = redact(edited[:2000])
+                brief, _ = redact(visible(edited)[:2000])
                 rec["edited"] = True
             elif task == "page" and edited and research.norm_url(edited) != url:
                 url = research.norm_url(edited)[:2000]
@@ -3092,7 +3096,7 @@ class Engine:
             return "no URL given"
         if not research.fetchable(url):
             return "only http(s) URLs on the standard ports can be fetched"
-        if redact(url)[1]:
+        if redact(visible(unquote_plus(url)))[1]:          # %-escaped, or with an invisible character in it
             return "the URL contains what looks like a secret"
         return ""
 
@@ -3115,7 +3119,7 @@ class Engine:
             raise UserError(f"No API key stored for {sprov.name}.")
 
         async def search_(query: str, use: str = "answer", **narrow) -> dict:
-            return await self._run_search(redact(query)[0], use, **narrow)
+            return await self._run_search(redact(" ".join(visible(query).split()))[0], use, **narrow)
 
         async def fetch_(urls: list[str]) -> dict:
             try:

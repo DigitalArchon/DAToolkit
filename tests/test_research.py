@@ -544,3 +544,18 @@ def test_sites_and_dates_are_cleaned():
         "docs.sophos.com", "help.mikrotik.com"]
     assert websearch.clean_sites("docs.sophos.com") == []
     assert websearch.clean_date("2026-06-01") == "2026-06-01" and websearch.clean_date("June 2026") == ""
+
+
+async def test_the_agents_queries_and_page_addresses_are_read_without_what_no_one_can_see(rs):
+    engine, fake, _, web = rs
+    engine.cfg.settings.search_mode = "auto"
+    setup(engine)
+    key = "sk-​" + "proj-AbCdEfGhIjKlMnOpQrStUvWx0123"
+    fake.responses += [research_call(), multi_tool_stream([("web_search", {"query": f"Sophos API {key} rejected"})], text=""),
+                       say("## Answer\nNone."), say("ok")]
+    engine.send("x")
+    await wait_turn(engine)
+    sent = [c[1] for c in web.calls if c[0] == "/api/web"][0]["query"]
+    assert "AbCdEfGhIjKl" not in sent and "​" not in sent
+    assert engine._page_url_problem("https://example.org/?k=sk-%E2%80%8B" + "proj-AbCdEfGhIjKlMnOpQrStUvWx0123") \
+        == "the URL contains what looks like a secret"

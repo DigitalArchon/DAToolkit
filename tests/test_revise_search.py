@@ -527,3 +527,16 @@ async def test_the_timeline_says_what_a_request_other_than_the_chat_was_for(env)
     await engine.ticket_summary()
     texts = [e["text"] for e in engine.timeline()["events"] if e["kind"] == "sent_to_ai"]
     assert texts == ["Sent to anthropic/claude-opus-5.5 for a ticket summary"]
+
+
+async def test_what_no_one_can_see_is_taken_out_of_a_query_before_it_is_redacted(search):
+    # a zero-width space inside a key hid it from redaction, and the search provider reads past it
+    engine, fake, _, fs = search
+    engine.cfg.settings.search_mode = "auto"
+    setup(engine)
+    key = "sk-​" + "proj-AbCdEfGhIjKlMnOpQrStUvWx0123"
+    fake.responses += [search_call(f"OPNsense API {key} rejected"), sse(({"role": "assistant", "content": "done"}, "stop"))]
+    engine.send("x")
+    await wait_turn(engine)
+    sent = fs.calls[0]["body"]["query"]
+    assert "AbCdEfGhIjKl" not in sent and "​" not in sent and "[REDACTED]" in sent
