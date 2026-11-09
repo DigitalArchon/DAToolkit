@@ -722,9 +722,10 @@ app of the author's that attests TEE models, and tested against a real attestati
 `TEE/glm-5.3-flash`):
 
 1. **Attest before sending.** NanoGPT's `/tee/attestation` is asked for evidence bound to a
-   fresh random nonce. Nothing goes to a TEE model (chat, vision helper, write-ups or the
-   second-opinion reviewer) until that holds, and it is made again before a send once it is
-   15 minutes old (time the computer spends asleep counts).
+   fresh random nonce. Nothing goes to a TEE model (chat, vision helper, write-ups, the
+   second-opinion reviewer, compaction or the research agent) until that holds, and it is made
+   again before a send once it is 15 minutes old (time the computer spends asleep counts), or
+   once one of the model's replies has failed its check (step 4).
    - The Intel TDX quote's own bytes must bind the enclave's reply-signing key and our nonce
      (never NanoGPT's JSON copy of them), or bind RedPill's attested keys, that key among
      them, and our nonce. For per-instance providers (Chutes), each instance's key, bound
@@ -752,13 +753,18 @@ app of the author's that attests TEE models, and tested against a real attestati
    model's host, so that the model itself runs in an enclave isn't shown by its quote. The
    top bar shows **🛡 TEE attested (partial)**, and the tooltip names each shortfall. Sending
    still goes ahead.
-4. **Check each reply.** After each reply DA Toolkit fetches the record NanoGPT keeps for it
-   (by the receipt id the reply named, waiting a little while it is written, or by its id),
-   signed by the attested key with EIP-191. The record names a hash of the reply as the
-   gateway sent it, which for most models is the exact stream DA Toolkit received; where
-   RedPill's signed receipt comes with it, that is checked too (Ed25519, under the keys kept
-   at attestation, for the same request and reply, its upstream verified). Each reply is
-   marked with what its check showed:
+4. **Check each reply,** wherever it comes from: the chat's, an image's description by the
+   vision helper, a write-up, a second opinion, a compaction summary, and each of the research
+   agent's (its page checks too). After each reply DA Toolkit fetches the record NanoGPT keeps
+   for it (by the receipt id the reply named, waiting a little while it is written, or by its
+   id), signed by the attested key with EIP-191. The record names a hash of the reply as the
+   gateway sent it, which for most models is the exact stream DA Toolkit received, so a TEE
+   model is always asked for a stream, a write-up or a second opinion too; where RedPill's
+   signed receipt comes with it, that is checked too (Ed25519, under the keys kept at
+   attestation, for the same request and reply, its upstream verified). Each reply is marked
+   with what its check showed, beside the AI's message, the image's description, the write-up,
+   the second opinion in the queue, the research card or the compaction summary; a turn or a
+   research run takes the mark of its worst reply:
    - **✔ verified**: signed by the attested key, for the exact bytes received, its receipt
      (where read) holding;
    - **signed, text not compared**: signed by the attested key, but NanoGPT rebuilds this
@@ -769,6 +775,10 @@ app of the author's that attests TEE models, and tested against a real attestati
      other bytes, or its receipt doesn't hold;
    - **unsigned**: the provider signs no replies (Chutes); every instance that could answer
      was attested before sending instead.
+
+   A failed check is also said in a notice, and the model is attested again before anything
+   more is sent to it; a request made while a reply of the same model is still being checked
+   waits for that check. A research report with a failed check isn't kept for later cases.
 
 What this proves: a genuine, current, non-debug Intel TDX machine (and, where evidence is
 offered, NVIDIA GPUs) holds the key, live, bound to our nonce, and each reply's record was
