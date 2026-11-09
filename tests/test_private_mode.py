@@ -1,5 +1,6 @@
 """NanoGPT Private Mode protocol, against a fake relay and a fake attestation verifier."""
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -110,6 +111,38 @@ def test_detection():
     assert relay_url(BASE) == RELAY
     assert detect_tier("private/glm-5-3", BASE) == "e2ee"
     assert detect_tier("TEE/glm-5.3", BASE) == "tee"
+
+
+async def test_an_error_the_enclave_sends_partway_is_said_as_it_is():
+    said = 'data: {"error": {"message": "This model\'s maximum context length is 262144 tokens", "code": 400}}\n\n'
+    relay = Relay(replies=[(200, chunk({"role": "assistant", "content": "Half"}) + said)])
+    events = []
+    with pytest.raises(PrivateModeError, match="the model stopped: This model's maximum context length is 262144") as e:
+        async for event in relay.client().stream("private/glm-5-3", [{"role": "user", "content": "hi"}]):
+            events.append(event)
+    assert events == [("text", "Half")] and e.value.status_code == 400
+
+
+async def test_a_private_model_out_of_context_partway_is_explained_and_its_window_learned(env, monkeypatch):  # noqa: F811
+    """The enclave's error was dropped as a malformed chunk, so a private model that ran out of
+    context only ever read as "the encrypted reply ended before it was complete": never explained
+    as an overflow, nobody told to compact."""
+    engine, _, _ = env
+    said = 'data: {"error": {"message": "This model\'s maximum context length is 262144 tokens", "code": 400}}\n\n'
+    relay = Relay(replies=[(200, chunk({"role": "assistant", "content": "Half"}) + said)])
+    sealed = relay.client()
+    monkeypatch.setattr(engine, "_client", lambda prov, model="": sealed)
+    engine.new_case("o", "open")
+    engine.select_model("Fake", "private/glm-5-3")
+    engine.send("disk full?")
+    for _ in range(300):
+        if not engine.busy:
+            break
+        await asyncio.sleep(0.01)
+    note = engine.chat[-1]
+    assert note.get("context") and note.get("retry")
+    assert "too long for private/glm-5-3's context window (262,144 tokens)" in note["text"]
+    assert engine._overflowed and engine.context_limit(engine.cfg.providers[0], "private/glm-5-3")["tokens"] == 262144
 
 
 async def test_a_private_model_however_written_is_only_ever_sent_sealed():

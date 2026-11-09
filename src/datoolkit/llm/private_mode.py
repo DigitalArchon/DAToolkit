@@ -23,7 +23,9 @@ pinned exactly in pyproject.toml. The design follows SealedLore's providers/priv
    The transport refuses a 2xx reply that isn't sealed; we refuse any other reply that isn't
    (EHBP passes one through as it came, so a reply the relay made itself, a 302 with a model's
    answer in it, would otherwise pass for the enclave's), one NanoGPT doesn't mark as Private
-   Mode, and a stream that ends without its final chunk. What the relay says in an error is
+   Mode, and a stream that ends without its final chunk. An error the enclave sends inside the
+   seal partway through a reply (the context too long, say) is the model's own word, and is said
+   as it is (from DA Vibe Manager's copy, Nov 2026). What the relay says in an error is
    never sealed, so it is said to be the relay's, short and on one line. Nothing is ever sent
    unsealed and nothing falls back to the plain endpoint (`LLMClient` refuses `private/*`).
    The last two from DA Vibe Manager's copy of this module (Nov 2026). Anything else of the
@@ -460,7 +462,18 @@ class PrivateModeClient:
                         saw_done = True
                         break
                     try:
-                        chunk = ChatCompletionChunk.model_validate(json.loads(data))
+                        parsed = json.loads(data)
+                    except ValueError:
+                        continue
+                    if isinstance(parsed, dict) and parsed.get("error") and not parsed.get("choices"):
+                        # the enclave stopped partway and said why (the context too long, say): said as it is
+                        err = parsed["error"]
+                        said = err.get("message") if isinstance(err, dict) else err
+                        code = err.get("code") if isinstance(err, dict) else None
+                        raise PrivateModeError(f"the model stopped: {str(said)[:300]}",
+                                               code if isinstance(code, int) else None, data[:2000])
+                    try:
+                        chunk = ChatCompletionChunk.model_validate(parsed)
                     except ValueError:
                         continue
                     for event in acc.feed(chunk):
