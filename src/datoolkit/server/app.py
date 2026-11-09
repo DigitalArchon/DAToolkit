@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 
 from .. import config
-from ..companion import CompanionServer
+from ..companion import CompanionServer, PairingRefused
 from ..hostenv import host_env
 from ..llm import providers as providers_mod
 from ..engine import Engine, UserError
@@ -28,6 +28,9 @@ WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 COMPANION_FILES = {"style.css", "companion.js", "icon.svg"}
 # a photo is at most 6 MB (8 MB as base64, see Engine.clean_images) plus its description
 MAX_COMPANION_BODY = 10 * 1024 * 1024
+# a phone's claim of a pairing code (the code and its name), which needs no token
+MAX_PAIR_BODY = 4 * 1024
+PAIR_PATH = "/api/companion/pair"
 # the window's largest request: a message or its draft with four such images, and its text
 MAX_WINDOW_BODY = 48 * 1024 * 1024
 # a file saved through the app window's Save dialog (/api/desktop/save): a case's full export
@@ -44,10 +47,12 @@ class TokenGate:
     over its limit. The connection is closed rather than read to the end. WebSockets check
     their tokens themselves."""
 
-    def __init__(self, app, check: Callable[[str | None], bool], limit: Callable[[str], int]):
+    def __init__(self, app, check: Callable[[str | None], bool], limit: Callable[[str], int],
+                 open_paths: tuple[str, ...] = ()):
         self.app = app
         self.check = check
         self.limit = limit
+        self.open_paths = open_paths     # paths that need no token (a phone's pairing), size still held
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope["path"].startswith("/api/"):
@@ -59,7 +64,8 @@ class TokenGate:
         await self.app(scope, receive, send)
 
     def _refusal(self, path: str, headers: Headers) -> tuple[int, str] | None:
-        if not self.check(headers.get("x-token")):
+        needs_token = not (self.open_paths and path.startswith(self.open_paths))
+        if needs_token and not self.check(headers.get("x-token")):
             return 403, "bad token"
         if "transfer-encoding" in headers:   # chunked: no length to check before reading
             return 411, "a Content-Length is required"
@@ -73,10 +79,13 @@ class TokenGate:
 
 
 class CompanionGate(TokenGate):
-    """The gate in front of the phone companion's app: its token, and MAX_COMPANION_BODY."""
+    """The gate in front of the phone companion's app: a paired phone's token, and
+    MAX_COMPANION_BODY; a claim of a pairing code needs none, and is held to MAX_PAIR_BODY."""
 
     def __init__(self, app, companion: CompanionServer):
-        super().__init__(app, companion.check, lambda _path: MAX_COMPANION_BODY)
+        super().__init__(app, companion.check,
+                         lambda path: MAX_PAIR_BODY if path.startswith(PAIR_PATH) else MAX_COMPANION_BODY,
+                         open_paths=(PAIR_PATH,))
         self.companion = companion
 
 
@@ -227,6 +236,30 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             raise HTTPException(404)
         return FileResponse(WEB_DIR / name)
 
+    @comp.post(PAIR_PATH)
+    async def companion_claim(request: Request):
+        """A phone claims the pairing code its connect QR carried (no token yet): the desktop is
+        asked to allow it, showing the four digits this answers with."""
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except ValueError:
+            raise HTTPException(400, "the body isn't JSON") from None
+        body = body if isinstance(body, dict) else {}
+        try:
+            claim = companion.pairing.claim(body.get("code"), body.get("name"))
+        except PairingRefused as refused:
+            return JSONResponse({"error": refused.reason}, status_code=refused.status)
+        emit({"type": "companion_claim", "claim": {"id": claim.id, "name": claim.name, "check": claim.check}})
+        return {"claim": claim.id, "check": claim.check}
+
+    @comp.get(PAIR_PATH + "/{claim_id}")
+    async def companion_claim_state(claim_id: str):
+        """The desktop's answer to a claim, once: the token with "approved", the first time."""
+        state, token = companion.pairing.poll(claim_id)
+        if state in ("approved", "refused", "expired"):
+            emit({"type": "companion", "phones": len(companion.sockets)})
+        return {"state": state, **({"token": token} if token else {})}
+
     @comp.get("/api/companion/state")
     async def companion_state(e: Engine = Depends(auth_companion)):
         return companion_view(e)
@@ -258,11 +291,12 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @comp.websocket("/ws/events")
     async def comp_events(ws: WebSocket):
-        if not companion.check(ws.query_params.get("t")):
+        device = companion.device_of(ws.query_params.get("t"))
+        if device is None:
             await ws.close(code=4403)
             return
         await ws.accept()
-        companion.sockets.add(ws)
+        companion.sockets[ws] = device
         q: asyncio.Queue = asyncio.Queue()
         listeners.add(q)
         try:
@@ -284,7 +318,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             pass
         finally:
             listeners.discard(q)
-            companion.sockets.discard(ws)
+            companion.sockets.pop(ws, None)
             await _changed_phones()
 
     async def _changed_phones() -> None:
@@ -305,13 +339,31 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             await companion.start(companion_port())
         elif action == "stop":
             await companion.stop()
-        elif action == "token":
+        elif action == "token":         # a new pairing code for the connect QR
             await companion.rotate()
         elif action == "certificate":
             await companion.renew_cert(companion_port())
         else:
             raise HTTPException(404)
         e.log("companion", action=action, port=companion.port if companion.running else None)
+        emit({"type": "companion", "phones": len(companion.sockets)})
+        return companion.info(companion_port())
+
+    @app.post("/api/phone/claims/{claim_id}")
+    async def phone_claim(claim_id: str, body: dict, e: Engine = Depends(auth)):
+        """The technician's answer to a phone asking to pair: allowed, it gets a token of its own."""
+        allow = body.get("allow") is True
+        device = companion.answer(claim_id, allow)
+        e.log("companion_pairing", allowed=device is not None, name=device.name if device else None)
+        emit({"type": "companion", "phones": len(companion.sockets)})
+        return companion.info(companion_port())
+
+    @app.delete("/api/phone/devices/{device_id}")
+    async def phone_forget(device_id: str, e: Engine = Depends(auth)):
+        """Disconnect one paired phone: its token stops working, and it would have to pair again."""
+        name = companion.devices[device_id].name if device_id in companion.devices else None
+        await companion.revoke(device_id)
+        e.log("companion_disconnected", name=name)
         emit({"type": "companion", "phones": len(companion.sockets)})
         return companion.info(companion_port())
 

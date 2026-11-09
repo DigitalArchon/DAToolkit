@@ -676,7 +676,7 @@ async def test_companion_token_is_read_mostly(env, tmp_path):  # noqa: F811
     engine.queue.add("c", [{"session_id": sid, "command": "uptime", "purpose": "p", "risk": "read_only"}])
     app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
     app.state.engine = engine
-    app.state.companion.token = "phone"              # as if started (tests/test_companion.py starts it for real)
+    app.state.companion.add_device("test phone", "phone")              # as if started (tests/test_companion.py starts it for real)
     phone = app.state.companion.app
     async with (httpx.AsyncClient(transport=httpx.ASGITransport(app=phone), base_url="http://t") as c,
                 httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as gui):

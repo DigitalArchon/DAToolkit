@@ -1,15 +1,16 @@
 "use strict";
 /* Phone companion: read the chat and queue, mark items done or skipped, send a photo with a
    description to the AI. No terminal access. */
-// The pairing code puts the token in the fragment (never sent in a request line); keep it for
-// reloads in this tab only, and take it out of the address bar and history.
-const TOKEN = (() => {
-  const fromHash = new URLSearchParams(location.hash.slice(1)).get("t");
+// The connect code puts a pairing code in the fragment (never sent in a request line). It is
+// claimed, the computer asks the technician to allow this phone (showing the digits this page
+// shows), and the token this phone is then given is kept for reloads in this tab only. The code
+// and the token are taken out of the address bar and history.
+const PAIR_CODE = new URLSearchParams(location.hash.slice(1)).get("pair");
+let TOKEN = (() => {
   try {
-    if (fromHash) sessionStorage.setItem("dat-companion", fromHash);
     history.replaceState(null, "", "/companion");
-    return fromHash || sessionStorage.getItem("dat-companion");
-  } catch { return fromHash; }
+    return PAIR_CODE ? null : sessionStorage.getItem("dat-companion");
+  } catch { return null; }
 })();
 const $ = (s) => document.querySelector(s);
 let lastSpoken = "", lastText = "", photosAllowed = false;
@@ -155,7 +156,7 @@ function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/events?t=${encodeURIComponent(TOKEN)}`);
   ws.onmessage = (m) => { const ev = JSON.parse(m.data); if (ev.type === "state") render(ev.state); };
   ws.onclose = (e) => {
-    if (e.code === 4403) { toast("Disconnected: DA Toolkit stopped the companion or issued a new code. Scan the connect code again."); return; }
+    if (e.code === 4403) { toast("Disconnected: DA Toolkit stopped the companion or disconnected this phone. Scan the connect code again."); return; }
     setTimeout(reconnect, 2000);
   };
 }
@@ -164,11 +165,49 @@ async function reconnect() {
   try { render(await api("GET", "/api/companion/state")); connect(); }
   catch (e) {
     if (e instanceof TypeError) setTimeout(reconnect, 3000);  // unreachable for now: keep trying
-    else toast("Disconnected: DA Toolkit stopped the companion or issued a new code. Scan the connect code again.");
+    else toast("Disconnected: DA Toolkit stopped the companion or disconnected this phone. Scan the connect code again.");
   }
 }
-if (!TOKEN) toast("No pairing token. Scan the connect code on the DA Toolkit screen.");
-else { api("GET", "/api/companion/state").then(render).catch((e) => toast(e.message)); connect(); }
+function start() { api("GET", "/api/companion/state").then(render).catch((e) => toast(e.message)); connect(); }
+
+function phoneName() {
+  const ua = navigator.userAgent || "";
+  return /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android phone" : "A phone";
+}
+
+// Pairing: claim the code, show the digits the computer shows beside its question, wait for its answer.
+async function pair(code) {
+  const note = h("div", { class: "card", id: "pairing" }, h("b", {}, "Pairing…"));
+  document.body.prepend(note);
+  const say = (...kids) => note.replaceChildren(...kids);
+  let claim;
+  try {
+    claim = await api("POST", "/api/companion/pair", { code, name: phoneName() });
+  } catch (e) { say(h("b", {}, "Not paired. "), e.message); return; }
+  say(h("div", {}, "On the computer, allow this phone if it shows the same number:"),
+    h("div", { class: "check-code" }, claim.check), h("div", { class: "muted small" }, "Waiting for the computer…"));
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1500));
+    let answer;
+    try { answer = await api("GET", `/api/companion/pair/${encodeURIComponent(claim.claim)}`); }
+    catch (e) { if (e instanceof TypeError) continue; say(h("b", {}, "Not paired. "), e.message); return; }
+    if (answer.state === "waiting") continue;
+    if (answer.state === "approved" && answer.token) {
+      TOKEN = answer.token;
+      try { sessionStorage.setItem("dat-companion", TOKEN); } catch { /* kept for this page only */ }
+      note.remove();
+      start();
+    } else {
+      say(h("b", {}, answer.state === "refused" ? "The computer didn't allow this phone. " : "The pairing timed out. "),
+        "Show the connect code on the computer and scan it again.");
+    }
+    return;
+  }
+}
+
+if (PAIR_CODE) pair(PAIR_CODE);
+else if (!TOKEN) toast("Not paired. Scan the connect code on the DA Toolkit screen.");
+else start();
 
 // ---- photo to AI: take or choose, black out, describe, send
 const PHOTO_MAX = 2048;

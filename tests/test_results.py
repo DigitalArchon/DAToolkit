@@ -46,7 +46,7 @@ async def test_a_phone_showing_an_old_queue_cannot_undo_a_sent_item(env, tmp_pat
     engine.queue.update(num, status="sent")
     app: FastAPI = server_app.create_app("main", lambda emit: engine, companion_dir=tmp_path)
     app.state.engine = engine
-    app.state.companion.token = "phone"
+    app.state.companion.add_device("test phone", "phone")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:
         r = await c.post(f"/api/companion/queue/{num}", json={"status": "pending"}, headers={"x-token": "phone"})
     assert r.status_code == 400 and engine.queue.get(num).status == "sent"

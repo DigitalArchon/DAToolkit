@@ -58,22 +58,49 @@ async def test_pairing_over_tls(env, tmp_path, monkeypatch):  # noqa: F811
         info = (await gui.post("/api/phone/start", headers=main)).json()
         try:
             assert info["running"] and info["pair_url"] == f"https://127.0.0.1:{port}/pair"
-            assert "#t=" not in info["pair_url"] and info["pair_qr"].startswith("data:image/svg+xml")
-            token = info["connect_url"].split("#t=", 1)[1]
-            assert info["connect_url"] == f"https://127.0.0.1:{port}/companion#t={token}"
+            assert "#" not in info["pair_url"] and info["pair_qr"].startswith("data:image/svg+xml")
+            assert "connect_url" not in info and info["devices"] == [] and info["claims"] == []
+            info = (await gui.post("/api/phone/token", headers=main)).json()      # the dialog's step 2
+            code = info["connect_url"].split("#pair=", 1)[1]
+            assert info["connect_url"] == f"https://127.0.0.1:{port}/companion#pair={code}" and len(code) == 26
             cert = tmp_path / companion.CERT_FILE
             assert info["fingerprint"] == companion.fingerprint(cert.read_bytes())
 
             # a phone that trusts exactly this certificate
             async with httpx.AsyncClient(verify=companion.client_context(cert), base_url=f"https://127.0.0.1:{port}") as phone:
                 assert (await phone.get("/pair")).status_code == 200
+                # it claims the code, and nothing is given before the desktop allows it
+                claim = (await phone.post("/api/companion/pair", json={"code": code, "name": "Pixel"})).json()
+                assert len(claim["check"]) == 4 and claim["check"].isdigit()
+                assert (await phone.get(f"/api/companion/pair/{claim['claim']}")).json() == {"state": "waiting"}
+                waiting = (await gui.get("/api/phone", headers=main)).json()["claims"]
+                assert waiting == [{"id": claim["claim"], "name": "Pixel", "check": claim["check"]}]
+                # the code was spent by that claim: another phone with a photo of it gets nowhere
+                again = await phone.post("/api/companion/pair", json={"code": code, "name": "Other"})
+                assert again.status_code == 410
+                allowed = (await gui.post(f"/api/phone/claims/{claim['claim']}", json={"allow": True}, headers=main)).json()
+                assert [d["name"] for d in allowed["devices"]] == ["Pixel"] and allowed["claims"] == []
+                answer = (await phone.get(f"/api/companion/pair/{claim['claim']}")).json()
+                token = answer["token"]
+                assert answer["state"] == "approved" and len(token) > 30
+                assert (await phone.get(f"/api/companion/pair/{claim['claim']}")).json() == {"state": "expired"}   # once
+                assert token not in json.dumps(allowed) and token not in str(app.state.companion.devices)    # its hash only
                 r = await phone.get("/api/companion/state", headers={"x-token": token})
                 assert r.status_code == 200 and r.json()["case"]["name"] == "phone"
                 # the GUI's API isn't there, even with the phone's token; the main token means nothing
                 assert (await phone.get("/api/state", headers={"x-token": token})).status_code == 404
                 assert (await phone.get("/api/state", headers={"x-token": "main"})).status_code == 403
-                # a new code cuts off the old one
-                await gui.post("/api/phone/token", headers=main)
+                # a second phone, refused: given nothing
+                code = (await gui.post("/api/phone/token", headers=main)).json()["connect_url"].split("#pair=", 1)[1]
+                assert (await phone.post("/api/companion/pair", json={"code": "not-it", "name": "x"})).status_code == 403
+                other = (await phone.post("/api/companion/pair", json={"code": code, "name": "Other"})).json()
+                await gui.post(f"/api/phone/claims/{other['claim']}", json={"allow": False}, headers=main)
+                assert (await phone.get(f"/api/companion/pair/{other['claim']}")).json() == {"state": "refused"}
+                # a new code leaves the paired phone paired; disconnecting it cuts it off
+                assert (await phone.get("/api/companion/state", headers={"x-token": token})).status_code == 200
+                device = allowed["devices"][0]["id"]
+                gone = (await gui.delete(f"/api/phone/devices/{device}", headers=main)).json()
+                assert gone["devices"] == []
                 assert (await phone.get("/api/companion/state", headers={"x-token": token})).status_code == 403
             # plain HTTP isn't served on the companion port
             with pytest.raises(httpx.HTTPError):
@@ -95,7 +122,7 @@ async def test_every_answer_of_the_phones_carries_the_security_headers(env, tmp_
     engine, _, _ = env
     app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
     app.state.engine = engine
-    app.state.companion.token = "phone"
+    app.state.companion.add_device("test phone", "phone")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:
         for method, path, headers in (("GET", "/pair", {}), ("GET", "/companion", {}), ("GET", "/static/companion.js", {}),
                                       ("GET", "/api/companion/state", {"x-token": "phone"}),
@@ -118,7 +145,7 @@ async def test_busy_port_is_a_clear_error(env, tmp_path):  # noqa: F811
         taken.listen(1)
         with pytest.raises(UserError, match="already in use"):
             await server.start(taken.getsockname()[1])
-    assert not server.running and server.token is None
+    assert not server.running and server.devices == {}
 
 
 async def test_port_setting_is_validated(env):  # noqa: F811
@@ -137,7 +164,7 @@ async def test_phone_sends_a_photo_with_its_description(env, tmp_path):  # noqa:
     engine.new_case("photo", "open")
     app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
     app.state.engine = engine
-    app.state.companion.token = "phone"
+    app.state.companion.add_device("test phone", "phone")
     buf = BytesIO()
     Image.new("RGB", (40, 30), "white").save(buf, "JPEG")
     photo = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -182,7 +209,8 @@ async def _gate_call(token, headers):
             seen["start"] = msg
 
     srv = companion.CompanionServer(FastAPI(), None)
-    srv.token = token
+    if token:
+        srv.add_device("phone", token)
     scope = {"type": "http", "method": "POST", "path": "/api/companion/photo", "query_string": b"",
              "headers": [(k.encode(), v.encode()) for k, v in headers.items()]}
     await CompanionGate(inner, srv)(scope, receive, send)
@@ -275,7 +303,7 @@ async def test_unauthenticated_upload_is_cut_off_over_tls(env, tmp_path, monkeyp
         writer.close()
         # and the real phone path still works
         async with httpx.AsyncClient(verify=ctx, base_url=f"https://127.0.0.1:{port}") as phone:
-            r = await phone.get("/api/companion/state", headers={"x-token": app.state.companion.token})
+            r = await phone.get("/api/companion/state", headers={"x-token": app.state.companion.add_device("phone")})
             assert r.status_code == 200
     finally:
         await app.state.companion.stop()

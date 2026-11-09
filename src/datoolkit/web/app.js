@@ -356,6 +356,10 @@ function handleEvent(ev) {
       renderPhoneBtn();
       S.phoneDialog?.refresh();
       break;
+    case "companion_claim":       // a phone scanned the connect code: asked here, whatever is open
+      askToPair(ev.claim);
+      S.phoneDialog?.refresh();
+      break;
     case "sessions":
       S.state.sessions = ev.sessions;
       renderSessions();
@@ -3779,11 +3783,34 @@ function renderPhoneBtn() {
   b.classList.toggle("on", !!S.phoneRunning);
 }
 
+// A phone that scanned the connect code asks to pair: allowed only here, and only if it shows the
+// same four digits (a code photographed and claimed from somewhere else shows others). Refuse has
+// the focus. Each phone is then given a token of its own (companion.py).
+const askedClaims = new Set();
+function askToPair(claim) {
+  if (!claim || askedClaims.has(claim.id)) return;
+  askedClaims.add(claim.id);
+  let allow = false;
+  const { box } = modal({
+    title: "Allow this phone?",
+    body: h("div", {}, h("p", {}, `${claim.name} scanned the connect code and asks to follow the case. Allow it only if its screen shows this number:`),
+      h("div", { class: "check-code" }, claim.check),
+      h("p", { class: "small muted" }, "A number that differs, or a phone you didn't just scan with: refuse.")),
+    buttons: [{ label: "Refuse" }, { label: "Allow", kind: "primary", onClick: () => { allow = true; } }],
+    onClose: () => guarded(async () => {
+      await api("POST", `/api/phone/claims/${encodeURIComponent(claim.id)}`, { allow });
+      S.phoneDialog?.refresh();
+    }),
+  });
+  setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
+}
+
 // Pairing takes two scans (see companion.py): the first opens a page with no secret so the
-// certificate's fingerprint can be checked on the phone; only then is the code with the token shown.
-// A phone already paired can skip to the connect step: one that hasn't accepted this certificate
-// (new, or its browser forgot) gets the browser's warning there, before the token is sent, and is
-// sent back to step 1.
+// certificate's fingerprint can be checked on the phone; only then is the connect code shown, a
+// pairing code good once and for five minutes, which the phone claims and this asks about. A phone
+// already paired needs neither again while the companion runs. One that hasn't accepted this
+// certificate (new, or its browser forgot) gets the browser's warning at the connect step, before
+// anything is claimed, and is sent back to step 1.
 async function openPhone() {
   let info = await api("GET", "/api/phone");
   let step = 1;
@@ -3812,12 +3839,19 @@ async function openPhone() {
         h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => act("start") }, "Start"))));
       return;
     }
-    const head = h("div", { class: "row small" }, h("span", {}, `Serving on ${info.ip}:${info.port}`), h("span", { class: "muted" },
-      info.phones ? ` · ${info.phones} phone${info.phones > 1 ? "s" : ""} connected` : " · no phone connected"), h("span", { class: "spacer" }),
-      h("button", { class: "small", title: "Disconnect paired phones; they scan the connect code again", onclick: () => act("token") }, "New code"),
-      h("button", { class: "small", title: "Make a new certificate; every phone checks the new fingerprint again",
-        onclick: () => act("certificate", "Make a new certificate? Every phone will have to accept it and check its fingerprint again.") }, "New certificate"),
-      h("button", { class: "small danger", onclick: () => act("stop") }, "Stop"));
+    const devices = info.devices || [];
+    const head = h("div", {}, h("div", { class: "row small" }, h("span", {}, `Serving on ${info.ip}:${info.port}`), h("span", { class: "muted" },
+      info.phones ? ` · ${info.phones} page${info.phones > 1 ? "s" : ""} open` : " · no phone connected"), h("span", { class: "spacer" }),
+      h("button", { class: "small", title: "Make a new certificate; every phone checks the new fingerprint again and pairs again",
+        onclick: () => act("certificate", "Make a new certificate? Every phone will have to accept it, check its fingerprint and pair again.") }, "New certificate"),
+      h("button", { class: "small danger", title: "Stop the companion; every phone pairs again next time", onclick: () => act("stop") }, "Stop")),
+      devices.length ? h("div", { class: "phone-devices" }, h("div", { class: "small muted" }, "Paired phones (each has a token of its own):"),
+        devices.map((d) => h("div", { class: "row small" }, h("span", {}, `${d.name}${d.connected ? " · connected" : ""}`),
+          h("span", { class: "muted" }, ` · paired ${(d.paired_at || "").replace("T", " ").slice(0, 16)}`), h("span", { class: "spacer" }),
+          h("button", { class: "small danger", title: "Its token stops working; it would have to pair again",
+            onclick: () => guarded(async () => { info = await api("DELETE", `/api/phone/devices/${encodeURIComponent(d.id)}`); render(); }) }, "Disconnect")))) : null,
+      (info.claims || []).map((c) => h("div", { class: "warnbox" }, `${c.name} is waiting to be allowed (it shows ${c.check}). `,
+        h("button", { class: "small", onclick: () => askToPair(c) }, "Answer"))));
     if (step === 1) {
       body.replaceChildren(head,
         h("h3", {}, "Step 1 of 2: check the certificate"),
@@ -3829,15 +3863,19 @@ async function openPhone() {
           h("div", { class: "row" }, h("button", { class: "danger", onclick: () => act("stop") }, "It doesn't match: stop"),
             h("span", { class: "spacer" }), h("button", { onclick: () => { step = 2; render(); } }, "Already paired: skip"),
             h("button", { class: "primary", onclick: () => { step = 2; render(); } }, "Fingerprint matches")))));
+    } else if (!info.connect_qr) {        // none open, or the last one used or out of date: a new one
+      body.replaceChildren(head, h("p", { class: "muted" }, "Making a connect code…"));
+      act("token");
     } else {
       body.replaceChildren(head,
         h("h3", {}, "Step 2 of 2: connect"),
-        h("div", { class: "phone-step" }, qr(info.connect_qr, "Contains this session's token: don't share or photograph it", false), h("div", {},
-          h("p", {}, "Scan this with the phone and open it in the browser you checked the certificate in."),
+        h("div", { class: "phone-step" }, qr(info.connect_qr, "A pairing code, good once and for five minutes: don't share or photograph it", false), h("div", {},
+          h("p", {}, "Scan this with the phone and open it in the browser you checked the certificate in. The phone then shows a number, and this computer asks whether to allow it: allow it only if the numbers match."),
           h("div", { class: "warnbox" }, h("b", {}, "If the browser warns that the connection isn't private, don't continue. "),
-            "Close that page and check the certificate (step 1) first. The browser warns when this phone has never accepted this certificate, when it has forgotten it (browsers do after a while), and when someone is in the middle: it's the same warning, so treat it the same way. Without a warning, the token only reaches this machine."),
-          h("p", { class: "small muted" }, "The code changes every time the companion starts. New code disconnects phones paired with the old one."),
-          h("div", { class: "row" }, h("button", { onclick: () => { step = 1; render(); } }, "Check the certificate (step 1)")))));
+            "Close that page and check the certificate (step 1) first. The browser warns when this phone has never accepted this certificate, when it has forgotten it (browsers do after a while), and when someone is in the middle: it's the same warning, so treat it the same way."),
+          h("p", { class: "small muted" }, "Each phone is given a token of its own when you allow it, and can be disconnected by itself above. Phones pair again when the companion starts again."),
+          h("div", { class: "row" }, h("button", { onclick: () => { step = 1; render(); } }, "Check the certificate (step 1)"),
+            h("span", { class: "spacer" }), h("button", { title: "A new pairing code: this one stops working", onclick: () => act("token") }, "New code")))));
     }
   }
   render();

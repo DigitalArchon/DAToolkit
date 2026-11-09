@@ -585,9 +585,12 @@ function makeStorage() {
 
 // The frontend in a fresh page: `app.run(code)` evaluates in the page (its `const`s, such as S,
 // are only reachable that way); `app.call(name, ...args)` calls one of its functions.
-function loadApp({ token = "tok", port = 48599, inFragment = false } = {}) {
-  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
-  const source = fs.readFileSync(path.join(WEB, "app.js"), "utf8");
+// `page` and `script`: the phone's page instead (companion.html, companion.js), with `hash` its
+// address's fragment; `routes`, answers the page needs as it loads.
+function loadApp({ token = "tok", port = 48599, inFragment = false, page = "index.html", script = "app.js", hash,
+  routes = {} } = {}) {
+  const html = fs.readFileSync(path.join(WEB, page), "utf8");
+  const source = fs.readFileSync(path.join(WEB, script), "utf8");
   const document = new Document(html);
   const clock = new Clock();
   const app = {
@@ -601,6 +604,7 @@ function loadApp({ token = "tok", port = 48599, inFragment = false } = {}) {
     "GET /api/draft": () => ({ text: "", images: [] }),
     "POST /api/draft": () => ({ ok: true }),
     "POST /api/layout": () => ({ ok: true }),
+    ...routes,
   };
   // A route answers with a value, a promise of one (a held request) or reply(status, body).
   async function fetch(url, opts = {}) {
@@ -709,7 +713,8 @@ function loadApp({ token = "tok", port = 48599, inFragment = false } = {}) {
     requestAnimationFrame: (fn) => clock.setTimeout(() => fn(clock.now), 16), cancelAnimationFrame: clock.clearTimeout,
     document,
     // the token as the app window has it (?t=), or as the browser's launch page hands it on (#t=)
-    location: { search: inFragment ? "" : `?t=${token}`, hash: inFragment ? `#t=${token}` : "", host: `127.0.0.1:${port}`,
+    location: { search: inFragment || hash !== undefined ? "" : `?t=${token}`, hash: hash ?? (inFragment ? `#t=${token}` : ""),
+      host: `127.0.0.1:${port}`,
       hostname: "127.0.0.1", port: String(port), protocol: "http:", origin: `http://127.0.0.1:${port}`,
       href: `http://127.0.0.1:${port}/${inFragment ? "#" : "?"}t=${token}`, reload() {} },
     history: { replaceState: (state, title, url) => { app.historyUrl = url; } },
@@ -770,7 +775,7 @@ function loadApp({ token = "tok", port = 48599, inFragment = false } = {}) {
     await clock.tick(0);
   };
 
-  vm.runInContext(source, win, { filename: path.join(WEB, "app.js") });
+  vm.runInContext(source, win, { filename: path.join(WEB, script) });
   return app;
 }
 

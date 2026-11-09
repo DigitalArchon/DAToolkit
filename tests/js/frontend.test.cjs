@@ -377,6 +377,57 @@ test("a link that isn't secure is marked from its real address, and asks before 
   assert.equal(app.$(".modal"), null);
 });
 
+test("a phone asking to pair is asked about here, its number shown, Refuse the default", async () => {
+  const app = await page("a", null, {
+    "POST /api/phone/claims/c1": () => ({ running: true }), "POST /api/phone/claims/c2": () => ({ running: true }) });
+  await app.event({ type: "companion_claim", claim: { id: "c1", name: "Pixel", check: "4821" } });
+  await app.clock.tick(100);
+  assert.match(app.$(".modal h2").textContent, /Allow this phone\?/);
+  assert.equal(app.$(".modal .check-code").textContent, "4821");
+  assert.equal(app.window.document.activeElement.textContent, "Refuse");
+  button(app.$(".modal"), "Allow").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/phone/claims/c1").map((c) => c.body), [{ allow: true }]);
+  await app.event({ type: "companion_claim", claim: { id: "c1", name: "Pixel", check: "4821" } });   // asked once
+  await app.clock.tick(100);
+  assert.equal(app.$(".modal"), null);
+  await app.event({ type: "companion_claim", claim: { id: "c2", name: "Somebody", check: "1111" } });
+  await app.clock.tick(100);
+  button(app.$(".modal"), "Refuse").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/phone/claims/c2").map((c) => c.body), [{ allow: false }]);
+});
+
+test("the phone's page claims its pairing code, shows the number, and is given its own token once allowed", async () => {
+  let polls = 0;
+  const app = loadApp({ page: "companion.html", script: "companion.js", hash: "#pair=abcdef", routes: {
+    "POST /api/companion/pair": () => ({ claim: "c1", check: "4821" }),
+    "GET /api/companion/pair/c1": () => (++polls < 2 ? { state: "waiting" } : { state: "approved", token: "mine" }),
+    "GET /api/companion/state": () => ({ case: null, chat: [], queue: [], busy: false, hypotheses: [], photos: { ok: false } }) } });
+  await app.clock.tick(0);
+  assert.equal(app.historyUrl, "/companion");                         // the code is taken out of the address
+  assert.deepEqual(plain(app.posts("/api/companion/pair")[0].body), { code: "abcdef", name: "A phone" });
+  assert.equal(app.$("#pairing .check-code").textContent, "4821");
+  assert.equal(app.sockets.length, 0, "nothing opened before the computer allows it");
+  await app.clock.tick(1500);
+  await app.clock.tick(1500);
+  assert.equal(app.$("#pairing"), null);
+  assert.equal(app.window.sessionStorage.getItem("dat-companion"), "mine");
+  assert.equal(app.sockets[0].url, "ws://127.0.0.1:48599/ws/events?t=mine");
+  assert.equal(app.gets("/api/companion/state").at(-1).headers["X-Token"], "mine");
+});
+
+test("the phone's page says so when the computer refuses it", async () => {
+  const app = loadApp({ page: "companion.html", script: "companion.js", hash: "#pair=abcdef", routes: {
+    "POST /api/companion/pair": () => ({ claim: "c1", check: "4821" }),
+    "GET /api/companion/pair/c1": () => ({ state: "refused" }) } });
+  await app.clock.tick(0);
+  await app.clock.tick(1500);
+  assert.match(app.$("#pairing").textContent, /didn't allow this phone/);
+  assert.equal(app.sockets.length, 0);
+  assert.equal(app.window.sessionStorage.getItem("dat-companion"), null);
+});
+
 test("what is typed into a search card survives the chat being rebuilt, caret and all", async () => {
   const app = await page("a", (s) => {
     s.chat = [{ kind: "user", text: "502s since the upgrade" },

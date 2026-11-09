@@ -1,4 +1,4 @@
-"""The phone companion's HTTPS listener, its certificate and its pairing codes.
+"""The phone companion's HTTPS listener, its certificate, and the phones paired with it.
 
 The companion is served on its own port (Settings → General, fixed so a firewall can open
 just that one) over TLS with a self-signed certificate that is made once per install and
@@ -8,15 +8,22 @@ crosses the network before the technician has checked that fingerprint:
 1. the "trust" code opens /pair, which holds no secret. The phone's browser warns about the
    certificate; the technician accepts it, opens the certificate details and compares its
    SHA-256 fingerprint with the one this app shows;
-2. the "connect" code carries the token. The browser has already accepted this exact
-   certificate, so a different one (someone in the middle) brings the warning back.
+2. the "connect" code carries a pairing code, good once and for five minutes. The browser has
+   already accepted this exact certificate, so a different one (someone in the middle) brings
+   the warning back. The phone's page claims the code; the desktop then asks "Allow this
+   phone?", showing four digits the phone shows too, so a claim made from somewhere else with
+   a photographed code is told apart. Allowed, the phone is given a token of its own, once;
+   only its hash is kept. Each phone can be disconnected by itself.
 
 Android Chrome shows the fingerprint only after proceeding past the warning, which is why
-the token is never part of the first code."""
+nothing that pairs is part of the first code. Until Nov 2026 the second code carried one token
+every phone shared, and scanning it was all it took (SealedLore's phone/pairing.py is the model
+for what replaced it)."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as dt
 import errno
 import hashlib
@@ -26,6 +33,10 @@ import os
 import secrets
 import socket
 import ssl
+import time
+from collections import deque
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 import segno
@@ -48,6 +59,172 @@ RENEW_BEFORE = dt.timedelta(days=7)
 MAX_CONNECTIONS = 64
 # the phone sends nothing over its WebSocket (it only listens)
 WS_MAX_SIZE = 64 * 1024
+
+
+# ---------------------------------------------------------------- pairing (SealedLore's phone/pairing.py)
+
+CODE_SECONDS = 5 * 60  # a pairing code lives this long
+CLAIM_SECONDS = 5 * 60  # a claim waits this long for the desktop's answer
+CODE_FAILURES = 5  # wrong codes before the code is spent anyway
+CLAIMS_PER_MINUTE = 10  # all claims together, right or wrong
+NAME_LENGTH = 40
+
+
+class PairingRefused(Exception):
+    def __init__(self, status: int, reason: str) -> None:
+        super().__init__(reason)
+        self.status = status
+        self.reason = reason
+
+
+@dataclass
+class Claim:
+    id: str
+    name: str
+    check: str  # the four digits both screens show
+    made_at: float
+    state: str = "waiting"  # waiting, approved, refused, expired
+    token: str = ""  # given once, on approval
+
+
+@dataclass
+class Device:
+    """A phone the technician allowed: its token's hash, never the token."""
+    id: str
+    name: str
+    token_hash: str
+    paired_at: str
+
+
+def new_code() -> str:
+    """128 bits, as 26 lower-case base32 letters and digits."""
+    return base64.b32encode(secrets.token_bytes(16)).decode("ascii").rstrip("=").lower()
+
+
+def new_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def device_for(token: str | None, devices: Iterable[tuple[str, str]]) -> str | None:
+    """The device whose token this is, from (device id, token hash) pairs. Every hash is
+    compared, in constant time."""
+    if not token:
+        return None
+    digest = token_hash(token)
+    found = None
+    for device_id, stored in devices:
+        if hmac.compare_digest(digest, stored):
+            found = device_id
+    return found
+
+
+def clean_name(name: object) -> str:
+    """A phone's name as the desktop shows it: printable, one line, short."""
+    text = "".join(" " if ch.isspace() else ch for ch in str(name or "") if ch.isprintable() or ch.isspace())
+    return " ".join(text.split())[:NAME_LENGTH] or "A phone"
+
+
+class Pairing:
+    """The pairing code's state: at most one live code, and the claims made with it. Clock
+    injected for tests."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._code: str | None = None
+        self._code_made = 0.0
+        self._failures = 0
+        self._claims: dict[str, Claim] = {}
+        self._recent: deque[float] = deque()
+
+    # --- the desktop's side ------------------------------------------------
+
+    def open(self) -> str:
+        """A new code; any earlier one is spent."""
+        self._code = new_code()
+        self._code_made = self._clock()
+        self._failures = 0
+        return self._code
+
+    def close(self) -> None:
+        """The code is spent and unanswered claims expire."""
+        self._code = None
+        for claim in self._claims.values():
+            if claim.state == "waiting":
+                claim.state = "expired"
+
+    @property
+    def code(self) -> str | None:
+        self._expire()
+        return self._code
+
+    def waiting(self) -> list[Claim]:
+        self._expire()
+        return [c for c in self._claims.values() if c.state == "waiting"]
+
+    def answer(self, claim_id: str, allow: bool) -> str | None:
+        """The desktop's answer. Allowed, the new token (to keep its hash); refused, or a claim
+        that's gone, None."""
+        self._expire()
+        claim = self._claims.get(claim_id)
+        if claim is None or claim.state != "waiting":
+            return None
+        if not allow:
+            claim.state = "refused"
+            return None
+        claim.state = "approved"
+        claim.token = new_token()
+        return claim.token
+
+    # --- the phone's side --------------------------------------------------
+
+    def claim(self, code: object, name: object) -> Claim:
+        self._expire()
+        now = self._clock()
+        while self._recent and now - self._recent[0] > 60:
+            self._recent.popleft()
+        if len(self._recent) >= CLAIMS_PER_MINUTE:
+            raise PairingRefused(429, "Too many tries. Wait a minute and scan the code again.")
+        self._recent.append(now)
+        if self._code is None:
+            raise PairingRefused(410, "Pairing isn't open on the computer. Show the connect code there and scan it again.")
+        if not isinstance(code, str) or not hmac.compare_digest(code.strip().lower().encode(), self._code.encode()):
+            self._failures += 1
+            if self._failures >= CODE_FAILURES:
+                self._code = None
+            raise PairingRefused(403, "That code isn't the one on the computer's screen.")
+        self._code = None  # spent, whatever the desktop answers
+        claim = Claim(id=secrets.token_urlsafe(16), name=clean_name(name), check=f"{secrets.randbelow(10000):04d}",
+                      made_at=now)
+        self._claims[claim.id] = claim
+        return claim
+
+    def poll(self, claim_id: str) -> tuple[str, str]:
+        """(state, token): the token only once, on the first poll after approval; the claim is
+        forgotten once it is answered and told."""
+        self._expire()
+        claim = self._claims.get(claim_id)
+        if claim is None:
+            return "expired", ""
+        if claim.state == "waiting":
+            return "waiting", ""
+        del self._claims[claim_id]
+        return claim.state, claim.token
+
+    def _expire(self) -> None:
+        now = self._clock()
+        if self._code is not None and now - self._code_made > CODE_SECONDS:
+            self._code = None
+        for claim_id, claim in list(self._claims.items()):
+            if now - claim.made_at > CLAIM_SECONDS:
+                if claim.state == "waiting":
+                    claim.state = "expired"
+                # Long answered and never collected: nothing waits for it.
+                if now - claim.made_at > 2 * CLAIM_SECONDS:
+                    del self._claims[claim_id]
 
 
 def lan_ip() -> str:
@@ -114,26 +291,58 @@ def _qr(url: str) -> str:
 
 class CompanionServer:
     """Runs the companion app (server.app.create_app builds it) on the event loop it is started
-    from, on 0.0.0.0:`port` over TLS. The token changes on every start and on rotate()."""
+    from, on 0.0.0.0:`port` over TLS. The phones paired with it are forgotten when it stops."""
 
     def __init__(self, app, directory: Path):
         self.app = app
         self.directory = directory
-        self.token: str | None = None
         self.port: int | None = None
         self.ip = ""
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
-        self.sockets: set = set()  # open companion WebSockets, closed when the token changes
+        self.devices: dict[str, Device] = {}      # the phones allowed: their tokens' hashes
+        self.pairing = Pairing()
+        self.sockets: dict = {}  # open companion WebSockets -> the device each belongs to
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    def device_of(self, token: str | None) -> str | None:
+        """The paired phone whose token this is, or None (compared by hash, in constant time)."""
+        return device_for(token, ((d.id, d.token_hash) for d in self.devices.values()))
+
     def check(self, token: str | None) -> bool:
-        # as bytes: compare_digest raises on a str with anything but ASCII (anyone on the LAN can send one)
-        return bool(self.token) and token is not None and hmac.compare_digest(
-            token.encode("utf-8", "surrogateescape"), self.token.encode())
+        return self.device_of(token) is not None
+
+    def add_device(self, name: str, token: str | None = None) -> str:
+        """A phone allowed: kept by its token's hash. Returns the token, for that phone alone
+        (`token`: one chosen for it, as tests do)."""
+        token = token or new_token()
+        self._keep(name, token)
+        return token
+
+    def _keep(self, name: str, token: str) -> Device:
+        device = Device(id=secrets.token_urlsafe(9), name=clean_name(name), token_hash=token_hash(token),
+                        paired_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+        self.devices[device.id] = device
+        return device
+
+    def open_code(self) -> str:
+        """A new pairing code for the connect QR; the one before it is spent."""
+        return self.pairing.open()
+
+    def answer(self, claim_id: str, allow: bool) -> Device | None:
+        """The technician's answer to a phone's claim. Allowed, the phone is kept (its token goes
+        to it once, at its next poll); refused or gone, None."""
+        claim = next((c for c in self.pairing.waiting() if c.id == claim_id), None)
+        token = self.pairing.answer(claim_id, allow) if claim else None
+        return self._keep(claim.name, token) if token else None
+
+    async def revoke(self, device_id: str) -> None:
+        """Disconnect one phone: its token stops working and its pages are closed."""
+        self.devices.pop(device_id, None)
+        await self._close_sockets(device_id)
 
     async def start(self, port: int) -> None:
         if self.running:
@@ -154,7 +363,9 @@ class CompanionServer:
                             "Settings → General.") from e
         sock.listen(16)
         sock.setblocking(False)
-        self.token, self.port = secrets.token_urlsafe(24), port
+        self.devices.clear()
+        self.pairing = Pairing()
+        self.port = port
         config = uvicorn.Config(self.app, log_level="warning", lifespan="off", ssl_certfile=str(cert),
                                 ssl_keyfile=str(key), timeout_graceful_shutdown=2,
                                 limit_concurrency=MAX_CONNECTIONS, ws_max_size=WS_MAX_SIZE)
@@ -169,7 +380,8 @@ class CompanionServer:
             raise UserError("The companion server didn't start.")
 
     async def stop(self) -> None:
-        self.token = None
+        self.devices.clear()
+        self.pairing.close()
         await self._close_sockets()
         if self._server:
             self._server.should_exit = True
@@ -181,23 +393,25 @@ class CompanionServer:
         self._server = self._task = None
 
     async def rotate(self) -> None:
-        """A new token: phones paired with the old one are disconnected and must scan again."""
+        """A new pairing code (the one shown before is spent); phones paired already stay."""
         if self.running:
-            self.token = secrets.token_urlsafe(24)
-            await self._close_sockets()
+            self.open_code()
 
     async def renew_cert(self, port: int) -> None:
         ensure_cert(self.directory, lan_ip(), renew=True)
         if self.running:
             await self.start(port)
 
-    async def _close_sockets(self) -> None:
-        for ws in list(self.sockets):
+    async def _close_sockets(self, device_id: str | None = None) -> None:
+        """Close the open pages of one phone, or of every phone."""
+        for ws, owner in list(self.sockets.items()):
+            if device_id is not None and owner != device_id:
+                continue
             try:
                 await ws.close(code=4403)
             except Exception:  # noqa: BLE001 - already gone
                 pass
-        self.sockets.clear()
+            self.sockets.pop(ws, None)
 
     def info(self, port: int) -> dict:
         """What the pairing dialog shows. The fingerprint is shown even while stopped, so it can
@@ -211,9 +425,14 @@ class CompanionServer:
             out["expires"] = x509.load_pem_x509_certificate(pem).not_valid_after_utc.date().isoformat()
         if self.running:
             base = f"https://{self.ip}:{self.port}"
+            connected = set(self.sockets.values())
             out.update(ip=self.ip, pair_url=f"{base}/pair", pair_qr=_qr(f"{base}/pair"),
-                       connect_url=f"{base}/companion#t={self.token}",
-                       connect_qr=_qr(f"{base}/companion#t={self.token}"))
+                       devices=[{"id": d.id, "name": d.name, "paired_at": d.paired_at, "connected": d.id in connected}
+                                for d in self.devices.values()],
+                       claims=[{"id": c.id, "name": c.name, "check": c.check} for c in self.pairing.waiting()])
+            code = self.pairing.code
+            if code:      # the connect code: good once, for CODE_SECONDS
+                out.update(connect_url=f"{base}/companion#pair={code}", connect_qr=_qr(f"{base}/companion#pair={code}"))
         return out
 
 

@@ -133,7 +133,7 @@ async def test_bad_requests_get_a_400_and_a_refused_settings_save_changes_nothin
     engine, _, _ = env
     app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
     app.state.engine = engine
-    app.state.companion.token = "phone"
+    app.state.companion.add_device("test phone", "phone")
     m = {"x-token": "main"}
     engine.new_case("c", "open")
     engine.queue.add("c", [{"session_id": "s", "command": "uptime", "risk": "read_only"}])
