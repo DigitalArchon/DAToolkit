@@ -6,7 +6,8 @@ Ported from SealedLore (providers/http.py), where the verifier comes from:
   proxy variables never route it elsewhere; anything else keeps the environment's proxies
   and certificate settings.
 - **A redirect never downgrades.** The response hook refuses a redirect whose target isn't
-  https (or http on loopback), whether or not the client follows redirects.
+  https (or http on loopback), whether or not the client follows redirects, and one from a
+  server out on the internet into this computer or its network.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+from . import netguard
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
@@ -38,17 +41,40 @@ def is_secure(url: str) -> bool:
     return parsed.scheme == "http" and (parsed.hostname or "").lower() in LOOPBACK_HOSTS
 
 
+def _host(url: str) -> str:
+    try:
+        return urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+
+
 def refuse_insecure_redirect(response: httpx.Response) -> None:
-    """A response hook: a redirect to anywhere the app wouldn't send to directly."""
+    """A response hook: a redirect to anywhere the app wouldn't send to directly, or from a
+    server out on the internet into this computer or its network (an attestation endpoint
+    must not reach the router's admin page)."""
     if not response.is_redirect:
         return
-    target = response.next_request.url if response.next_request is not None else None
-    if target is None:
-        target = response.headers.get("location")
-    if target is not None and not is_secure(str(target)):
+    location = response.headers.get("location")
+    if location is None:
+        return
+    # httpx runs the hooks before it builds the next request, so `Location` is read here as
+    # written, and a relative one ("/v2/x") is resolved the way the client will resolve it:
+    # read raw, it had no scheme, so every relative redirect was refused, and one into this
+    # network over https wasn't. (From SealedLore's providers/http.py, Nov 2026.)
+    try:
+        target = str(response.request.url.join(location))
+    except httpx.InvalidURL:
+        target = location
+    source = str(response.request.url)
+    if not is_secure(target):
         raise ProviderError(
-            f"{response.request.url.host} redirected to {str(target)[:120]!r}; refusing to "
+            f"{response.request.url.host} redirected to {target[:120]!r}; refusing to "
             "send over an insecure connection"
+        )
+    if netguard.is_local(_host(target)) and not netguard.is_local(_host(source)):
+        raise ProviderError(
+            f"{response.request.url.host} redirected to {target[:120]!r}, a server on this "
+            "computer or your local network; refused"
         )
 
 

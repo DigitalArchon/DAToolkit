@@ -8,6 +8,7 @@ for this machine and its local network, which is how a model server of one's own
 
 import asyncio
 
+import httpx
 import pytest
 
 from datoolkit import creds
@@ -165,3 +166,73 @@ async def test_a_model_endpoint_redirecting_elsewhere_is_not_followed(make):
     with pytest.raises(Exception, match="307"):
         await client.complete("m", [{"role": "user", "content": "the case"}])
     assert seen and all(url.startswith("https://") for url in seen)
+
+
+# --- the attestation client's redirects (llm/secure_http.py) ---------------------------------
+# From SealedLore's tests of the same hook (providers/http.py, b829e91).
+
+
+def _redirecting(handler, base="https://api.test/v1"):
+    from datoolkit.llm.secure_http import make_client
+
+    return make_client(base, transport=httpx.MockTransport(handler), follow_redirects=True)
+
+
+def test_a_redirect_off_https_is_refused_before_anything_is_sent_again():
+    from datoolkit.llm.secure_http import ProviderError
+
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if len(seen) == 1:
+            return httpx.Response(307, headers={"location": "http://elsewhere.test/collect"})
+        return httpx.Response(200, json={})
+
+    with _redirecting(handler) as client, pytest.raises(ProviderError, match="insecure"):
+        client.get("https://api.test/v1/tee/attestation")
+    assert seen == ["https://api.test/v1/tee/attestation"]
+
+
+def test_a_redirect_that_stays_on_https_is_followed_and_a_relative_one_too():
+    """httpx runs response hooks before it resolves `Location`: read raw, a relative one
+    ("/v2/x") had no scheme and every one was refused."""
+    for location, then in (("https://api.test/v2/x", "https://api.test/v2/x"), ("/v2/x", "https://api.test/v2/x")):
+        seen: list[str] = []
+
+        def handler(request, location=location, seen=seen):
+            seen.append(str(request.url))
+            return httpx.Response(308, headers={"location": location}) if len(seen) == 1 else httpx.Response(200, json={})
+
+        with _redirecting(handler) as client:
+            assert client.get("https://api.test/v1/x").status_code == 200
+        assert seen == ["https://api.test/v1/x", then], location
+
+
+@pytest.mark.parametrize("location", ["https://192.168.1.1/admin", "http://192.168.1.1/admin",
+                                      "http://localhost:8080/x", "https://[::1]:8443/x"])
+def test_a_server_on_the_internet_cannot_redirect_into_the_local_network(location):
+    from datoolkit.llm.secure_http import ProviderError
+
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"location": location})
+
+    with _redirecting(handler) as client, pytest.raises(ProviderError, match="(local network|insecure)"):
+        client.get("https://api.test/v1/x")
+    assert len(seen) == 1, "the redirect was not followed"
+
+
+def test_a_server_on_this_computer_may_redirect_on_it():
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(307, headers={"location": "http://localhost:9000/v1/x"}) if len(seen) == 1 \
+            else httpx.Response(200, json={})
+
+    with _redirecting(handler, "http://127.0.0.1:8080/v1") as client:
+        assert client.get("http://127.0.0.1:8080/v1/x").status_code == 200
+    assert seen[-1] == "http://localhost:9000/v1/x"
