@@ -20,8 +20,11 @@ Anything that breaks one of DA Toolkit's promises, for example:
 - data from a Confidential or Sovereign case reaching a model or service its tier forbids;
 - secrets surviving redaction, or reaching config files, logs or exports that shouldn't hold them;
 - flaws in TEE attestation, reply-signature checks or the end-to-end encrypted Private Mode path;
-- bypassing the local server's tokens, the companion reaching more than it should, or a way
-  around its pairing (the certificate check before the token is sent);
+- bypassing the local server's tokens (or the one-time code a browser is opened with), the
+  companion reaching more than it should, or a way around its pairing (the certificate check
+  before a phone pairs, and the computer's approval of each phone);
+- a password written into a provider's address reaching the config file, a message or a log;
+- the app handing guacd's link (the RDP host, user and password) to another user's listener;
 - RDP certificate pinning being bypassed;
 - a model reply that makes the page load remote resources or run script.
 
