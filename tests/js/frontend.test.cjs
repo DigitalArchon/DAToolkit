@@ -428,6 +428,21 @@ test("the phone's page says so when the computer refuses it", async () => {
   assert.equal(app.window.sessionStorage.getItem("dat-companion"), null);
 });
 
+test("a file or a link dropped on the window is refused, and text dropped into a field goes in", async () => {
+  const app = await page("a");
+  const drop = (target, types, type = "drop") => {
+    const ev = new Event(type, { dataTransfer: { types, dropEffect: "copy" } });
+    target.dispatchEvent(ev);
+    return [ev.defaultPrevented, ev.dataTransfer.dropEffect];
+  };
+  const body = app.window.document.body, box = app.$("#chat-input") || app.window.document.querySelector("textarea");
+  assert.deepEqual(drop(body, ["Files"]), [true, "none"]);
+  assert.deepEqual(drop(body, ["text/uri-list", "text/plain"]), [true, "none"]);           // a link: it would load in place
+  assert.deepEqual(drop(body, ["Files"], "dragover"), [true, "none"]);
+  assert.deepEqual(drop(box, ["Files"]), [true, "none"]);                                     // nor a file into a field
+  assert.deepEqual(drop(box, ["text/plain"]), [false, "copy"]);                               // text into a field: as it was
+});
+
 test("what is typed into a search card survives the chat being rebuilt, caret and all", async () => {
   const app = await page("a", (s) => {
     s.chat = [{ kind: "user", text: "502s since the upgrade" },

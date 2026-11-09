@@ -192,3 +192,17 @@ def test_the_browser_is_handed_a_private_page_not_the_address_with_the_token(tmp
     assert (seen["mode"], seen["folder"]) == (0o600, 0o700)
     assert not seen["path"].exists() and not seen["path"].parent.exists()      # gone when it ended
     assert f"http://127.0.0.1:48577/#t={token}" in capsys.readouterr().out     # to open by hand
+
+
+def test_the_app_window_lets_no_file_page_read_other_files():
+    """pywebview's default lets a file:// page read other files, and a file dropped on the window
+    loaded in it as one; nothing of DA Toolkit's is file://."""
+    import types
+
+    fake = types.SimpleNamespace(settings={"ALLOW_FILE_URLS": True, "OPEN_EXTERNAL_LINKS_IN_BROWSER": True})
+    app_mod.harden_window(fake)
+    assert fake.settings == {"ALLOW_FILE_URLS": False, "OPEN_EXTERNAL_LINKS_IN_BROWSER": True}
+    web = Path(app_mod.__file__).parent / "web"
+    for name in ("app.js", "index.html"):           # no address of the page's own is a file's (comments aside)
+        code = "\n".join(line for line in (web / name).read_text().splitlines() if not line.lstrip().startswith("//"))
+        assert "file://" not in code, name

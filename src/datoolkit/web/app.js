@@ -215,6 +215,20 @@ function onLinkActivated(ev) {
 document.addEventListener("click", onLinkActivated, true);
 document.addEventListener("auxclick", onLinkActivated, true);
 
+// A file or a link dropped on the app window would replace this page with it (WebKitGTK loads what
+// is dropped, in place, and pywebview lets it). Nothing here takes a dropped file, so a drop is
+// cancelled, but for text dropped into a field, which goes in as text. (Nor may a file:// page read
+// other files in the app window: app.harden_window.)
+function cancelDrop(ev) {
+  const field = ev.target?.closest?.("input, textarea, [contenteditable]:not([contenteditable='false'])");
+  const files = [...(ev.dataTransfer?.types || [])].includes("Files");
+  if (field && !files) return;
+  ev.preventDefault();
+  if (ev.dataTransfer) ev.dataTransfer.dropEffect = "none";
+}
+document.addEventListener("dragover", cancelDrop, true);
+document.addEventListener("drop", cancelDrop, true);
+
 // A link to a page the model, a search or a provider named: http(s) only (md() holds rendered
 // replies to that rule too), anything else is shown as text; one that isn't secure is marked.
 function extLink(url, text, attrs = {}) {

@@ -203,6 +203,15 @@ def _bundled_girepository() -> None:
         set_for_self("GI_TYPELIB_PATH", ":".join(missing + ([current] if current else [])))
 
 
+def harden_window(webview) -> None:
+    """The app window's WebKit settings, before it starts: a file:// page may not read other files
+    (pywebview allows it by default). Nothing of DA Toolkit's is file://: the page is the local
+    server's, and a file dropped on the window would otherwise load in it as one (the page
+    cancels drops too: app.js cancelDrop). Links meant for elsewhere still open in the browser."""
+    webview.settings["ALLOW_FILE_URLS"] = False
+    webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
+
+
 def window_problem() -> str | None:
     """Why the app window can't open here (no WebKitGTK, no display), or None if it can."""
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
@@ -297,6 +306,7 @@ def main(argv: list[str] | None = None) -> None:
                 for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, close)
 
+            harden_window(webview)
             webview.start(on_started, gui="gtk", private_mode=True, icon=window_icon())
     except KeyboardInterrupt:
         pass
