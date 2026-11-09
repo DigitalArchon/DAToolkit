@@ -19,6 +19,8 @@ Anything that breaks one of DA Toolkit's promises, for example:
 - the AI (or text in command output) getting a command executed without a technician's click;
 - data from a Confidential or Sovereign case reaching a model or service its tier forbids;
 - secrets surviving redaction, or reaching config files, logs or exports that shouldn't hold them;
+- a web search or research brief that names a client's address or e-mail leaving without your
+  approval, or a command the local rules rate lower than what it does;
 - flaws in TEE attestation, reply-signature checks or the end-to-end encrypted Private Mode path;
 - bypassing the local server's tokens (or the one-time code a browser is opened with), the
   companion reaching more than it should, or a way around its pairing (the certificate check
