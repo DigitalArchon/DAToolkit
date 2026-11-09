@@ -34,13 +34,22 @@ You need rootless [Podman](https://podman.io) (`sudo apt install podman`).
 packaging/build-appimage.sh build    # dist/DAToolkit-<version>-x86_64.AppImage (+ .sha256)
 packaging/build-appimage.sh check    # build twice from scratch, compare: must be identical
 packaging/test-appimage.sh           # smoke-test it on Ubuntu, Debian, Fedora, Arch, CachyOS
-packaging/build-appimage.sh lock     # re-resolve the dependency locks (review the diff, commit)
+packaging/build-appimage.sh lock     # lock what was added to the requirements (review the diff, commit)
+UPGRADE=1 packaging/build-appimage.sh lock   # re-resolve every lock to today's newest
+DIST=/elsewhere packaging/build-appimage.sh build   # the results somewhere other than dist/
 ```
 
-Only committed files are built (`git archive HEAD`), and every timestamp is HEAD's commit
-time (`SOURCE_DATE_EPOCH`). Builds run in `packaging/appimage/Containerfile`: Ubuntu 24.04 pinned
+Only committed files are built: HEAD's, read from git's own objects exactly as committed, so no
+`core.autocrlf`, filter or `tar.umask` of the machine's changes them (as `git archive` would),
+and every timestamp is HEAD's commit time (`SOURCE_DATE_EPOCH`). The lock run reads
+`pyproject.toml` and the `*.in` files as they are in the working tree, so a requirement is
+locked before it is committed, and keeps every pin the current locks hold but what the change
+moves. Builds run in `packaging/appimage/Containerfile`: Ubuntu 24.04 pinned
 by digest, with packages from the Ubuntu archive as it was at a fixed moment
-([snapshot.ubuntu.com](https://snapshot.ubuntu.com)). Downloads are cached in
+([snapshot.ubuntu.com](https://snapshot.ubuntu.com)). The host's CA bundle goes into the
+builder image's build as a copy (looked for where AppRun looks: Debian's, Fedora's, openSUSE's
+and the rest), for apt to reach the snapshot over https, and is removed again; it is in no byte
+of the AppImage. Downloads are https only, redirects included, cached in
 `~/.cache/datoolkit-appimage` and verified on every build.
 
 ## What is pinned, and where
@@ -51,8 +60,12 @@ by digest, with packages from the Ubuntu archive as it was at a fixed moment
 | Runtime Python packages (wheels, with hashes) | `appimage/requirements.lock` |
 | PyGObject, pycairo (source archives, with hashes) | `appimage/sdists.lock` |
 | meson, meson-python, ninja, setuptools (with hashes) | `appimage/build-requirements.lock` |
+| pip and pip-tools, which write the locks, and what they run on (with hashes) | `appimage/lock-requirements.lock` |
 
 Changing any of these changes the AppImage, which is the point: an update is a reviewed commit.
+Nothing of the build machine gets in: bytecode is unchecked-hash and names its source as it is
+inside the image (`/usr/python/lib/...`), pip's console scripts (which would name the build's
+Python) are left out, and the build stops if any file still names the folder it was built in.
 Most runtime packages are installed only as prebuilt wheels; the few without one
 (`SDIST_ONLY` in `appimage/build.sh`) are built from their pinned sources with the pinned tools.
 
