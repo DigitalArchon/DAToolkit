@@ -28,31 +28,38 @@ WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 COMPANION_FILES = {"style.css", "companion.js", "icon.svg"}
 # a photo is at most 6 MB (8 MB as base64, see Engine.clean_images) plus its description
 MAX_COMPANION_BODY = 10 * 1024 * 1024
+# the window's largest request: a message or its draft with four such images, and its text
+MAX_WINDOW_BODY = 48 * 1024 * 1024
+# a file saved through the app window's Save dialog (/api/desktop/save): a case's full export
+MAX_SAVED_FILE = 1024 * 1024 * 1024
 
 
-class CompanionGate:
-    """ASGI middleware in front of the companion's app. FastAPI reads and parses a JSON body
-    before it runs dependencies (where the token is checked), and nothing else limits its
-    size, so without this anyone on the LAN could make the app buffer and parse any amount
-    without the token, stalling the event loop the GUI and terminals share. An /api/ request
-    is refused here on its headers alone: no valid token, no stated length, or a body over
-    MAX_COMPANION_BODY. The connection is closed rather than read to the end."""
+class TokenGate:
+    """ASGI middleware in front of an app whose /api/ routes need its token. FastAPI reads and
+    parses a JSON body before it runs dependencies (where the token is checked), and nothing
+    else limits its size, so without this anyone who could reach the port (any local user, for
+    the window's; anyone on the LAN, for the companion's) could make the app buffer and parse
+    any amount without the token, stalling the event loop the GUI and terminals share. An /api/
+    request is refused here on its headers alone: no valid token, no stated length, or a body
+    over its limit. The connection is closed rather than read to the end. WebSockets check
+    their tokens themselves."""
 
-    def __init__(self, app, companion: CompanionServer):
+    def __init__(self, app, check: Callable[[str | None], bool], limit: Callable[[str], int]):
         self.app = app
-        self.companion = companion
+        self.check = check
+        self.limit = limit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope["path"].startswith("/api/"):
-            refusal = self._refusal(Headers(scope=scope))
+            refusal = self._refusal(scope["path"], Headers(scope=scope))
             if refusal:
                 status, why = refusal
                 await JSONResponse({"detail": why}, status, headers={"connection": "close"})(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
-    def _refusal(self, headers: Headers) -> tuple[int, str] | None:
-        if not self.companion.check(headers.get("x-token")):
+    def _refusal(self, path: str, headers: Headers) -> tuple[int, str] | None:
+        if not self.check(headers.get("x-token")):
             return 403, "bad token"
         if "transfer-encoding" in headers:   # chunked: no length to check before reading
             return 411, "a Content-Length is required"
@@ -60,9 +67,22 @@ class CompanionGate:
             length = int(headers.get("content-length") or 0)
         except ValueError:
             return 400, "bad Content-Length"
-        if length > MAX_COMPANION_BODY:
+        if length > self.limit(path):
             return 413, "request too large"
         return None
+
+
+class CompanionGate(TokenGate):
+    """The gate in front of the phone companion's app: its token, and MAX_COMPANION_BODY."""
+
+    def __init__(self, app, companion: CompanionServer):
+        super().__init__(app, companion.check, lambda _path: MAX_COMPANION_BODY)
+        self.companion = companion
+
+
+def window_limit(path: str) -> int:
+    """The largest body the window's app takes at `path`."""
+    return MAX_SAVED_FILE if path == "/api/desktop/save" else MAX_WINDOW_BODY
 
 
 def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
@@ -106,6 +126,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         if not check(request.headers.get("x-token")):
             raise HTTPException(403, "bad token")
         return request.app.state.engine
+
+    # the token, and the size, judged on the headers before FastAPI reads a body (TokenGate);
+    # auth above still stands behind it on every route
+    app.add_middleware(TokenGate, check=check, limit=window_limit)
 
     def auth_companion(request: Request) -> Engine:
         if not companion.check(request.headers.get("x-token")):

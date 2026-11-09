@@ -184,6 +184,51 @@ async def test_gate_refuses_on_headers_before_any_body_is_read():
     assert (await _gate_call(None, {"x-token": "", "content-length": "1"}))[0] == 403    # stopped: no token at all
 
 
+async def _window_gate_call(headers, path="/api/send"):
+    """Run the window app's gate (TokenGate, its token "main") on one POST to `path`."""
+    from datoolkit.server.app import TokenGate, window_limit
+
+    seen = {"app": False, "read": False, "start": None}
+
+    async def inner(scope, receive, send):
+        seen["app"] = True
+
+    async def receive():
+        seen["read"] = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            seen["start"] = msg
+
+    scope = {"type": "http", "method": "POST", "path": path, "query_string": b"",
+             "headers": [(k.encode(), v.encode()) for k, v in headers.items()]}
+    await TokenGate(inner, lambda t: t == "main", window_limit)(scope, receive, send)
+    start = seen["start"]
+    return (start["status"] if start else None, seen["app"], seen["read"])
+
+
+async def test_the_window_refuses_on_headers_before_any_body_is_read_too():
+    """Its routes checked the token in a dependency, which FastAPI runs after it has read and
+    parsed the body, of any size: any local user could find the port and have it buffer and
+    parse whatever they sent, without the token."""
+    from datoolkit.server.app import MAX_SAVED_FILE, MAX_WINDOW_BODY
+
+    big = str(MAX_WINDOW_BODY + 1)
+    for headers, status in (({"content-length": big}, 403),
+                            ({"x-token": "phone", "content-length": "10"}, 403),
+                            ({"x-token": "main", "content-length": big}, 413),
+                            ({"x-token": "main", "transfer-encoding": "chunked"}, 411),
+                            ({"x-token": "main", "content-length": "lots"}, 400)):
+        assert await _window_gate_call(headers) == (status, False, False), headers
+    assert MAX_WINDOW_BODY > 4 * (8 * 1024 * 1024) + 4000               # four 6 MB images as base64 still fit
+    assert await _window_gate_call({"x-token": "main", "content-length": "100"}) == (None, True, False)
+    # a case's full export saved through the app window's Save dialog may be bigger
+    assert (await _window_gate_call({"x-token": "main", "content-length": big}, "/api/desktop/save"))[1]
+    assert (await _window_gate_call({"x-token": "main", "content-length": str(MAX_SAVED_FILE + 1)},
+                                    "/api/desktop/save"))[0] == 413
+
+
 async def test_unauthenticated_upload_is_cut_off_over_tls(env, tmp_path, monkeypatch):  # noqa: F811
     """Someone on the LAN without the token announcing a huge body gets 403 at once and the
     connection closes; the server never buffers it."""

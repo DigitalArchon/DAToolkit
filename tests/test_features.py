@@ -697,7 +697,8 @@ async def test_companion_token_is_read_mostly(env, tmp_path):  # noqa: F811
         assert (await c.get("/api/companion/state", headers={"x-token": "main"})).status_code == 403
         # and the GUI's app, on 127.0.0.1, no longer serves the phone
         assert (await gui.get("/companion")).status_code == 404
-        assert (await gui.get("/api/companion/state", headers=ph)).status_code == 404
+        assert (await gui.get("/api/companion/state", headers=ph)).status_code == 403       # not its token
+        assert (await gui.get("/api/companion/state", headers={"x-token": "main"})).status_code == 404
 
 
 async def test_desktop_endpoints_need_the_main_token_and_the_app_window(env):  # noqa: F811
