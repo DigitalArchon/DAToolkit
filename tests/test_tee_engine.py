@@ -2,12 +2,12 @@
 signature-checked. The verifier itself is tested in test_tee.py."""
 
 import asyncio
-import time
 
 import httpx
 import pytest
 
 from datoolkit.engine import UserError
+from datoolkit.llm.dcap import since_boot
 from datoolkit.llm.tee import NRAS_URL, TeeClient
 
 from test_engine import env, sse, wait_turn  # noqa: F401
@@ -97,7 +97,27 @@ async def test_an_old_attestation_is_made_again_before_sending(env):  # noqa: F8
     await wait_turn(engine)
     assert calls == ["TEE/glm-5.3"]                      # fresh: reused
     client, _when, shown = engine._tee[("Fake", "TEE/glm-5.3")]
-    engine._tee[("Fake", "TEE/glm-5.3")] = (client, time.monotonic() - 3600, shown)
+    engine._tee[("Fake", "TEE/glm-5.3")] = (client, since_boot() - 3600, shown)
+    fake.responses.append(sse(({"role": "assistant", "content": "two"}, "stop")))
+    engine.send("y")
+    await wait_turn(engine)
+    assert calls == ["TEE/glm-5.3"] * 2 and engine.chat[-1]["text"] == "two"
+
+
+async def test_a_tee_attestation_is_made_again_after_a_sleep(env, suspend):  # noqa: F811
+    """Aged by time.monotonic, which stops while the machine is suspended: after a night's sleep
+    the attestation made the evening before counted as minutes old."""
+    engine, fake, _ = env
+    calls = []
+    engine._tee_factory = tee_factory(calls)
+    engine.new_case("z", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    fake.responses.append(sse(({"role": "assistant", "content": "one"}, "stop")))
+    engine.send("x")
+    await wait_turn(engine)
+    assert calls == ["TEE/glm-5.3"]
+    suspend(1)
     fake.responses.append(sse(({"role": "assistant", "content": "two"}, "stop")))
     engine.send("y")
     await wait_turn(engine)

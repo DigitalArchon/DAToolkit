@@ -37,6 +37,7 @@ from .llm import anthropic_api
 from .llm import providers as providers_mod
 from .llm.anthropic_api import AnthropicClient
 from .llm import tee as tee_mod
+from .llm.dcap import since_boot
 from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
@@ -51,7 +52,8 @@ from .sessions.askpass import AskpassBridge
 from .sessions.manager import RdpSession, SessionManager, WindowSession
 from .sessions.ssh import ssh_argv, target_label
 
-# A TEE model's attestation is made again, with a fresh nonce, before a send once it is this old.
+# A TEE model's attestation is made again, with a fresh nonce, before a send once it is this old,
+# on a clock that runs on while the machine sleeps (dcap.since_boot; time.monotonic stops).
 TEE_REATTEST_SECONDS = 900
 MAX_TOOL_ROUNDS = 6          # rounds per turn: searches and the no-message nudge each take one
 # Compaction: the summary may use about this share of the tokens it replaces, within these bounds.
@@ -943,7 +945,7 @@ class Engine:
         except BaseException:
             client.close()
             raise
-        self._tee[(prov.name, model)] = (client, time.monotonic(), att.to_dict())
+        self._tee[(prov.name, model)] = (client, since_boot(), att.to_dict())
         return att
 
     async def _tee_guard(self, prov: Provider, model: str, slot: str) -> tuple[tee_mod.TeeClient, dict] | None:
@@ -953,7 +955,7 @@ class Engine:
         if detect_tier(model, prov.base_url, prov.tier_overrides) != "tee":
             return None
         hit = self._tee.get((prov.name, model))
-        if hit and time.monotonic() - hit[1] < TEE_REATTEST_SECONDS:
+        if hit and since_boot() - hit[1] < TEE_REATTEST_SECONDS:
             return hit[0], hit[2]
         task = {"chat": self._attest_task, "helper": self._helper_attest_task}.get(slot)
         shown = {"chat": self.attestation, "helper": self.helper_attestation}.get(slot) or {}

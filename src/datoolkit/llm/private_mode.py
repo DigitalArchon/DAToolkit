@@ -31,7 +31,9 @@ pinned exactly in pyproject.toml. The design follows SealedLore's providers/priv
    mismatch) goes the same way, through `relay_said`, without what can't be seen.
 
 The attestation is redone once it is five minutes old, and once more if the enclave says the
-key has changed.
+key has changed. Its age is read off a clock that runs on while the machine sleeps
+(dcap.since_boot): time.monotonic stops, so a laptop woken after hours took an attestation made
+before it slept for minutes old.
 
 **Retired models.** The enclave is Tinfoil's router whatever the model, so a `private/` model
 NanoGPT no longer offers (private/glm-5-3-flash, Oct 2026) attests fine, and its first message
@@ -61,6 +63,7 @@ from openai.types.chat import ChatCompletionChunk
 from ..safety.hidden import visible
 from .capabilities import norm_id
 from .client import StreamAccumulator, is_private_mode, openai_messages
+from .dcap import since_boot
 
 RELAY_PATH = "/api/v1/private/tinfoil"
 ROUTER_REPO = "tinfoilsh/confidential-model-router"
@@ -225,7 +228,7 @@ class Enclave:
     """The attested enclave one provider seals to; re-attests when stale or rotated."""
 
     def __init__(self, relay: str, verifier: Verifier = tinfoil_verify,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = since_boot):
         self.relay = relay
         # Ours, not NanoGPT's: see the module docstring. In memory only.
         self.cache_secret = secrets.token_hex(32)

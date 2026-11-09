@@ -44,3 +44,23 @@ def no_real_containers(monkeypatch):
 
     real = guac.container_runtime
     monkeypatch.setattr(guac, "container_runtime", lambda which=guac._which: None if which is guac._which else real(which))
+
+
+@pytest.fixture
+def suspend(monkeypatch):
+    """`suspend(hours)`: the machine sleeps that long. The boot clock (dcap.since_boot) moves on;
+    time.monotonic, which stops while the machine is suspended, doesn't (and the event loop
+    keeps running on it)."""
+    import time
+
+    if not hasattr(time, "CLOCK_BOOTTIME"):
+        pytest.skip("no CLOCK_BOOTTIME here")
+    slept = [0.0]
+    real = time.clock_gettime
+    monkeypatch.setattr(time, "clock_gettime",
+                        lambda which: real(which) + (slept[0] if which == time.CLOCK_BOOTTIME else 0))
+
+    def sleep(hours: float) -> None:
+        slept[0] += hours * 3600
+
+    return sleep
