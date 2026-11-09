@@ -413,13 +413,15 @@ function attestLabel(att) {
     title: `End-to-end encrypted to an attested enclave.\n${att.summary}\nKey sha256: ${(att.hpke_key_sha256 || "").slice(0, 16)}…` };
 }
 
-// A TEE reply: attested before it was sent; was the reply signed by that enclave's key?
+// A TEE reply: attested before it was sent; was it that enclave's, as received (llm/tee.py
+// check_reply)? Anything short of verified says so in the mark itself, as SealedLore's do.
 const TEE_SIGNATURE = {
-  checking: ["checking signature…", "", "Asking NanoGPT for this reply's signature…"],
-  signed: ["✔ signed", "ok", "NanoGPT holds a record of this reply's id signed by the attested enclave's key. The record hashes the request and reply as NanoGPT's gateway saw them, so it shows the enclave answered, not that every byte you see is what it wrote."],
-  failed: ["✖ signature mismatch", "bad", "The reply's signature was NOT made by the attested enclave's key. Treat this reply with suspicion and re-check the attestation."],
+  checking: ["checking reply…", "", "Asking NanoGPT for this reply's signed record…"],
+  verified: ["✔ verified", "ok", "The attested enclave's key signed this reply's record, and the record is for the exact bytes this app received. Where the gateway keeps a signed receipt it was read too, saying the model the reply came from was verified; that part is only as strong as the receipt's key, which the attestation names when the hardware's quote doesn't bind it."],
+  signed: ["signed, text not compared", "", "The attested enclave's key signed this reply's record, but the reply's text can't be compared with it (NanoGPT rebuilds this model's replies), so a change on the way here wouldn't show."],
+  failed: ["✖ check failed", "bad", "This reply doesn't match its record: not signed by the attested enclave's key, not the bytes that were signed, or its receipt doesn't hold (another key, another reply, or a model that wasn't verified). Treat it with suspicion and re-check the attestation."],
   unsigned: ["unsigned", "", "This model's provider signs no replies; every instance that could answer was attested before sending instead."],
-  unchecked: ["signature unchecked", "warn", "The signature couldn't be fetched (the provider kept none, or it was out of reach). That is not a failed check."],
+  unchecked: ["⚠ reply not verified", "warn", "No signed record of this reply could be read (the provider kept none, it was out of reach, or the gateway's keys changed since it was attested), so nothing shows it came from the enclave that was attested. That is not a failed check."],
 };
 function teeBadge(e) {
   const [text, cls, why] = TEE_SIGNATURE[e.tee_signature] || ["", "", ""];

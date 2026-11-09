@@ -23,8 +23,9 @@ from datoolkit.llm.ethsig import (
     recover_personal,
     sign,
 )
+from datoolkit.llm.client import LLMClient
 from datoolkit.llm.secure_http import ProviderError
-from datoolkit.llm.tee import NRAS_URL, TeeClient, TeeRefused, is_tee
+from datoolkit.llm.tee import NRAS_URL, RECEIPT_KEYS_LOOSE, TeeClient, TeeRefused, is_tee
 
 KEY = 0xB25C7DB31FEED9122727BF0939DC769A96564B2DE4C4726D035B36ECF1E5B364
 ADDRESS = "0x5ce9454909639D2D17A3F753ce7d93fa0b9aB12E"
@@ -86,7 +87,10 @@ def tee_server(
     evidence: bool = True,
     attestation_status: int = 200,
     nras_status: int = 200,
+    reply: bytes | None = None,
 ):
+    """`reply`: the bytes the reply's stream carried, whose hash its signed record names (the
+    record names "bb" without it)."""
     address = address_of(KEY).lower()
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -120,7 +124,7 @@ def tee_server(
                 },
             )
         if "/tee/signature/" in url:
-            text = "aa:bb"
+            text = "aa:" + (hashlib.sha256(reply).hexdigest() if reply is not None else "bb")
             signature = sign(personal_hash(text.encode()), signer, 12345).hex()
             return httpx.Response(
                 200, json={"text": text, "signature": signature, "signing_address": address}
@@ -155,10 +159,17 @@ def client_for(*, intel=UP_TO_DATE, nvidia=8, **server) -> TeeClient:
     )
 
 
-def test_a_bound_quote_intel_and_nvidia_vouch_for_is_fully_attested():
+def besides_receipts(result) -> list[str]:
+    """The shortfalls other than the receipt keys, which nano-gpt's form always has."""
+    return [what for what in result.shortfalls if what != RECEIPT_KEYS_LOOSE]
+
+
+def test_a_bound_quote_intel_and_nvidia_vouch_for_is_attested_its_receipt_keys_named():
+    # The quote binds the signing key, as nano-gpt serves it (Nov 2026): the
+    # receipts' keys aren't in it, said in the attestation's shortfalls.
     client = client_for()
     result = client.attest()
-    assert result.level == "full" and result.verified and not result.shortfalls
+    assert result.verified and result.shortfalls == [RECEIPT_KEYS_LOOSE]
     assert (result.gpus, result.tcb_status, result.gpu_ok) == (8, "UpToDate", True)
     assert result.signing_address == address_of(KEY).lower()
     assert "binds the signing key to our nonce" in result.detail
@@ -181,20 +192,20 @@ def test_a_quote_intel_does_not_vouch_for_is_refused():
 
 def test_what_couldnt_be_checked_or_isnt_current_is_partial_and_named():
     stale = dcap.Result(status="OutOfDate", platform="OutOfDate", qe="UpToDate")
-    assert client_for(intel=stale).attest().shortfalls == ["Intel TCB OutOfDate"]
+    assert besides_receipts(client_for(intel=stale).attest()) == ["Intel TCB OutOfDate"]
     unchecked = client_for(intel=dcap.Result(collateral=False)).attest()
-    assert unchecked.level == "partial" and unchecked.shortfalls == ["Intel TCB unchecked"]
+    assert unchecked.level == "partial" and besides_receipts(unchecked) == ["Intel TCB unchecked"]
     no_gpu = client_for(evidence=False).attest()
     assert no_gpu.level == "partial" and no_gpu.gpu_ok is None
-    assert no_gpu.shortfalls == ["no GPU evidence"]
+    assert besides_receipts(no_gpu) == ["no GPU evidence"]
 
 
 def test_nvidia_unreachable_is_partial_and_nvidia_rejecting_is_refused():
     down = client_for(nras_status=503).attest()
-    assert down.level == "partial" and down.shortfalls == ["GPUs unverified"]
+    assert down.level == "partial" and besides_receipts(down) == ["GPUs unverified"]
     assert "couldn't be reached" in down.detail
     keys = client_for(nvidia=nras.KeysUnavailable("keys could not be fetched")).attest()
-    assert keys.shortfalls == ["NVIDIA signature unchecked"]
+    assert besides_receipts(keys) == ["NVIDIA signature unchecked"]
     with pytest.raises(TeeRefused, match="NVIDIA rejected"):
         client_for(nras_status=400).attest()
     # A verdict that says no without NVIDIA's keys: nras.verify refuses it (see
@@ -416,9 +427,10 @@ def _real_client(real, monkeypatch, *, nvidia_now: float | None = None, **server
     )
 
 
-def test_the_whole_real_attestation_is_full(real, monkeypatch):
+def test_the_whole_real_attestation_holds_with_only_its_receipt_keys_short(real, monkeypatch):
     result = _real_client(real, monkeypatch).attest()
-    assert result.level == "full" and not result.shortfalls
+    # Sept 2026's capture has no keyset: no receipts, so nothing binds them either.
+    assert result.verified and result.shortfalls == [RECEIPT_KEYS_LOOSE]
     assert (result.gpus, result.tcb_status) == (8, "UpToDate")
     assert result.signing_address == real["signing_address"]
 
@@ -432,7 +444,8 @@ def test_redpills_gateway_is_attested_only_in_part_and_its_expired_keys_are_refu
     hold, but not that the model itself runs in an enclave, so it isn't called "full". (DA Vibe
     Manager's test.)"""
     result = _real_client(real, monkeypatch, extra=REDPILL).attest()
-    assert result.level == "partial" and result.shortfalls == ["the model's own enclave unchecked (RedPill's gateway)"]
+    assert result.level == "partial"
+    assert besides_receipts(result) == ["the model's own enclave unchecked (RedPill's gateway)"]
     assert "this is RedPill's gateway" in result.detail
     assert result.gpus == 8 and result.tcb_status == "UpToDate"
     for shape in ({"api_version": "aci/1"}, {"service_capabilities": {"serving": "aggregator"}}):
@@ -946,7 +959,7 @@ def test_with_nvidias_keys_out_of_reach_only_the_signature_goes_unchecked(real, 
     """The whole real attestation, NVIDIA's keys out of reach: partial, the signature named; a
     verdict that says no, or one out of date, is refused, as it would be with them."""
     result = _real_client(real, monkeypatch, jwks={"no": "keys"}).attest()
-    assert result.level == "partial" and result.shortfalls == ["NVIDIA signature unchecked"]
+    assert result.level == "partial" and besides_receipts(result) == ["NVIDIA signature unchecked"]
     assert "so NVIDIA's verdict is unchecked" in result.detail
     nras._keys.update(at=0.0, keys={})
     with pytest.raises(TeeRefused, match="GPU attestation failed: a token is outside its validity"):
@@ -977,3 +990,282 @@ def test_nvidias_keys_are_fetched_again_after_a_sleep(boot_clock):
     finally:
         nras._keys.update(at=0.0, keys={})
         session.close()
+
+
+# --- receipts: a reply's exact bytes and its upstream (Nov 2026) ----------------------
+# From SealedLore's tests of the same checks (bf3daa1, 5dfbdb6).
+
+STREAM = (
+    b'data: {"id": "req_9", "choices": [{"delta": {"content": "ok"}}]}\n\n'
+    b'data: {"id": "req_9", "choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n'
+    b"data: [DONE]\n\n"
+)
+
+
+def _public(private_key: int) -> str:
+    """KEY's uncompressed public key, as RedPill's keyset lists the e2ee key
+    whose address is the attested signing address."""
+    from datoolkit.llm import ethsig
+
+    point = ethsig._mul(private_key, ethsig._G)
+    return "04" + point[0].to_bytes(32, "big").hex() + point[1].to_bytes(32, "big").hex()
+
+
+def receipt_server(
+    *,
+    stream: bytes = STREAM,
+    body_hash: str | None = None,
+    upstream: str = "verified",
+    receipt_key=None,
+    tied: str = "e2ee",
+    digest: str | None = None,
+    not_ready: int = 0,
+    seen: list | None = None,
+    not_after: int = 4_000_000_000,
+):
+    """nano-gpt as live (Nov 4 2026): the attestation's quote binds the signing
+    key; the keyset beside it lists that key as its e2ee key ("e2ee"), or the
+    quote binds the keyset itself ("statement"), or neither ("none"); the
+    signature lookup returns the record the signing key signed and RedPill's
+    receipt, signed by the keyset's Ed25519 key, for `stream`'s bytes."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from datoolkit.llm import tee
+
+    gateway = Ed25519PrivateKey.generate()
+    signer = receipt_key or gateway
+    public = gateway.public_key().public_bytes_raw().hex()
+    keyset = {
+        "subject": None,
+        "not_after": not_after,
+        "receipt_signing_keys": [
+            {"key_id": "dstack-kms-receipt-ed25519-v1", "algo": "ed25519", "public_key": public}
+        ],
+        "e2ee_public_keys": [
+            {
+                "key_id": "dstack-kms-e2ee-v1",
+                "algo": "secp256k1-aes-256-gcm-hkdf-sha256",
+                "public_key": _public(KEY if tied != "none" else 7),
+            }
+        ],
+        "tls_public_keys": [],
+    }
+    keyset_digest = tee._digest(tee._canonical(keyset))
+    address = address_of(KEY).lower()
+    request_hash = hashlib.sha256(b"the request forwarded").hexdigest()
+    response_hash = (body_hash or "sha256:" + hashlib.sha256(stream).hexdigest())[7:]
+    pending = [not_ready]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if seen is not None:
+            seen.append(request)
+        if url.startswith(NRAS_URL):
+            return httpx.Response(
+                200, json=[["JWT", jwt({"x-nvidia-overall-att-result": True})], {}]
+            )
+        if "/tee/attestation" in url:
+            nonce = request.url.params["nonce"]
+            if tied == "statement":
+                statement = (
+                    f'{{"keyset_digest":"{keyset_digest}","nonce":"{nonce}",'
+                    '"purpose":"aci.report_data.v1"}'
+                ).encode()
+                report = hashlib.sha256(statement).digest() + bytes(32)
+            else:
+                report = bytes.fromhex(address[2:]) + bytes(12) + bytes.fromhex(nonce)
+            return httpx.Response(
+                200,
+                json={
+                    "signing_address": address,
+                    "intel_quote": fake_quote(report),
+                    "nvidia_payload": json.dumps({"evidence_list": [{"evidence": "e"}]}),
+                    "attestation": {"report_data": report[:32].hex(), "workload_keyset": keyset},
+                },
+            )
+        if "/tee/signature/" in url:
+            if pending[0]:
+                pending[0] -= 1
+                return httpx.Response(404, json={"error": "not yet"})
+            text = f"{request_hash}:{response_hash}"
+            receipt = {
+                "api_version": "aci/1",
+                "receipt_id": "rcpt-1",
+                "key_id": "dstack-kms-receipt-ed25519-v1",
+                "served_at": 1_800_000_000,
+                "workload_keyset_digest": digest or keyset_digest,
+                "event_log": [
+                    {"type": "request.received", "body_hash": f"sha256:{request_hash}"},
+                    {
+                        "type": "upstream.verified",
+                        "result": upstream,
+                        "required": True,
+                        "session_id": "s",
+                        "model_id": "m",
+                    },
+                    {"type": "response.returned", "body_hash": f"sha256:{response_hash}"},
+                ],
+            }
+            receipt["signature"] = signer.sign(tee._canonical(receipt)).hex()
+            return httpx.Response(
+                200,
+                json={
+                    "text": text,
+                    "signature": sign(personal_hash(text.encode()), KEY, 4242).hex(),
+                    "signing_address": address,
+                    "signing_algo": "ecdsa",
+                    "receipt": receipt,
+                },
+            )
+        return httpx.Response(404)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def receipt_client(model: str = "TEE/glm-5.3-flash", **server) -> TeeClient:
+    client = TeeClient(
+        "https://nano-gpt.com/api/v1",
+        "k",
+        model,
+        client=receipt_server(**server),
+        intel=lambda raw, session: UP_TO_DATE,
+        nvidia=lambda answer, nonce, session: 8,
+    )
+    client.attest()
+    return client
+
+
+def streamed(stream: bytes = STREAM) -> str:
+    return "sha256:" + hashlib.sha256(stream).hexdigest()
+
+
+def test_a_streamed_reply_is_checked_to_its_exact_bytes_and_its_receipt():
+    client = receipt_client()
+    assert client.keyset is not None, "the keyset holds the attested key"
+    assert client.verify_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) is True
+    assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
+
+
+def test_bytes_other_than_those_signed_fail():
+    client = receipt_client()
+    assert client.verify_reply("req_9", body_hash=streamed(b"data: [DONE]\n\n")) is False
+
+
+def test_a_model_whose_streams_nano_gpt_rebuilds_is_checked_by_signature_alone():
+    client = receipt_client(model="TEE/gemma-4-31b-it")
+    assert client.verify_reply("req_9", body_hash=streamed(b"rebuilt")) is True
+
+
+def test_a_receipt_whose_upstream_wasnt_verified_fails():
+    assert receipt_client(upstream="failed").verify_reply("req_9", body_hash=streamed()) is False
+
+
+def test_a_receipt_signed_by_another_key_fails():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    client = receipt_client(receipt_key=Ed25519PrivateKey.generate())
+    assert client.verify_reply("req_9", body_hash=streamed()) is False
+
+
+def test_a_receipt_under_keys_renewed_since_is_unchecked_not_failed():
+    client = receipt_client(digest="sha256:" + "0" * 64)
+    with pytest.raises(ProviderError, match="keys changed"):
+        client.verify_reply("req_9", body_hash=streamed())
+
+
+def test_a_keyset_the_quote_binds_itself_is_taken_and_one_tied_neither_way_is_not():
+    bound = receipt_client(tied="statement")
+    assert bound.keyset is not None
+    assert bound.attest().level == "full", "RedPill's own form binds the receipt keys"
+    loose = receipt_client(tied="none")
+    assert loose.keyset is None
+    # Still signed by the attested key, for these bytes: the receipt goes unread.
+    assert loose.verify_reply("req_9", body_hash=streamed()) is True
+
+
+def test_a_stream_just_ended_waits_for_its_receipt(monkeypatch):
+    from datoolkit.llm import tee
+
+    monkeypatch.setattr(tee, "RECEIPT_RETRY_SECONDS", 0)
+    seen: list = []
+    client = receipt_client(not_ready=2, seen=seen)
+    assert client.verify_reply("req_9", receipt_id="rcpt-1", body_hash=streamed(), route="r1")
+    lookups = [r for r in seen if "/tee/signature/" in str(r.url)]
+    assert len(lookups) == 3 and "rcpt-1" in str(lookups[-1].url)
+    assert all(r.headers.get("X-TEE-Verification-Route") == "r1" for r in lookups)
+    # A reply that named no receipt is looked up once: it never had one to wait for.
+    seen.clear()
+    client = receipt_client(not_ready=1, seen=seen)
+    with pytest.raises(ProviderError, match="no signature for this reply"):
+        client.check_reply("req_9", body_hash=streamed())
+    assert len([r for r in seen if "/tee/signature/" in str(r.url)]) == 1
+
+
+async def test_the_stream_keeps_its_receipt_id_and_the_hash_of_every_byte():
+    """Every byte it carried, as decoded of its transfer encoding, to the end, [DONE] and after
+    (the SDK's own reader stops at [DONE]); the receipt id and route from its headers."""
+    import gzip
+
+    tail = b": a comment after the end\n\n"
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            content=gzip.compress(STREAM + tail),
+            headers={"Content-Type": "text/event-stream", "Content-Encoding": "gzip",
+                     "X-Receipt-Id": "rcpt-7", "X-TEE-Verification-Route": "r2"},
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = LLMClient("https://x.test/v1", "k", http)
+        events = [e async for e in client.stream("TEE/m", [], receipts=True)]
+        done = events[-1][1]
+        assert (done.id, done.receipt_id, done.tee_route) == ("req_9", "rcpt-7", "r2")
+        assert done.body_hash == streamed(STREAM + tail)
+        assert "".join(v for k, v in events if k == "text") == "ok" and done.finish_reason == "stop"
+        plain = [e async for e in client.stream("TEE/m", [])]       # not asked for: as the SDK reads it
+        assert plain[-1][1].body_hash is None and plain[-1][1].receipt_id is None
+        assert "".join(v for k, v in plain if k == "text") == "ok"
+
+
+async def test_an_error_partway_through_a_hashed_stream_raises_as_the_sdks_reader_does():
+    from openai import APIError
+
+    said = b'data: {"error": {"message": "the upstream went away"}}\n\n'
+    transport = httpx.MockTransport(lambda r: httpx.Response(
+        200, content=STREAM.split(b"\n\n")[0] + b"\n\n" + said, headers={"Content-Type": "text/event-stream"}))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = LLMClient("https://x.test/v1", "k", http)
+        events = []
+        with pytest.raises(APIError, match="the upstream went away"):
+            async for event in client.stream("TEE/m", [], receipts=True):
+                events.append(event)
+        assert events == [("text", "ok")]
+
+
+def test_a_reply_whose_bytes_cant_be_compared_is_signed_not_verified():
+    client = receipt_client()
+    assert client.check_reply("req_9", body_hash=streamed()) == "verified"
+    assert client.check_reply("req_9") == "signed", "no bytes to compare"
+    rebuilt = receipt_client(model="TEE/gemma-4-31b-it")
+    assert rebuilt.check_reply("req_9", body_hash=streamed(b"rebuilt")) == "signed"
+    assert receipt_client(upstream="failed").check_reply("req_9", body_hash=streamed()) == (
+        "failed"
+    )
+
+
+def test_the_receipt_keys_are_named_short_whether_a_keyset_comes_or_not():
+    """Leaving the keyset out must never read better than sending it loose."""
+    with_keys = receipt_client()
+    assert with_keys.keyset is not None
+    assert RECEIPT_KEYS_LOOSE in with_keys.attest().shortfalls
+    without = receipt_client(tied="none")
+    assert without.keyset is None
+    assert RECEIPT_KEYS_LOOSE in without.attest().shortfalls
+
+
+def test_expired_receipt_keys_are_refused():
+    """The keys RedPill attests carry their expiry: past it, the attestation is refused, whichever
+    way the quote ties them (DA Vibe Manager's rule; SealedLore names them short instead)."""
+    for tied in ("statement", "e2ee"):
+        with pytest.raises(TeeRefused, match="attested keys expired"):
+            receipt_client(tied=tied, not_after=1)

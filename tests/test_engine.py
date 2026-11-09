@@ -45,6 +45,7 @@ class FakeAPI:
         self.requests = []    # captured request JSON
         self.refuse = {}      # model -> a setting its route rejects with HTTP 400 (as NanoGPT does)
         self.overflow = None  # an error message for "too long for the context window" (HTTP 400)
+        self.stream_headers = {}  # more headers on each stream (a TEE reply's X-Receipt-Id, say)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
@@ -65,7 +66,8 @@ class FakeAPI:
             return httpx.Response(200, json={"id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
                                              "choices": [{"index": 0, "finish_reason": "stop",
                                                           "message": {"role": "assistant", "content": self.completions.pop(0)}}]})
-        return httpx.Response(200, text=self.responses.pop(0), headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, text=self.responses.pop(0),
+                              headers={"content-type": "text/event-stream", **self.stream_headers})
 
 
 @pytest.fixture

@@ -128,14 +128,15 @@ async def test_a_compaction_cancelled_by_a_case_switch_is_logged_in_its_own_case
 
 async def _tee_turn_held(engine, fake):
     """A TEE turn in case A whose reply-signature check waits for the returned event."""
-    engine._tee_factory = tee_factory()
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    engine._tee_factory = tee_factory(reply=reply.encode())
     engine.new_case("Case A", "open")
     engine.select_model("Fake", "TEE/glm-5.3")
     await settled(engine)
     client = engine._tee[("Fake", "TEE/glm-5.3")][0]
-    gate, real = threading.Event(), client.verify_reply
-    client.verify_reply = lambda rid: gate.wait(5) and real(rid)
-    fake.responses.append(sse(({"role": "assistant", "content": "Let's look."}, "stop")))
+    gate, real = threading.Event(), client.check_reply
+    client.check_reply = lambda rid, **seen: gate.wait(5) and real(rid, **seen)
+    fake.responses.append(reply)
     engine.send("VPN is down")
     await wait_turn(engine)
     entry = engine.chat[-1]
@@ -151,7 +152,7 @@ async def test_a_signature_check_that_ends_after_a_case_switch_is_saved_in_its_c
     gate.set()
     await drained(engine)
     saved = json.loads((case_a.dir / "state.json").read_text(encoding="utf-8"))
-    assert saved["chat"][index]["tee_signature"] == "signed"
+    assert saved["chat"][index]["tee_signature"] == "verified"
     assert "tee_reply_signature" in [e["event"] for e in events_of(case_a)]
     assert "tee_reply_signature" not in [e["event"] for e in events_of(case_b)]
     assert not engine.chat
@@ -165,9 +166,9 @@ async def test_a_signature_check_reaches_its_case_when_it_was_opened_again(env):
     assert engine.chat[index]["tee_signature"] == "checking"
     gate.set()
     await drained(engine)
-    assert engine.chat[index]["tee_signature"] == "signed"
+    assert engine.chat[index]["tee_signature"] == "verified"
     saved = json.loads((case_a.dir / "state.json").read_text(encoding="utf-8"))
-    assert saved["chat"][index]["tee_signature"] == "signed"
+    assert saved["chat"][index]["tee_signature"] == "verified"
 
 
 def _attesting(engine):

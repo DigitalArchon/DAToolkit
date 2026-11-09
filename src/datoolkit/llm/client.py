@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import codecs
+import hashlib
 import ipaddress
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import APIError, AsyncOpenAI, DefaultAsyncHttpxClient
+from openai.types.chat import ChatCompletionChunk
 
 from . import netguard
 
@@ -117,6 +121,11 @@ class TurnResult:
     finish_reason: str | None = None
     usage: dict | None = None
     id: str | None = None  # the completion's id: a TEE model's reply signature is looked up by it
+    # A TEE model's stream (llm/tee.py check_reply): the receipt its headers named (its record is
+    # looked up by that), the route nano-gpt took, and the sha256 of every byte it carried
+    receipt_id: str | None = None
+    tee_route: str | None = None
+    body_hash: str | None = None
     # Anthropic's Messages API (llm/anthropic_api.py): the turn's own content blocks, kept so they
     # go back unchanged (thinking signatures, search results); the state rendered before it as a
     # turn-scoped system message; its prefix fingerprint; the searches Anthropic ran, the sources
@@ -146,10 +155,13 @@ class LLMClient:
         return sorted(m.id for m in page.data)
 
     async def stream(
-        self, model: str, messages: list[dict], tools: list[dict] | None = None, params: dict | None = None
+        self, model: str, messages: list[dict], tools: list[dict] | None = None, params: dict | None = None,
+        *, receipts: bool = False,
     ) -> AsyncIterator[tuple[str, object]]:
         """Yield ("text"|"reasoning", str) deltas and ("tool", name) as each tool call starts,
-        then ("done", TurnResult)."""
+        then ("done", TurnResult). `receipts`: a TEE model's reply, whose signed record names the
+        hash of the exact bytes its stream carried (llm/tee.py check_reply): every byte is hashed,
+        to the end, and the receipt's headers kept on the TurnResult."""
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
         kwargs: dict = {"model": model, "messages": openai_messages(messages), "stream": True,
@@ -159,6 +171,11 @@ class LLMClient:
             kwargs["tool_choice"] = "auto"
         kwargs.update(_split_params(params))
         acc = StreamAccumulator()
+        if receipts:
+            async for event in self._stream_as_received(kwargs, acc):
+                yield event
+            yield "done", acc.finish()
+            return
         stream = await self._client.chat.completions.create(**kwargs)
         try:
             async for chunk in stream:
@@ -168,12 +185,58 @@ class LLMClient:
             await stream.close()     # stopped or cancelled: drop the connection, so the provider stops generating
         yield "done", acc.finish()
 
+    async def _stream_as_received(self, kwargs: dict, acc: StreamAccumulator) -> AsyncIterator[tuple[str, str]]:
+        """The stream read line by line as it came, every byte (decoded of any transfer encoding)
+        hashed to the end, `[DONE]` and after: the SDK's own reader stops at `[DONE]`. Chunks are
+        built as the SDK builds them, and an error the stream carries raises as the SDK raises it.
+        From SealedLore's providers/openai_compat.py (Nov 2026)."""
+        async with self._client.chat.completions.with_streaming_response.create(**kwargs) as response:
+            body = hashlib.sha256()
+            acc.result.receipt_id = response.headers.get("x-receipt-id") or response.headers.get("x-tee-signature-id")
+            acc.result.tee_route = response.headers.get("x-tee-verification-route")
+            done = False
+            async for line in _lines(response, body):
+                if done or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    done = True      # read on (nothing after it is taken), so the hash covers every byte
+                    continue
+                chunk = json.loads(data)
+                if not isinstance(chunk, dict):
+                    continue
+                if chunk.get("error"):
+                    error = chunk["error"]
+                    message = error.get("message") if isinstance(error, dict) else None
+                    raise APIError(message=message if isinstance(message, str) and message
+                                   else "An error occurred during streaming",
+                                   request=response.http_response.request, body=error)
+                for event in acc.feed(ChatCompletionChunk.construct(**chunk)):
+                    yield event
+            acc.result.body_hash = "sha256:" + body.hexdigest()
+
     async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
         resp = await self._client.chat.completions.create(model=model, messages=openai_messages(messages),
                                                           **_split_params(params))
         return resp.choices[0].message.content or ""
+
+
+async def _lines(response, body) -> AsyncIterator[str]:
+    """The stream's lines, each byte also fed to `body` (a hash) as it arrives, decoded of any
+    transfer encoding (SealedLore's providers/openai_compat._lines)."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+    async for chunk in response.iter_bytes():
+        body.update(chunk)
+        pending += decoder.decode(chunk)
+        *complete, pending = re.split(r"\r\n|\r|\n", pending)
+        for line in complete:
+            yield line
+    pending += decoder.decode(b"", final=True)
+    if pending:
+        yield pending
 
 
 # provider extensions sent in the request body, whatever the SDK version knows about:

@@ -968,26 +968,32 @@ class Engine:
         hit = self._tee[(prov.name, model)]
         return hit[0], hit[2]
 
-    async def _check_signatures(self, entry: dict, client: tee_mod.TeeClient, ids: list[str],
+    async def _check_signatures(self, entry: dict, client: tee_mod.TeeClient, replies: list[tuple],
                                 case: Case, chat: list[dict]) -> None:
-        """Was each reply of this turn signed by the attested enclave's key (llm/tee.py)? `case`
-        and `chat` are the turn's: the check takes seconds, and another case may be open by then."""
+        """Was each reply of this turn the attested enclave's, as received (llm/tee.py check_reply)?
+        "verified": its record was signed by the enclave's key, for the exact bytes this app got,
+        its receipt (where read) holding; "signed": signed, the bytes not comparable; "failed";
+        "unchecked": no record could be read; "unsigned": the provider signs none. A turn takes
+        the worst of its replies. `case` and `chat` are the turn's: the check takes seconds (a
+        receipt is waited for), and another case may be open by then."""
         outcomes = []
-        for rid in ids:
+        for rid, receipt_id, body_hash, route in replies:
             try:
-                outcomes.append("signed" if await asyncio.to_thread(client.verify_reply, rid) else "failed")
+                outcomes.append(await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
+                                                        body_hash=body_hash, route=route))
             except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
                 outcomes.append("unsigned" if client.signing_address is None else "unchecked")
-        result = entry["tee_signature"] = next(o for o in ("failed", "unchecked", "unsigned", "signed") if o in outcomes)
+        result = entry["tee_signature"] = next(
+            o for o in ("failed", "unchecked", "unsigned", "signed", "verified") if o in outcomes)
         if self.case is case:
-            self.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(ids))
+            self.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(replies))
             self._changed()
             self._persist()
             return
         # Closed (or closed and opened again) meanwhile: the result goes on the entry as saved,
         # found by its place in the chat, which only ever grows.
         try:
-            case.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(ids))
+            case.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(replies))
             index = next(i for i, e in enumerate(chat) if e is entry)
             if self.case and self.case.id == case.id:
                 if index < len(self.chat) and self.chat[index].get("tee_signature") == "checking":
@@ -3361,7 +3367,10 @@ class Engine:
             tee = await self._tee_guard(prov, model, "chat")
             if tee:
                 entry["tee_attested"] = tee[1]["summary"]
-            reply_ids: list[str] = []
+            # a TEE model's replies this turn: (completion id, receipt id, sha256 of the stream's
+            # bytes, route), for their signed records (llm/tee.py check_reply)
+            replies: list[tuple] = []
+            stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
             turn: dict = {}
             nudged = promise_nudged = text_only = hyp_continued = text_only_retried = False
             vision = self.vision_status()
@@ -3384,7 +3393,7 @@ class Engine:
                     # calls and still no text
                     params["tool_choice"] = "none"
                 try:
-                    async for kind, val in client.stream(model, messages, tools, params):
+                    async for kind, val in client.stream(model, messages, tools, params, **stream_kw):
                         if kind == "text":
                             entry["text"] += val
                             self.emit("delta", kind="text", text=val)
@@ -3421,8 +3430,8 @@ class Engine:
                         entry["text"] = entry["text"][:round_text] + clean
                 usage = result.usage
                 self._turn_extras(entry, prov, model, result)
-                if tee and result.id:
-                    reply_ids.append(result.id)
+                if tee and (result.id or result.receipt_id):
+                    replies.append((result.id, result.receipt_id, result.body_hash, result.tee_route))
                 self._log_request("chat", model, tier, system, sent, {
                     "content": result.content, "reasoning": entry["reasoning"][round_reasoning:],
                     "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls],
@@ -3508,9 +3517,9 @@ class Engine:
             self.chat.append(entry)
             self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"],
                      questions=entry.get("questions", []))
-            if tee and reply_ids:
+            if tee and replies:
                 entry["tee_signature"] = "checking"
-                task = asyncio.create_task(self._check_signatures(entry, tee[0], reply_ids, self.case, self.chat))
+                task = asyncio.create_task(self._check_signatures(entry, tee[0], replies, self.case, self.chat))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
         self._last_turn_error = error

@@ -12,15 +12,16 @@ from datoolkit.llm.tee import NRAS_URL, TeeClient
 
 from test_engine import env, sse, wait_turn  # noqa: F401
 from test_models import _png
-from test_tee import UP_TO_DATE, InstanceEvidence, tee_server
+from test_tee import RECEIPT_KEYS_LOOSE, UP_TO_DATE, InstanceEvidence, receipt_server, tee_server
 
 
-def tee_factory(calls: list | None = None, **server):
-    """TeeClients on test_tee's fake nano-gpt, Intel's and NVIDIA's checks stood in for."""
+def tee_factory(calls: list | None = None, *, server=tee_server, **options):
+    """TeeClients on test_tee's fake nano-gpt (`server`: tee_server, or receipt_server for one
+    with RedPill's keys and receipts), Intel's and NVIDIA's checks stood in for."""
     def make(base, key, model):
         if calls is not None:
             calls.append(model)
-        return TeeClient(base, key, model, client=tee_server(**server),
+        return TeeClient(base, key, model, client=server(**options),
                          intel=lambda raw, s: UP_TO_DATE, nvidia=lambda a, n, s: 8)
     return make
 
@@ -41,22 +42,47 @@ async def signature_of(entry):
     raise AssertionError("signature check did not finish")
 
 
-async def test_a_tee_model_is_attested_and_its_replies_signature_checked(env):  # noqa: F811
+async def test_a_tee_model_is_attested_and_its_replies_checked_to_their_bytes(env):  # noqa: F811
     engine, fake, _ = env
-    engine._tee_factory = tee_factory()
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    seen: list = []
+    engine._tee_factory = tee_factory(server=receipt_server, tied="statement", stream=reply.encode(), seen=seen)
     engine.new_case("t", "open")
     engine.select_model("Fake", "TEE/glm-5.3")
     assert engine.attestation == {"status": "checking", "model": "TEE/glm-5.3", "kind": "tee"}   # "TEE attesting…"
     att = await settled(engine)
     assert (att["status"], att["kind"], att["level"], att["gpus"]) == ("verified", "tee", "full", 8)
     assert att["summary"].startswith("Intel TDX quote verified") and att["signing_address"]
-    fake.responses.append(sse(({"role": "assistant", "content": "Let's look."}, "stop")))
+    assert "the quote binds its receipt keys" in att["detail"]
+    fake.stream_headers = {"X-Receipt-Id": "rcpt-1", "X-TEE-Verification-Route": "r1"}
+    fake.responses.append(reply)
     engine.send("VPN is down")
     await wait_turn(engine)
     entry = engine.chat[-1]
     assert fake.requests[-1]["model"] == "TEE/glm-5.3"
     assert entry["tee_attested"] == att["summary"]
-    assert await signature_of(entry) == "signed"
+    assert await signature_of(entry) == "verified"
+    lookup = [r for r in seen if "/tee/signature/" in str(r.url)][-1]
+    assert "/tee/signature/rcpt-1" in str(lookup.url) and lookup.headers["X-TEE-Verification-Route"] == "r1"
+
+
+async def test_a_reply_other_than_the_one_signed_fails_and_one_not_comparable_is_signed(env):  # noqa: F811
+    engine, fake, _ = env
+    engine._tee_factory = tee_factory(server=receipt_server, stream=b"data: [DONE]\n\n")
+    engine.new_case("b", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    att = await settled(engine)
+    assert att["level"] == "partial" and att["shortfalls"] == [RECEIPT_KEYS_LOOSE]
+    fake.responses.append(sse(({"role": "assistant", "content": "Let's look."}, "stop")))
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "failed"
+    engine.select_model("Fake", "TEE/gemma-4-31b-it")       # nano-gpt rebuilds its streams
+    await settled(engine)
+    fake.responses.append(sse(({"role": "assistant", "content": "Again."}, "stop")))
+    engine.send("and now?")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "signed"
 
 
 async def test_nothing_is_sent_to_a_tee_model_whose_attestation_fails(env):  # noqa: F811
@@ -163,7 +189,7 @@ async def test_a_tee_vision_helper_is_attested_before_an_image_goes_to_it(env): 
     engine.send("look", images=[_png()])
     await wait_turn(engine)
     note = engine.chat[-2]["image_notes"]["img-1.png"]
-    assert note["model"] == "TEE/kimi-k3" and note["tee_attested"].startswith("Intel TDX quote verified")
+    assert note["model"] == "TEE/kimi-k3" and note["tee_attested"].startswith("partially verified: receipt keys")
 
 
 async def test_no_image_goes_to_a_tee_helper_that_is_refused(env):  # noqa: F811

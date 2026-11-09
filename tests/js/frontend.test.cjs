@@ -289,6 +289,21 @@ test("links to pages a model or a search named are http(s) only", async () => {
   }
 });
 
+test("a TEE reply's mark says how far its check went, and anything short of verified says so", async () => {
+  const app = await page("a");
+  const mark = (result) => {
+    const el = app.call("teeBadge", { tee_attested: "Intel TDX quote verified", tee_signature: result });
+    return [el.textContent, el.getAttribute("class")];
+  };
+  assert.deepEqual(mark("verified"), ["🛡 TEE · ✔ verified", "tee-badge ok"]);
+  assert.deepEqual(mark("signed"), ["🛡 TEE · signed, text not compared", "tee-badge "]);
+  assert.deepEqual(mark("failed"), ["🛡 TEE · ✖ check failed", "tee-badge bad"]);
+  assert.deepEqual(mark("unchecked"), ["🛡 TEE · ⚠ reply not verified", "tee-badge warn"]);
+  assert.deepEqual(mark("unsigned"), ["🛡 TEE · unsigned", "tee-badge "]);
+  assert.match(app.call("teeBadge", { tee_attested: "x", tee_signature: "verified" }).getAttribute("title"),
+    /exact bytes this app received/);
+});
+
 test("what is typed into a search card survives the chat being rebuilt, caret and all", async () => {
   const app = await page("a", (s) => {
     s.chat = [{ kind: "user", text: "502s since the upgrade" },
