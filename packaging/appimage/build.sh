@@ -129,6 +129,16 @@ PY="$W/AppDir/usr/python/bin/python3"
 "$PY" -m pip install -q --no-compile --no-deps --require-hashes --only-binary :all: -r "$W/binary.lock"
 "$PY" -m pip install -q --no-compile --no-deps "$W/wheels"/*.whl
 "$PY" -m pip uninstall -q -y pip                  # nothing is installed at run time
+# The console scripts pip wrote for the packages (datoolkit, uvicorn, keyring, normalizer, ...)
+# start #!/work/AppDir/usr/python/bin/python3, which is nowhere but in this container: on a
+# user's machine they would run nothing, and they would carry the build path. AppRun runs
+# `python3 -m datoolkit`, none of them; python-build-standalone's own scripts start #!/bin/sh
+# and stay. (DA Assistant's build.sh, 8cfe093.)
+for script in "$W"/AppDir/usr/python/bin/*; do
+    if [ -f "$script" ] && [ ! -L "$script" ] && head -n1 "$script" | grep -q "^#!$W/"; then
+        rm "$script"
+    fi
+done
 # Pillow's font module (PIL/_imagingft) is the only thing that loads the FreeType, HarfBuzz
 # and Brotli it bundles (FreeType reads WOFF2 fonts with Brotli), and nothing here draws text
 # with Pillow. Brotli 1.2.0 has CVE-2026-111497, an out-of-bounds write in its decoder (Oct
@@ -158,8 +168,14 @@ for t in $(dpkg -L gir1.2-freedesktop | grep '\.typelib$'); do
 done
 find "$W/AppDir" -name direct_url.json -delete    # build paths
 find "$W/AppDir" -name __pycache__ -type d -prune -exec rm -rf {} +
-# bytecode keyed to the source's hash, not its timestamp: reproducible, and valid on a read-only mount
-"$PY" -m compileall -q -j1 --invalidation-mode unchecked-hash "$W/AppDir/usr/python/lib" >/dev/null
+# Bytecode that stores the source's hash where its date would go, unchecked: Python loads it
+# without looking at the source again, which on a read-only mount nobody can change, and it comes
+# out the same from every build. -s/-p name each source as it is inside the image
+# (/usr/python/lib/...), not as it is here (/work/AppDir/...); Python puts the true path in when
+# it loads a module. -B, or the interpreter running compileall writes the modules it imports
+# itself first, dated, and compileall takes those for done. (DA Assistant's build.sh, 8cfe093.)
+"$PY" -B -m compileall -q -j1 --invalidation-mode unchecked-hash -s "$W/AppDir" -p / \
+    "$W/AppDir/usr/python/lib" >/dev/null
 
 # AppDir layout (AppImage spec): entry point, desktop entry, icon, AppStream metadata
 install -m 755 "$P/AppRun" "$W/AppDir/AppRun"
@@ -176,6 +192,14 @@ grep -q "<release version=\"$VERSION\"" "$W/AppDir/usr/share/metainfo/au.com.dig
 install -d "$W/AppDir/usr/share/applications"
 ln -s ../../../datoolkit.desktop "$W/AppDir/usr/share/applications/datoolkit.desktop"
 desktop-file-validate "$W/AppDir/datoolkit.desktop"
+
+# Nothing in the image may name the folder it was built in: a path there leads nowhere on a
+# user's machine. (Wheels built elsewhere may name their own build folders; this is ours.)
+if named="$(grep -rlaF "$W/AppDir" "$W/AppDir")"; then
+    echo "These name the build folder $W/AppDir:" >&2
+    echo "$named" >&2
+    exit 1
+fi
 
 chmod -R u+rwX,go+rX,go-w "$W/AppDir"
 find "$W/AppDir" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +

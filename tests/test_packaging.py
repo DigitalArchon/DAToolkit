@@ -193,3 +193,52 @@ def test_no_certificate_check_is_switched_off():
         if hits:
             found[str(path.relative_to(ROOT / "src" / "datoolkit"))] = hits
     assert found == allowed
+
+
+# ---------------------------------------------------------------- no build path in the image
+
+def test_nothing_of_the_build_machine_gets_in():
+    assert "-root-owned -no-xattrs" in BUILD and "PYTHONHASHSEED=0" in BUILD
+    assert "--invalidation-mode unchecked-hash" in BUILD and '-ffile-prefix-map=$W/=' in BUILD
+    assert "direct_url.json -delete" in BUILD and 'grep -rlaF "$W/AppDir" "$W/AppDir"' in BUILD
+
+
+def test_bytecode_names_its_source_as_it_is_inside_the_image(tmp_path):
+    """compileall as build.sh runs it, on a folder laid out as the AppDir is: each .pyc
+    unchecked-hash, naming /usr/python/..., not the folder the build ran in."""
+    import marshal
+    import sys
+
+    command = next(line for line in _commands(BUILD) if "-m compileall" in line)
+    assert '"$PY" -B -m compileall' in command          # else the modules compileall itself imports go in dated
+    lib = tmp_path / "AppDir" / "usr" / "python" / "lib" / "python3.12"
+    (lib / "site-packages" / "datoolkit").mkdir(parents=True)
+    for folder in (lib, lib / "site-packages" / "datoolkit"):
+        (folder / "mod.py").write_text("def f():\n    return 1\n")
+    subprocess.run(["bash", "-c", command], check=True,
+                   env={"PATH": os.environ.get("PATH", ""), "PY": sys.executable, "W": str(tmp_path)})
+    names = []
+    for pyc in tmp_path.rglob("*.pyc"):
+        data = pyc.read_bytes()
+        assert int.from_bytes(data[4:8], "little") == 1, pyc        # unchecked-hash
+        code = marshal.loads(data[16:])
+        names += [code.co_filename, code.co_consts[0].co_filename]
+    assert sorted(set(names)) == ["/usr/python/lib/python3.12/mod.py",
+                                  "/usr/python/lib/python3.12/site-packages/datoolkit/mod.py"]
+
+
+def test_console_scripts_that_name_the_build_python_are_left_out(tmp_path):
+    start = BUILD.index('for script in "$W"/AppDir/usr/python/bin/*; do')
+    loop = BUILD[start:BUILD.index("\ndone\n", start) + 6]
+    bin_dir = tmp_path / "AppDir" / "usr" / "python" / "bin"
+    bin_dir.mkdir(parents=True)
+    scripts = {"datoolkit": f"#!{tmp_path}/AppDir/usr/python/bin/python3\nimport datoolkit\n",
+               "uvicorn": f"#!{tmp_path}/AppDir/usr/python/bin/python3\nimport uvicorn\n",
+               "pydoc3.12": "#!/bin/sh\n'''exec' \"$(dirname -- \"$0\")/python3.12\"\n",
+               "python3.12": "\x7fELF\x02\x01\x01\0" + "\0" * 64}
+    for name, text in scripts.items():
+        (bin_dir / name).write_text(text, encoding="latin-1")
+    os.symlink("python3.12", bin_dir / "python3")
+    subprocess.run(["bash", "-c", f"set -euo pipefail\n{loop}"], check=True,
+                   env={"PATH": os.environ.get("PATH", ""), "W": str(tmp_path)})
+    assert sorted(os.listdir(bin_dir)) == ["pydoc3.12", "python3", "python3.12"]
