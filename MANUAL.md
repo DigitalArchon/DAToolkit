@@ -94,7 +94,11 @@ the system's own; in the browser they're the browser's.
   release notes and exact syntax. By default each query appears in the AI's message for you to
   edit, approve or skip; "search without asking" applies to Open cases only, Confidential cases
   always ask, and Sovereign cases never search, because queries reach the search provider in
-  the clear. Searches are billed to the NanoGPT key; each search card shows its cost.
+  the clear. Secrets are blanked out of a query first; a query that names an e-mail, MAC or
+  private IP address, or this computer's own names, waits for you even when searching without
+  asking, and its card says what it names. Characters no one can see (a zero-width space inside
+  a key or an address) are taken out before either check, and what was checked is what is sent.
+  Searches are billed to the NanoGPT key; each search card shows its cost.
   Providers differ a lot. Measured over three queries (September 2026), Perplexity found the
   most primary sources with about 1,300 characters of clean text per result; Valyu came next;
   Kagi finds good links but returns only a line of text per result, at $0.025 the dearest;
@@ -139,7 +143,9 @@ the system's own; in the browser they're the browser's.
   - It is gated like web search: by default you approve (and can edit) the brief first; in
     "search without asking" mode on an Open case it runs straight away; Confidential cases
     always ask; Sovereign cases never research. The agent sees only the brief, never the case,
-    so edit out anything that identifies the client.
+    so edit out anything that identifies the client. A brief (or a page's address) that names an
+    e-mail, MAC or private IP address waits for you in every mode, and the agent's own searches
+    that name one are refused.
   - It can only fetch URLs that appeared in its search results or as links on pages it read,
     so a hostile page can't send it to a URL of its own making (a URL can carry data out).
     Budget per task: 6 searches, 12 pages, 10 minutes; at most 2 tasks per AI turn.
@@ -171,10 +177,12 @@ the system's own; in the browser they're the browser's.
   Commands that only list are read only: `iptables -S`, `nft list ruleset`, `mount` with no
   target, `net user`/`net share` with no switches, `dd … of=/dev/null`, `New-Object`, `Start-Sleep`.
 - A separate **sensitive** badge marks commands that may expose secrets or private data,
-  whatever their risk level: reading key files, `/etc/shadow`, `.env` and credential files,
-  dumping the environment, shell history, secret stores, databases or a device
+  whatever their risk level: reading key files, `/etc/shadow`, `.env` and credential files
+  (NetworkManager's connections, Windows paths too, and `find … -exec cat`), a computer's own
+  SSH settings, keys, browser data, saved passwords, mail and messages, listing personal folders
+  (`~/Documents`), dumping the environment, shell history, secret stores, databases or a device
   configuration, and commands that carry a password in their own text (where it lands in
-  shell history, the process list and the case log). Sensitive items aren't run by
+  shell history, the process list and the case log). A public key (`.pub`) is no secret. Sensitive items aren't run by
   Ctrl+Shift+Enter, and their output gets a reminder to check it before it is sent. The AI is
   told which of its commands were flagged.
 - **Run** types the command and presses Enter. **Insert** types it without Enter, so you can
@@ -922,8 +930,10 @@ meant to steer the model. Three layers deal with that:
   can't see but the model would read: invisible Unicode tag characters (the warning spells out
   what they say) and bidi controls, which reorder what is shown;
 - web search results, research reports and fetched pages reach the model marked as untrusted,
-  with the same check; the research agent works from the brief alone and fetches only URLs
-  it was shown, and a page returned whole has first been checked by the agent;
+  with the same check (a search's card says when its results held such text), and text no one
+  can see is taken out of search results before the model reads them; the research agent works
+  from the brief alone and fetches only URLs it was shown, and a page returned whole has first
+  been checked by the agent;
 - the model's reply is rendered with no remote resources at all (no images, media or
   embeds, and a Content-Security-Policy that only allows this origin), so a steered model
   cannot leak data by making the page fetch a URL. Links open in your browser, and only when
@@ -936,8 +946,12 @@ meant to steer the model. Three layers deal with that:
 Local risk rules raise a command to **disruptive** when it fetches and runs code
 (`curl … | sh`, `curl … | sudo -E bash -`, `bash <(wget …)`, `base64 -d | sh`,
 `Invoke-Expression`, `-EncodedCommand` or `-e`, `DownloadString`), erases (`shred`, `find
--delete`, `format D:`, `vssadmin delete shadows`, `zfs destroy`, `nvme format`), opens a
-reverse shell or sets world-writable permissions, and to **modifying** for `eval`, inline
+-delete`, `format D:`, `vssadmin delete shadows`, `zfs destroy`, `nvme format`), deletes by other
+means than `rm -r` (`find … -exec rm`, `xargs rm`, `rsync --delete`, `git reset --hard`, `git
+clean -f`, `unlink`, `dconf reset -f`, `flatpak uninstall --all`), ends sessions or every process
+(`loginctl terminate-session`, `kill -9 -1`), reboots through D-Bus (`busctl call … Reboot`),
+opens a reverse shell or sets world-writable permissions, and to **modifying** for `eval`, inline
 interpreter code (`python -c`) and switching user (`su`, `sudo -i`). A command counts wherever
-it starts: on any line, after `do`, in a `{ … }` group, behind `sudo -u root`, `env`, `nohup`,
-`timeout 5` or `xargs`, by its path (`/bin/rm`) or escaped (`\rm`).
+it starts: on any line, after `do`, in a `{ … }` group, behind `sudo -u root`, `pkexec`, `run0`,
+`systemd-run`, `env`, a variable set for it (`FOO=1`), `nohup`, `timeout -s KILL 5` or `xargs -a
+list`, by its path (`/bin/rm`) or escaped (`\rm`).
