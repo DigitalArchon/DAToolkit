@@ -5,9 +5,16 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # TLS trust: the host's own CA store first, so its distrust decisions (emSign ECC Root CA - G3,
 # the eMudhra root, Oct 2026) stand for httpx and the openai client (SSL_CERT_FILE) and for
 # requests, which tinfoil's attestation uses (REQUESTS_CA_BUNDLE); the bundled certifi is the
-# fallback. The bundled Python's own ssl module looks in /etc/ssl already.
+# fallback. The bundled Python's own ssl module looks in /etc/ssl already. Where Debian and its
+# kin, Fedora and RHEL, openSUSE (/etc/ssl/ca-bundle.pem) and the rest keep it, in this order
+# (build-appimage.sh looks in the same places, for the builder's apt; DA Assistant's AppRun).
 if [ -z "${SSL_CERT_FILE:-}" ]; then
-    for bundle in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+    for bundle in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/ssl/ca-bundle.pem \
+        /etc/pki/tls/cert.pem \
+        /etc/ssl/cert.pem; do
         if [ -r "$bundle" ]; then
             export SSL_CERT_FILE="$bundle"
             break

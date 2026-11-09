@@ -90,6 +90,35 @@ def _lookup(*candidates):
                            "bash", *candidates], capture_output=True, text=True, timeout=30)
 
 
+def test_apprun_and_the_build_look_for_the_hosts_ca_bundle_in_the_same_five_places():
+    """AppRun looked in three: on openSUSE (/etc/ssl/ca-bundle.pem), or a host with only
+    /etc/pki/tls/cert.pem, httpx and requests went to the bundled certifi, not the host's store, so
+    the host's distrust decisions didn't hold."""
+    listed = re.search(r"^CA_BUNDLES=\((.*?)\)", WRAPPER, re.S | re.M).group(1).split()
+    looked = re.search(r"for bundle in(.*?); do", APPRUN, re.S).group(1)
+    apprun = re.findall(r"/etc/[^\s\\]+", looked)
+    assert apprun == listed == ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                                "/etc/ssl/ca-bundle.pem", "/etc/pki/tls/cert.pem", "/etc/ssl/cert.pem"]
+    assert subprocess.run(["sh", "-n", str(PACKAGING / "AppRun")]).returncode == 0
+
+
+def test_apprun_takes_the_first_bundle_there_and_leaves_ones_chosen_alone(tmp_path):
+    """AppRun's lookup, run with its paths moved under a folder of the test's own."""
+    root = tmp_path / "root"
+    (root / "etc/ssl").mkdir(parents=True)
+    (root / "etc/ssl/ca-bundle.pem").write_text("pem")
+    script = APPRUN.replace("/etc/", f"{root}/etc/").replace('exec "$HERE/usr/python/bin/python3"', 'exit 0 #')
+    script += '\necho "$SSL_CERT_FILE|$REQUESTS_CA_BUNDLE"\n'
+    run = tmp_path / "AppRun"
+    run.write_text(script.replace("exit 0 #", ": #"))
+    env = {"PATH": os.environ.get("PATH", "")}
+    out = subprocess.run(["sh", str(run)], env=env, capture_output=True, text=True).stdout.strip().splitlines()[-1]
+    assert out == f"{root}/etc/ssl/ca-bundle.pem|{root}/etc/ssl/ca-bundle.pem"
+    chosen = subprocess.run(["sh", str(run)], env={**env, "SSL_CERT_FILE": "/mine.pem"}, capture_output=True,
+                            text=True).stdout.strip().splitlines()[-1]
+    assert chosen == "/mine.pem|/mine.pem"
+
+
 def test_the_first_bundle_there_is_used(tmp_path):
     bundle = tmp_path / "ca-bundle.pem"
     bundle.write_text("certificates")
