@@ -110,12 +110,112 @@ const MD_OPTS = {
   ADD_URI_SAFE_ATTR: ["start", "align"],
 };
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
-  if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+  if (node.tagName === "A") {
+    node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer");
+    markInsecure(node);
+  }
 });
+
+// A link over plain http to anywhere but this computer, its own network or a Tor onion service
+// opens a page anyone on the way can read and change: it is marked "⚠ not secure" where it is
+// shown (a[data-insecure]: the words are the stylesheet's, so copying and Find leave them out),
+// its title is the warning, and it opens only after asking (confirmInsecure). Judged from the
+// address the link really has, read as the browser reads it, so link text that says https:// over
+// an http:// address is marked all the same; nothing shown can make a mark or take one away.
+// (DA Assistant's linkwarning and netguard.insecure_link, Nov 2026.)
+const INSECURE_TIP = "Not secure: this address uses plain http, so the page isn't encrypted. Anyone between you and the site can read it, or change it on its way.";
+const LOCAL_V4 = [[127, 0, 8], [10, 0, 8], [172, 16, 12], [192, 168, 16], [169, 254, 16]];
+
+function ipv6Words(text) {
+  // eight 16-bit words of an IPv6 address as a URL's host has it (brackets off), or null
+  const tail = text.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (tail) text = text.slice(0, -tail[0].length) + ((+tail[1] << 8) | +tail[2]).toString(16) + ":" + ((+tail[3] << 8) | +tail[4]).toString(16);
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const part = (s) => (s ? s.split(":") : []);
+  const head = part(halves[0]), rest = halves.length === 2 ? part(halves[1]) : [];
+  const words = halves.length === 2 ? [...head, ...Array(8 - head.length - rest.length).fill("0"), ...rest] : head;
+  if (words.length !== 8 || !words.every((w) => /^[0-9a-f]{1,4}$/i.test(w))) return null;
+  return words.map((w) => parseInt(w, 16));
+}
+
+function isLocalHost(host) {
+  host = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  const num = (a) => ((a[0] << 24) | (a[1] << 16) | (a[2] << 8) | a[3]) >>> 0;
+  const inV4 = (a) => LOCAL_V4.some(([x, y, bits]) => {
+    const mask = (~0 << (32 - bits)) >>> 0;
+    return ((num(a) & mask) >>> 0) === ((num([x, y, 0, 0]) & mask) >>> 0);
+  });
+  if (v4) return inV4(v4.slice(1).map(Number));
+  if (!host.startsWith("[") || !host.endsWith("]")) return false;
+  const w = ipv6Words(host.slice(1, -1));
+  if (!w) return false;
+  if (w.slice(0, 5).every((x) => x === 0) && w[5] === 0xffff) return inV4([w[6] >> 8, w[6] & 255, w[7] >> 8, w[7] & 255]);
+  return (w.slice(0, 7).every((x) => x === 0) && w[7] === 1) || (w[0] & 0xffc0) === 0xfe80 || (w[0] & 0xfe00) === 0xfc00;
+}
+
+function insecureLink(url) {
+  // what a browser takes off both ends of an address, and out of it anywhere (WHATWG URL parsing)
+  const text = String(url ?? "").replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
+  if (!/^http:/i.test(text.replace(/[\t\n\r]/g, ""))) return false;
+  let host;
+  try { host = new URL(text).hostname; } catch { return true; }     // can't be judged: taken for elsewhere
+  return !(isLocalHost(host) || /\.onion$/i.test(host.replace(/\.$/, "")));
+}
+
+function markInsecure(a) {
+  a.removeAttribute("data-insecure");                       // never one the page brought
+  if (insecureLink(a.getAttribute("href"))) {
+    a.setAttribute("data-insecure", "");
+    a.setAttribute("title", INSECURE_TIP);
+  }
+  return a;
+}
+
+// Asked before a link that isn't secure opens, naming the address in full: what it really opens,
+// whatever its text said. Cancel is the default (it has the focus) and Escape's answer.
+function confirmInsecure(url) {
+  return new Promise((resolve) => {
+    let result = false;
+    const { box } = modal({
+      title: "Open a link that isn't secure?",
+      body: h("div", {}, h("div", { class: "insecure-address" }, url),
+        h("p", {}, "This address uses plain http, so the page isn't encrypted: anyone between you and the site can read it or change it before it reaches you.")),
+      buttons: [{ label: "Cancel" }, { label: "Open anyway", kind: "danger", onClick: () => { result = true; } }],
+      onClose: () => resolve(result),
+    });
+    setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
+  });
+}
+
+function openConfirmed(url) {
+  const a = h("a", { href: url, target: "_blank", rel: "noopener noreferrer" });
+  a.dataset.confirmed = "1";
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+function onLinkActivated(ev) {
+  if (ev.type === "auxclick" && ev.button !== 1) return;          // a middle click opens a link too
+  const a = ev.target?.closest?.("a[href]");
+  const href = a?.getAttribute("href");
+  if (!a || a.dataset.confirmed || !insecureLink(href)) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  let url = href;
+  try { url = new URL(href.trim()).href; } catch { /* named as written */ }
+  confirmInsecure(url).then((yes) => { if (yes) openConfirmed(url); });
+}
+document.addEventListener("click", onLinkActivated, true);
+document.addEventListener("auxclick", onLinkActivated, true);
+
 // A link to a page the model, a search or a provider named: http(s) only (md() holds rendered
-// replies to that rule too), anything else is shown as text.
+// replies to that rule too), anything else is shown as text; one that isn't secure is marked.
 function extLink(url, text, attrs = {}) {
-  return /^https?:\/\//i.test(url || "") ? h("a", { href: url, target: "_blank", rel: "noopener noreferrer", ...attrs }, text)
+  return /^https?:\/\//i.test(url || "") ? markInsecure(h("a", { href: url, target: "_blank", rel: "noopener noreferrer", ...attrs }, text))
     : h("span", { title: url || "" }, text);
 }
 

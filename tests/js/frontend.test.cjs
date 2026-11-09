@@ -304,6 +304,71 @@ test("a TEE reply's mark says how far its check went, and anything short of veri
     /exact bytes this app received/);
 });
 
+test("plain http to anywhere but this computer, its network or an onion is a link that isn't secure", async () => {
+  const app = await page("a");
+  const insecure = (url) => app.call("insecureLink", url);
+  for (const url of ["http://example.com/", "http://93.184.216.34/x", "HTTP://EXAMPLE.COM", "  http://example.com/  ",
+    "http:example.com", "http://[2001:db8::1]/", "http://localhost.example.com/", "http://127.0.0.1.example.com/",
+    // as a browser reads them: an escape decoded into another name, a tab taken out, a backslash a slash
+    "http://127.0.0.1%2eevil.example/", "ht\ttp://evil.example/", "http://evil.example\\@localhost/", "http://"])
+    assert.equal(insecure(url), true, url);
+  for (const url of ["http://localhost:8080/", "http://127.0.0.1/", "http://127.9.8.7:1/", "http://[::1]:11434/",
+    "http://192.168.1.201:11434/api", "http://10.0.0.2/", "http://172.20.1.1/", "http://169.254.1.1/", "http://[fd00::5]/",
+    "http://[fe80::1]/", "http://[::ffff:192.168.1.5]/", "http://printer.local/", "http://box.localhost/", "http://LOCALHOST./",
+    "http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/",
+    "https://example.com/", "HTTPS://example.com", "mailto:a@example.com", "ftp://x/", "", null, undefined])
+    assert.equal(insecure(url), false, String(url));
+  for (const url of ["http://172.32.0.1/", "http://192.169.0.1/", "http://[::ffff:8.8.8.8]/", "http://[fec0::1]/"])
+    assert.equal(insecure(url), true, url);
+});
+
+test("a link that isn't secure is marked from its real address, and asks before it opens", async () => {
+  const app = await page("a");
+  const tip = /plain http, so the page isn't encrypted/;
+  // a source or citation: text that reads https:// over an http:// address is marked all the same
+  const a = app.call("extLink", "http://evil.example/login", "https://bank.example/login", { title: "Verified secure" });
+  assert.equal(a.hasAttribute("data-insecure"), true);
+  assert.match(a.getAttribute("title"), tip);                          // the warning, not the page's words
+  const fine = app.call("extLink", "https://example.com/", "ok");
+  assert.equal(fine.hasAttribute("data-insecure"), false);
+  // a rendered answer: DOMPurify's hook marks its links, and nothing the answer brings stands
+  const [hook] = app.window.DOMPurify.hooks.afterSanitizeAttributes;
+  const answer = app.window.document.createElement("a");
+  answer.setAttribute("href", "http://example.com/p");
+  hook(answer);
+  assert.equal(answer.hasAttribute("data-insecure"), true);
+  const faked = app.window.document.createElement("a");
+  faked.setAttribute("href", "https://example.com/");
+  faked.setAttribute("data-insecure", "");
+  hook(faked);
+  assert.equal(faked.hasAttribute("data-insecure"), false);
+  // clicked: asked first, the address in full, Cancel the default; nothing opens until "Open anyway"
+  const opened = [];
+  app.window.document.addEventListener("click", (ev) => { if (ev.target?.dataset?.confirmed) opened.push(ev.target.getAttribute("href")); });
+  app.window.document.body.append(a);
+  const ev = new Event("click");
+  a.dispatchEvent(ev);
+  await app.clock.tick(100);
+  assert.equal(ev.defaultPrevented, true);
+  assert.match(app.$(".modal h2").textContent, /Open a link that isn't secure\?/);
+  assert.equal(app.$(".modal .insecure-address").textContent, "http://evil.example/login");
+  assert.equal(app.window.document.activeElement.textContent, "Cancel");
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(0);
+  assert.deepEqual(opened, []);
+  a.dispatchEvent(new Event("click"));
+  await app.clock.tick(100);
+  button(app.$(".modal"), "Open anyway").click();
+  await app.clock.tick(0);
+  assert.deepEqual(opened, ["http://evil.example/login"]);
+  // a secure one opens as it always did
+  app.window.document.body.append(fine);
+  const plain = new Event("click");
+  fine.dispatchEvent(plain);
+  assert.equal(plain.defaultPrevented, false);
+  assert.equal(app.$(".modal"), null);
+});
+
 test("what is typed into a search card survives the chat being rebuilt, caret and all", async () => {
   const app = await page("a", (s) => {
     s.chat = [{ kind: "user", text: "502s since the upgrade" },

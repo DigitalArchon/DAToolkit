@@ -520,3 +520,16 @@ table.overrides input.ctx { width: 7em; }
 .grid2 > .field { min-width: 0; }
 .citations { margin-top: 6px; }
 .citations a { color: var(--accent); }
+
+/* A link that isn't secure (app.js markInsecure): the words drawn here, not written into the
+   page, so a selection copied and Find go without them; nothing of the page's can restyle them. */
+a[data-insecure]::after {
+  content: "⚠ not secure";
+  display: inline-block; margin-left: .35em; padding: 0 .5em;
+  border: 1px solid #8a6d24; border-radius: 7px; background: #3a3016; color: #f2c15b;
+  font: normal 600 11px/1.5 system-ui, Cantarell, sans-serif; letter-spacing: normal;
+  text-decoration: none; text-transform: none; white-space: nowrap; vertical-align: baseline;
+  cursor: help; -webkit-user-select: none; user-select: none;
+}
+.insecure-address { font-family: var(--mono); font-size: 13px; word-break: break-all; user-select: text;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; }

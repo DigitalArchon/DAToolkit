@@ -727,7 +727,8 @@ function loadApp({ token = "tok", port = 48599 } = {}) {
     Terminal: FakeTerminal,
     FitAddon: { FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } activate() {} dispose() {} } },
     marked: { parse: (text) => `<p>${escText(String(text))}</p>` },
-    DOMPurify: { addHook() {}, sanitize: (html) => html },
+    // the hooks app.js adds are kept, so a test can run one on an element of its own
+    DOMPurify: { hooks: {}, addHook(name, fn) { (this.hooks[name] ||= []).push(fn); }, sanitize: (html) => html },
     Guacamole: { Client: unavailable("Guacamole"), Keyboard: unavailable("Guacamole"), Mouse: unavailable("Guacamole"),
       WebSocketTunnel: unavailable("Guacamole"), StringReader: unavailable("Guacamole"), StringWriter: unavailable("Guacamole") },
   });
