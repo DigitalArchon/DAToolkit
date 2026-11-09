@@ -4,6 +4,7 @@ import asyncio
 import base64
 from io import BytesIO
 
+import httpx
 import pytest
 from PIL import Image
 
@@ -118,6 +119,54 @@ async def test_a_model_that_refuses_an_effort_and_names_those_it_takes_is_sent_t
     assert engine._learn_unsupported(prov, "m", {"reasoning_effort": "low"},
                                      RuntimeError("reasoning_effort: extra inputs are not permitted")) == "reasoning_effort"
     assert "reasoning_effort" not in engine._params(prov, "m")
+
+
+class Listing:
+    """NanoGPT's detailed model list, out of reach (HTTP 503) while `down`."""
+
+    def __init__(self):
+        self.down, self.asked = True, 0
+
+    def handler(self, request):
+        self.asked += 1
+        if self.down:
+            return httpx.Response(503, text="down for maintenance")
+        return httpx.Response(200, json={"data": DETAILED})
+
+
+async def test_a_model_list_that_couldnt_be_read_is_asked_for_again_not_kept(env):  # noqa: F811
+    """It was kept, empty, for the session: no effort sent, vision and prices unknown, until the
+    model list was refreshed by hand."""
+    from datoolkit import creds
+    from datoolkit.engine import CAPS_RETRY_SECONDS
+
+    engine, fake, events = env
+    listing = Listing()
+    engine._caps_http = httpx.AsyncClient(transport=httpx.MockTransport(listing.handler))
+    prov = Provider("NanoGPT", "https://nano-gpt.com/api/v1")
+    engine.cfg.providers.append(prov)
+    creds.set_secret("provider", "NanoGPT", "sk-test")
+    assert await engine._load_caps(prov) is False and "NanoGPT" not in engine._caps
+    assert any("Could not read model capabilities from NanoGPT" in e.get("text", "") for e in events)
+    assert await engine._load_caps(prov) is False and listing.asked == 1      # not again at once
+    engine.new_case("l", "open")
+    engine.cfg.settings.generation = {"temperature": 0.3, "reasoning_effort": "medium"}
+    engine.select_model("NanoGPT", "z-ai/glm-5.3")
+    fake.responses += [sse(({"role": "assistant", "content": "one"}, "stop")),
+                       sse(({"role": "assistant", "content": "two"}, "stop"))]
+    engine.send("hi")
+    await wait_turn(engine)
+    assert listing.asked == 1 and "reasoning_effort" not in fake.requests[-1]
+    listing.down = False
+    engine._caps_failed["NanoGPT"] -= CAPS_RETRY_SECONDS + 1                 # half a minute on
+    engine.send("again")
+    await wait_turn(engine)
+    assert listing.asked == 2 and engine.caps_for(prov, "z-ai/glm-5.3")["efforts"] == ["low", "high", "max"]
+    assert fake.requests[-1]["reasoning_effort"] == "low"                      # this very request
+    # a list read once is kept when a later read fails
+    listing.down = True
+    assert await engine._load_caps(prov) is True and engine.caps_for(prov, "z-ai/glm-5.3")
+    await engine._caps_http.aclose()
 
 
 def test_private_mode_body_carries_settings_and_glm_thinking_follows_effort():

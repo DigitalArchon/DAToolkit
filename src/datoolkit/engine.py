@@ -52,6 +52,8 @@ from .sessions.askpass import AskpassBridge
 from .sessions.manager import RdpSession, SessionManager, WindowSession
 from .sessions.ssh import ssh_argv, target_label
 
+# A provider's model list that couldn't be read is asked for again this long after, at the soonest.
+CAPS_RETRY_SECONDS = 30
 # A TEE model's attestation is made again, with a fresh nonce, before a send once it is this old,
 # on a clock that runs on while the machine sleeps (dcap.since_boot; time.monotonic stops).
 TEE_REATTEST_SECONDS = 900
@@ -326,6 +328,7 @@ class Engine:
         self._img_names: dict[str, str] = {}   # sha256 of image bytes -> case file name
         self._caps: dict[str, dict[str, dict]] = {}   # provider -> model id -> capabilities
         self._caps_tasks: dict[str, asyncio.Task] = {}
+        self._caps_failed: dict[str, float] = {}      # provider -> when its list last couldn't be read
         self._caps_http = None                         # httpx client override (tests)
         self._anthropic_http = None                    # the Anthropic SDK's http client override (tests)
         self._hosts: dict[tuple[str, str], tuple[float, dict]] = {}   # NanoGPT's hosts of a model, when fetched
@@ -571,7 +574,7 @@ class Engine:
         if old and old.base_url != base_url:
             # attested, or learned, at the old address: requests now go to the new one
             self._forget_tee(name)
-            for cache in (self._caps, self._enclaves):
+            for cache in (self._caps, self._caps_failed, self._enclaves):
                 cache.pop(name, None)
         if old:
             self.cfg.providers[self.cfg.providers.index(old)] = prov
@@ -597,7 +600,7 @@ class Engine:
         if s.search_via == old:
             s.search_via = new
         self.cfg.recent_models = [new + r[len(old):] if r.startswith(old + "|") else r for r in self.cfg.recent_models]
-        for cache in (self._caps, self._enclaves, self._research_auto, self._models):
+        for cache in (self._caps, self._caps_failed, self._enclaves, self._research_auto, self._models):
             if old in cache:
                 cache[new] = cache.pop(old)
         for cache in (self._unsupported, self._efforts, self._learned_ctx, self._hosts):
@@ -714,24 +717,39 @@ class Engine:
 
     # ---------------------------------------------------------------- capabilities, vision, generation
 
-    async def _load_caps(self, prov: Provider) -> None:
+    async def _load_caps(self, prov: Provider) -> bool:
+        """Read the provider's model list (what each model does, its window, its prices); whether
+        there's one now. A provider that lists nothing of that is known as that. One whose list
+        can't be read now isn't taken for an empty list for the session (no effort sent, vision
+        and prices unknown until the model list was refreshed): it's asked for again, when a
+        model is chosen or a message sent, CAPS_RETRY_SECONDS later at the soonest, and a list
+        read before is kept meanwhile. From DA Vibe Manager's models.py (Nov 2026)."""
         kind = self._kind(prov)
         if kind not in ("nanogpt", "openrouter", "anthropic"):
             self._caps.setdefault(prov.name, {})
-            return
+            return True
+        if time.monotonic() - self._caps_failed.get(prov.name, float("-inf")) < CAPS_RETRY_SECONDS:
+            return prov.name in self._caps
+        caps, error = {}, "it listed no models"
         try:
             self._secure(prov)
             key = self._get_secret_safe("provider", prov.name)
             if kind == "anthropic":
-                self._caps[prov.name] = (await AnthropicClient(prov.base_url, key, http_client=self._anthropic_http)
-                                         .list_models_detailed())[1]
+                caps = (await AnthropicClient(prov.base_url, key, http_client=self._anthropic_http)
+                        .list_models_detailed())[1]
             elif kind == "openrouter":
-                self._caps[prov.name] = await capabilities.fetch_openrouter(prov.base_url, key, http=self._caps_http)
+                caps = await capabilities.fetch_openrouter(prov.base_url, key, http=self._caps_http)
             else:
-                self._caps[prov.name] = await capabilities.fetch_nanogpt(prov.base_url, key, http=self._caps_http)
-        except Exception as e:  # noqa: BLE001 - models still work; vision is just unknown
-            self._caps.setdefault(prov.name, {})
-            self.emit("toast", level="error", text=f"Could not read model capabilities from {prov.name}: {e}")
+                caps = await capabilities.fetch_nanogpt(prov.base_url, key, http=self._caps_http)
+        except Exception as e:  # noqa: BLE001 - models still work; vision is just unknown for now
+            caps, error = {}, e
+        if not caps:
+            self._caps_failed[prov.name] = time.monotonic()
+            self.emit("toast", level="error", text=f"Could not read model capabilities from {prov.name}: {error}")
+            return prov.name in self._caps               # an earlier list is kept
+        self._caps[prov.name] = caps
+        self._caps_failed.pop(prov.name, None)
+        return True
 
     def _schedule_caps(self, prov: Provider) -> None:
         if prov.name in self._caps or (prov.name in self._caps_tasks and not self._caps_tasks[prov.name].done()):
@@ -741,6 +759,17 @@ class Engine:
             await self._load_caps(prov)
             self._changed()
         self._caps_tasks[prov.name] = asyncio.create_task(run())
+
+    async def _caps_now(self, prov: Provider) -> None:
+        """Before a request, the provider's model list when it isn't known: one being read is
+        waited for, one that couldn't be read is asked for again (CAPS_RETRY_SECONDS apart)."""
+        if prov.name in self._caps:
+            return
+        task = self._caps_tasks.get(prov.name)
+        if task and not task.done():
+            await asyncio.shield(task)
+        elif await self._load_caps(prov):
+            self._changed()
 
     def caps_for(self, prov: Provider, model: str) -> dict | None:
         return capabilities.lookup(self._caps.get(prov.name, {}), model)
@@ -3381,6 +3410,7 @@ class Engine:
         try:
             if similar_for:
                 await self._find_similar(similar_for)
+            await self._caps_now(prov)
             client = self._client(prov, model)
             if isinstance(client, PrivateModeClient):
                 # nothing is sent until the enclave has proved itself, and not to a model NanoGPT

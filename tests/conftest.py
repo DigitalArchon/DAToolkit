@@ -46,6 +46,23 @@ def no_real_containers(monkeypatch):
     monkeypatch.setattr(guac, "container_runtime", lambda which=guac._which: None if which is guac._which else real(which))
 
 
+@pytest.fixture(autouse=True)
+def no_real_model_lists(monkeypatch):
+    """Never fetch a provider's real model list (NanoGPT's, OpenRouter's): the engine asks for it
+    when a model is chosen or a message sent. A test that wants one passes its own client
+    (engine._caps_http); without one, the list is out of reach."""
+    import httpx
+
+    from datoolkit.llm import capabilities
+
+    for name in ("fetch_nanogpt", "fetch_openrouter"):
+        async def offline(base_url, api_key, http=None, _real=getattr(capabilities, name)):
+            if http is None:
+                raise httpx.ConnectError("no network in tests")
+            return await _real(base_url, api_key, http=http)
+        monkeypatch.setattr(capabilities, name, offline)
+
+
 @pytest.fixture
 def suspend(monkeypatch):
     """`suspend(hours)`: the machine sleeps that long. The boot clock (dcap.since_boot) moves on;
