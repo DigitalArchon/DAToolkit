@@ -35,7 +35,18 @@ DISRUPTIVE: list[tuple[re.Pattern, str]] = [
                 r"|\bnvme\s+(format|sanitize)\b|\bhdparm\b.*--security-erase", _I), "erases a disk or volume"),
     # each dd on the line by itself: a later `of=/dev/null` excuses only its own dd
     (re.compile(r"\bdd\b[^;&|\n]*\bof=(?!/dev/null\b)", _I), "dd writing to a target"),
-    (re.compile(r"\bfind\b[^;&|\n]*\s-delete\b"), "find -delete"),
+    # deleting by other means than rm -r: what's found, a list of files, what's not in the copy, a
+    # repository's work, settings, a session, every process
+    (re.compile(r"\bfind\b[^;&|\n]*\s-(?:delete\b|(?:exec|execdir|ok|okdir)\s+(?:\S*/)?(?:rm|shred|unlink)\b)"),
+     "find deleting what it finds"),
+    (re.compile(r"\bxargs\s+(-\S+\s+)*(\S*/)?(rm|shred|unlink)\b"), "deleting a list of files"),
+    (re.compile(r"\brsync\b[^;&|\n]*\s--(?:delete|remove-source-files)"), "rsync deleting files"),
+    (re.compile(r"\bgit\b[^;&|\n]*\s(?:reset\s+--hard|clean\s+-[a-z]*f)"), "a repository's changes discarded"),
+    (re.compile(r"\bdconf\s+reset\s+-f\b"), "desktop settings reset"),
+    (re.compile(r"\bflatpak\s+(?:uninstall|remove)\b[^;&|\n]*\s--all\b"), "every Flatpak removed"),
+    (re.compile(CMD + r"unlink\s", re.M), "file destroyed"),
+    (re.compile(r"\bloginctl\s+(?:terminate|kill)-(?:session|user)\b"), "session ended"),
+    (re.compile(r"\bkill\s+-(?:KILL|9|TERM|15)?\s*-1\b"), "every process killed"),
     (re.compile(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)"), "write to block device"),
     (re.compile(CMD + r"(shutdown|reboot|poweroff|halt)\b", re.M), "shutdown/reboot"),
     (re.compile(CMD + r"(telinit|init)\s+[06]\b", re.M), "runlevel change"),
@@ -102,7 +113,10 @@ DISRUPTIVE: list[tuple[re.Pattern, str]] = [
 ]
 
 MODIFYING: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\b(apt|apt-get|yum|dnf|zypper|pacman|snap|flatpak)\s+(\S+\s+)*(install|remove|purge|upgrade|dist-upgrade|update|autoremove|-S|-R)\b"), "package change"),
+    # options may come before the verb, and the match stays within one command: no ; | & or quotes
+    # (with quoted text blanked first, _SHELL_SYNTAX: `echo "not a flatpak/snap install"` installs nothing)
+    (re.compile(r"\b(apt|apt-get|yum|dnf|zypper|pacman|snap|flatpak)\s+(?:[^\s;|&'\"()]+\s+){0,10}"
+                r"(install|remove|purge|upgrade|dist-upgrade|update|autoremove|-S|-R)\b"), "package change"),
     (re.compile(r"\bpip3?\s+(install|uninstall)\b"), "package change"),
     (re.compile(r"\bsystemctl\s+(\S+\s+)*(start|enable|reload|daemon-reload|edit|set-property)\b"), "service change"),
     (re.compile(r"\bsed\s+(-[a-z]*\s+)*-i"), "in-place file edit"),
@@ -249,7 +263,7 @@ def session_impact(command: str, session_kind: str) -> str | None:
 # Rules about shell syntax (redirects, where a command starts). Inside quotes these characters
 # are data, e.g. `awk 'NR>1{...}'`, so they are matched against the command with quoted text blanked.
 _SHELL_SYNTAX = {r[0] for r in DISRUPTIVE + MODIFYING if r[0].pattern.startswith(CMD)} | {
-    r[0] for r in MODIFYING if r[1] == "output redirect to file"}
+    r[0] for r in MODIFYING if r[1] in ("output redirect to file", "package change")}
 
 # Commands that hand quoted text to a shell again: their quotes hide nothing.
 _REPARSES = re.compile(

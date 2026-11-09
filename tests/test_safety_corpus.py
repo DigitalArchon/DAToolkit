@@ -1,9 +1,13 @@
 """Table-driven corpora for the local safety rules: commands that must be labelled at least
 modifying or disruptive (the model's own label can't lower them), ordinary ones that must stay
-read-only, the session cuts, output that must be redacted or left alone, sensitive reads, and
-invisible text. Each row is a form seen in real work that a rule once missed or mangled."""
+read-only, the session cuts, output that must be redacted or left alone, sensitive reads,
+invisible text and images. Each row is a form seen in real work that a rule once missed or mangled.
+
+DA Toolkit and DA Vibe Manager keep one copy of safety/ between them, and this file with it: the
+same rows run in both, only the package imported differs."""
 
 import io
+import time
 
 import pytest
 from PIL import Image
@@ -44,6 +48,18 @@ from datoolkit.safety.sensitive import sensitive
     ("cryptsetup luksErase /dev/sdb1", "disruptive"), ("nvme format /dev/nvme0n1", "disruptive"),
     ("hdparm --security-erase pw /dev/sda", "disruptive"), ("bomb(){ bomb|bomb& };bomb", "disruptive"),
     ("sudo ifconfig eth0 down", "modifying"), ("route del default", "modifying"), ("dhclient -r eth0", "modifying"),
+    # deleting by other means than rm -r (DA Vibe Manager's): what's found, a list, what's not in the copy,
+    # a repository's work, settings, a session, every process
+    ("find ~ -name '*.jpg' -delete", "disruptive"), ("find . -type f -exec rm {} +", "disruptive"),
+    ("find ~ -exec shred {} +", "disruptive"), ("ls ~/x | xargs rm -f", "disruptive"), ("xargs rm < list", "disruptive"),
+    ("rsync -a --delete /tmp/empty/ ~/", "disruptive"), ("rsync -a --remove-source-files ~/Pictures/ /mnt/x/", "disruptive"),
+    ("git -C ~/p reset --hard", "disruptive"), ("git clean -fdx", "disruptive"), ("dconf reset -f /", "disruptive"),
+    ("flatpak uninstall --all -y", "disruptive"), ("unlink ~/.bashrc", "disruptive"), ("sudo unlink /etc/nginx/sites-enabled/x", "disruptive"),
+    ("loginctl terminate-session 2", "disruptive"), ("kill -KILL -1", "disruptive"), ("kill -TERM -1", "disruptive"),
+    # a package manager wherever it is run, options before the verb
+    ("sudo apt -y install mpv", "modifying"), ("flatpak --user install flathub io.mpv.Mpv", "modifying"),
+    ("docker exec web apt-get install -y curl", "modifying"), ("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y x", "modifying"),
+    ("nice -n 19 apt-get upgrade", "modifying"),
 ])
 def test_commands_are_labelled_at_least(command, level):
     assert LEVELS.index(classify(command)[0]) >= LEVELS.index(level), classify(command)
@@ -56,6 +72,10 @@ def test_commands_are_labelled_at_least(command, level):
     "awk 'NR>1{print $1}' /etc/passwd", "systemctl status sshd", "show ip ssh", "show line vty 0 4", "echo $((6*7))",
     "grep -r 'format c:' notes.txt", "ssh web02 uptime", 'for f in *.log; do wc -l "$f"; done', "time ls",
     "xargs -n1 echo < list", "Format-Table -AutoSize", "git log --format='%h %s'", "env | grep PATH",
+    # a package manager that only lists, or a word in a message (DA Vibe Manager's)
+    'which mpv && (dpkg -l mpv | tail -1 || flatpak list | grep -i mpv || echo "not a flatpak/snap install")',
+    "apt list --installed | grep -c install", "echo 'apt install x'", "grep unlink src/x.c", "man unlink",
+    "git status", "git diff --stat", "rsync --version", "flatpak list --all", "find . -name x -print",
 ])
 def test_ordinary_commands_stay_read_only(command):
     assert classify(command) == ("read_only", [])
@@ -70,6 +90,67 @@ def test_ways_to_cut_an_ssh_session(command):
 @pytest.mark.parametrize("command", ["show ip ssh", "show line vty 0 4", "do show ip ssh"])
 def test_looking_at_vty_settings_cuts_nothing(command):
     assert session_impact(command, "ssh") is None
+
+
+FFPROBE_AWK = (
+    'ffprobe -v error -select_streams v:0 -show_entries frame_tags=pts_time -show_entries packet=pts_time,size '
+    '-of csv "/mnt/nas/TV Series/House/Season 2/House (2004) - S02E01 - Acceptance (1080p BluRay x265 Panda).mkv" '
+    "| awk -F, 'NR>1{t=$2+0; s=$3+0; b=int(t/10); bytes[b]+=s} END{for(i=0;i<=b;i++) "
+    "printf \"%d s: %.1f Mbps\\n\", i*10, bytes[i]*8/10/1000000}'")
+
+
+@pytest.mark.parametrize("cmd", [
+    FFPROBE_AWK, "awk '$2 > max {max=$2} END{print max}' sizes.txt", "awk 'NR>=2' f.csv",
+    "ps aux | awk '$3 > 50.0 {print $2; touch=1}'", "grep -E 'a>b|c; reboot' notes.txt",
+    "echo 'x > y'", 'jq ".items[] | select(.size > 10)" data.json',
+])
+def test_quoted_shell_characters_are_data(cmd):
+    assert classify(cmd) == ("read_only", [])
+
+
+@pytest.mark.parametrize("cmd", [
+    "awk '{print > \"out.txt\"}' f", "awk '{print $1 >> \"/tmp/x\"}' f", "awk 'BEGIN{system(\"rm x\")}'",
+    "awk '{print | \"sort > /tmp/s\"}' f", "awk 'BEGIN{\"date\" | getline d}'",
+    "bash -c 'echo hi > /etc/x'", "sudo sh -c \"echo 1 > /proc/sys/net/ipv4/ip_forward\"", "ssh h 'cat a > b'",
+    "echo x > f", "grep 'a' f > out", "echo \"$(touch /tmp/x)\" > /dev/null; ls 'a' > b",
+    "find / -name x -exec sh -c 'cat {} > /tmp/y' \\;", "awk 'NR>1' f > out.txt", "echo 'unterminated > x",
+])
+def test_writes_still_modifying(cmd):
+    assert classify(cmd)[0] == "modifying"
+
+
+def test_quoted_command_still_disruptive_when_a_shell_runs_it():
+    assert classify("ssh host 'sudo reboot'")[0] == "disruptive"
+    assert classify("bash -c 'ls; shutdown -h now'")[0] == "disruptive"
+
+
+@pytest.mark.parametrize("cmd", [
+    "dd if=/mnt/nas/film.mkv of=/dev/null bs=4M count=250 iflag=direct status=progress",
+    "mount -t cifs; grep -i cifs /etc/fstab", "mount | grep nas", "mount", "grep mount /etc/fstab",
+    "sudo iptables -S", "iptables -nvL INPUT --line-numbers", "sudo iptables-save | head -50",
+    "(sudo iptables -S 2>/dev/null; sudo nft list ruleset 2>/dev/null) | head -200", "nft -a list ruleset",
+    "ufw status verbose", "firewall-cmd --list-all", "firewall-cmd --permanent --zone=public --list-ports",
+    "net share | Select-String 'SYSVOL|NETLOGON'", "net user bob /domain", "net localgroup Administrators",
+    "net start | findstr /i spool", "net user",
+    "$p = New-Object Net.NetworkInformation.Ping; $p.Send('10.0.0.1', 300)", "Start-Sleep -Seconds 5; Get-Date",
+    "Get-Service W32Time | Format-List; Clear-Host",
+])
+def test_listing_forms_are_read_only(cmd):
+    assert classify(cmd) == ("read_only", [])
+
+
+@pytest.mark.parametrize("cmd,level", [
+    ("dd if=/dev/zero of=/tmp/x bs=1M count=10", "disruptive"), ("sudo mount -t cifs //nas/media /mnt/nas -o ro", "modifying"),
+    ("mount -o remount,rw /", "modifying"), ("sudo mount -a", "modifying"), ("iptables -A INPUT -p tcp --dport 22 -j ACCEPT", "modifying"),
+    ("iptables -S; iptables -I INPUT 1 -s 1.2.3.4 -j ACCEPT", "modifying"), ("nft add rule inet filter input tcp dport 22 accept", "modifying"),
+    ("ufw allow 22/tcp", "modifying"), ("firewall-cmd --permanent --add-port=8443/tcp", "modifying"), ("firewall-cmd --reload", "modifying"),
+    ("net user bob P4ssw0rd /add", "modifying"), ("net user bob *", "modifying"), ("net localgroup Administrators bob /add", "modifying"),
+    ("net share docs=C:\\docs /grant:everyone,read", "modifying"), ("net start spooler", "modifying"),
+    ("New-Item -ItemType File C:\\x.txt", "modifying"), ("Start-Service Spooler", "modifying"),
+    ("New-Object -ComObject Shell.Application; Set-ItemProperty HKLM:\\x -Name y -Value 1", "modifying"),
+])
+def test_changing_forms_still_raise(cmd, level):
+    assert classify(cmd)[0] == level
 
 
 @pytest.mark.parametrize("text,secret", [
@@ -107,13 +188,15 @@ def test_diagnostic_output_is_not_mangled(text, kept):
 @pytest.mark.parametrize("command", [
     "sudo cat /etc/NetworkManager/system-connections/Home.nmconnection", "type C:\\Users\\bob\\.ssh\\id_rsa",
     "Get-Content C:\\ProgramData\\ssh\\ssh_host_ed25519_key", "type %USERPROFILE%\\.aws\\credentials",
-    "find / -name id_rsa -exec cat {} \\;", "type C:\\app\\.env"])
+    "find / -name id_rsa -exec cat {} \\;", "type C:\\app\\.env",
+])
 def test_reading_these_is_flagged_sensitive(command):
     assert sensitive(command)
 
 
 @pytest.mark.parametrize("command", ["find / -name id_rsa", "find / -name id_rsa -exec ls -l {} \\;",
-                                     "ls /etc/NetworkManager/system-connections/", "dir C:\\Users\\bob\\.ssh"])
+                                     "ls /etc/NetworkManager/system-connections/", "dir C:\\Users\\bob\\.ssh",
+                                     ])
 def test_looking_at_names_only_is_not(command):
     assert sensitive(command) == []
 
