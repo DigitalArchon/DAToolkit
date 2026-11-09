@@ -540,3 +540,28 @@ async def test_what_no_one_can_see_is_taken_out_of_a_query_before_it_is_redacted
     await wait_turn(engine)
     sent = fs.calls[0]["body"]["query"]
     assert "AbCdEfGhIjKl" not in sent and "​" not in sent and "[REDACTED]" in sent
+
+
+@pytest.mark.parametrize("query", ["nginx 502 upstream 10.20.30.40 timeout", "jsmith@acme-corp.com mail bounces",
+                                   "aa:bb:cc:dd:ee:ff vendor lookup", "AA-BB-CC-DD-EE-FF dhcp lease", "nginx 502 10.20.30​.40"])
+async def test_auto_mode_asks_first_when_a_query_names_a_computer(search, query):
+    # redaction takes secrets out; who and where a computer is went through (DA Private Coder refuses it)
+    engine, fake, _, fs = search
+    engine.cfg.settings.search_mode = "auto"
+    setup(engine)
+    fake.responses += [search_call(query), sse(({"role": "assistant", "content": "OK."}, "stop"))]
+    engine.send("x")
+    await wait_for(lambda: engine._search_reqs)
+    assert fs.calls == []                                   # nothing leaves unasked
+    rec = engine.snapshot()["search_requests"][0]
+    assert rec["status"] == "awaiting" and rec["reason"].startswith("Asked first: the query names ")
+    engine.answer_search(next(iter(engine._search_reqs)), False)
+    await wait_turn(engine)
+    assert fs.calls == []
+
+
+def test_identity_reads_a_query_as_the_search_provider_does():
+    from datoolkit.safety import identity
+    assert identity.check("１０.２０.３０.４０ ping", known=[]) == ["10.20.30.40"]
+    assert identity.check("bob​s-laptop wifi", known=["bobs-laptop"]) == ["bobs-laptop"]
+    assert identity.check("OPNsense 25.1 OpenVPN 1.1.1.1 dns", known=["bobs-laptop"]) == []

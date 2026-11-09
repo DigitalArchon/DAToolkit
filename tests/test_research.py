@@ -559,3 +559,28 @@ async def test_the_agents_queries_and_page_addresses_are_read_without_what_no_on
     assert "AbCdEfGhIjKl" not in sent and "​" not in sent
     assert engine._page_url_problem("https://example.org/?k=sk-%E2%80%8B" + "proj-AbCdEfGhIjKlMnOpQrStUvWx0123") \
         == "the URL contains what looks like a secret"
+
+
+async def test_a_brief_that_names_a_computer_is_asked_about_even_in_auto_mode(rs):
+    engine, fake, _, web = rs
+    engine.cfg.settings.search_mode = "auto"
+    setup(engine)
+    fake.responses += [research_call("Sophos at 10.1.2.3, v21: DHCP relay"), say("OK.")]
+    engine.send("x")
+    await wait_for(lambda: engine._research_reqs)
+    assert web.calls == [] and engine.snapshot()["research_requests"][0]["reason"].startswith("Asked first: it names 10.1.2.3")
+    engine.answer_research(next(iter(engine._research_reqs)), False)
+    await wait_turn(engine)
+
+
+async def test_the_agent_may_not_search_with_who_or_where_a_computer_is(rs):
+    engine, fake, _, web = rs
+    engine.cfg.settings.search_mode = "auto"
+    setup(engine)
+    fake.responses += [research_call(), multi_tool_stream([("web_search", {"query": "Sophos 10.1.2.3 relay"})], text=""),
+                       say("## Answer\nNone."), say("ok")]
+    engine.send("x")
+    await wait_turn(engine)
+    assert not [c for c in web.calls if c[0] == "/api/web"]
+    agent_reply = [m for m in fake.requests[2]["messages"] if m["role"] == "tool"][-1]["content"]
+    assert "not searched: the query names 10.1.2.3" in agent_reply

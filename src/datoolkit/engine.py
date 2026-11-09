@@ -42,6 +42,7 @@ from .llm.dcap import since_boot
 from .llm import params as params_mod
 from .llm.training import TrainingClient, is_training_url
 from .queue import Queue
+from .safety import identity
 from .safety import images as images_mod
 from .safety import watch as watch_mod
 from .safety.hidden import visible
@@ -2855,7 +2856,12 @@ class Engine:
         if turn["searches"] > MAX_SEARCHES_PER_TURN:
             update(status="unavailable", error="search limit for this turn")
             return f"Limit of {MAX_SEARCHES_PER_TURN} searches per turn reached; work with what you have."
-        if status["mode"] == "ask":
+        # who or where a computer is (an e-mail, a MAC or private IP address, this computer's names) isn't
+        # redacted, being the point of some searches: it's shown to the technician first, whatever the mode
+        named = identity.check(query)
+        if named:
+            rec["reason"] = ("Asked first: the query names " + ", ".join(named[:5]) + ". " + rec["reason"]).strip()
+        if status["mode"] == "ask" or named:
             fut = asyncio.get_running_loop().create_future()
             self._search_reqs[rec["id"]] = (fut, rec)
             update(status="awaiting")
@@ -3046,7 +3052,10 @@ class Engine:
             return f"Research is not available: {e}"
         rec["model"] = model
         known = task == "research" or url in self._known_urls(entry)
-        if status["mode"] == "ask" or not known:
+        named = identity.check(brief if task == "research" else unquote_plus(url))     # as a search's query
+        if named:
+            rec["reason"] = ("Asked first: it names " + ", ".join(named[:5]) + ". " + rec["reason"]).strip()
+        if status["mode"] == "ask" or not known or named:
             fut = asyncio.get_running_loop().create_future()
             self._research_reqs[rec["id"]] = (fut, rec)
             update(status="awaiting", unknown_url=not known)
@@ -3119,7 +3128,12 @@ class Engine:
             raise UserError(f"No API key stored for {sprov.name}.")
 
         async def search_(query: str, use: str = "answer", **narrow) -> dict:
-            return await self._run_search(redact(" ".join(visible(query).split()))[0], use, **narrow)
+            query = " ".join(visible(query).split())
+            named = identity.check(query)                # no one is asked about the agent's own searches
+            if named:
+                raise UserError("not searched: the query names " + ", ".join(named[:5]) + " (who or where a computer "
+                                "is), which mustn't leave in a search. Search again with general words.")
+            return await self._run_search(redact(query)[0], use, **narrow)
 
         async def fetch_(urls: list[str]) -> dict:
             try:
