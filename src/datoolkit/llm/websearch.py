@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .netguard import key_problem, shown
+
 # Best first, from DA-Assistant's measurement (2026-09-21: three queries, eight results each, scored
 # by primary sources): perplexity 10/16 with ~1,300 clean characters per result; valyu 5/16, clean
 # prose; tavily 4/16, thin; kagi good links but ~150-210 characters of text, and the dearest at $0.025;
@@ -83,6 +85,9 @@ async def web_search(base_url: str, api_key: str, query: str, provider: str = "p
     limits the search to those domains (Kagi, Valyu and Linkup keep to them, Perplexity mostly,
     Brave not at all); `after`/`before` (YYYY-MM-DD) to pages from that window, where the provider
     allows it (not Kagi: then the search runs without them and dates_dropped says so)."""
+    problem = key_problem(api_key, "NanoGPT")             # one no header can carry: nothing is sent with it
+    if problem:
+        raise SearchError(problem)
     body = {"query": query, "provider": provider, "outputType": "searchResults", "excludeDomains": list(UNREADABLE)}
     if provider == "kagi":
         body["kagiSource"] = "search"   # full web search; "web" and "news" are enrichment tiers that find little
@@ -98,7 +103,7 @@ async def web_search(base_url: str, api_key: str, query: str, provider: str = "p
     try:
         r = await client.post(search_url(base_url), json=body, headers={"Authorization": f"Bearer {api_key}"})
     except httpx.HTTPError as e:
-        raise SearchError(f"could not reach {search_url(base_url)}: {e}") from e
+        raise SearchError(f"could not reach {shown(search_url(base_url))}: {e}") from e
     finally:
         if http is None:
             await client.aclose()

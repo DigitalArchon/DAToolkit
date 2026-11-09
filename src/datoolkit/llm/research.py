@@ -27,6 +27,7 @@ import httpx
 from ..config import private_dir
 from ..safety.hidden import visible
 from ..safety.inject import suspicious
+from .netguard import key_problem, shown
 from .websearch import clean_date, clean_sites, format_for_model
 
 SCRAPE_TIMEOUT = 120
@@ -68,13 +69,16 @@ def looks_blocked(page: dict) -> bool:
 async def scrape(base_url: str, api_key: str, urls: list[str], stealth: bool = False,
                  http: httpx.AsyncClient | None = None) -> dict:
     """{"pages": [{"url", "success", "title", "markdown", "error"}], "cost": float | None}"""
+    problem = key_problem(api_key, "NanoGPT")             # one no header can carry: nothing is sent with it
+    if problem:
+        raise ScrapeError(problem)
     body = {"urls": urls[:MAX_URLS_PER_SCRAPE], "stealthMode": stealth}
     client = http or httpx.AsyncClient(timeout=SCRAPE_TIMEOUT)
     try:
         r = await client.post(scrape_url(base_url), json=body, headers={"Authorization": f"Bearer {api_key}"},
                               timeout=SCRAPE_TIMEOUT)
     except httpx.HTTPError as e:
-        raise ScrapeError(f"could not reach {scrape_url(base_url)}: {e}") from e
+        raise ScrapeError(f"could not reach {shown(scrape_url(base_url))}: {e}") from e
     finally:
         if http is None:
             await client.aclose()

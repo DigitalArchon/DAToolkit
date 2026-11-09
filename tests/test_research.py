@@ -584,3 +584,23 @@ async def test_the_agent_may_not_search_with_who_or_where_a_computer_is(rs):
     assert not [c for c in web.calls if c[0] == "/api/web"]
     agent_reply = [m for m in fake.requests[2]["messages"] if m["role"] == "tool"][-1]["content"]
     assert "not searched: the query names 10.1.2.3" in agent_reply
+
+
+async def test_a_key_no_header_can_carry_sends_no_search_or_scrape_and_is_never_quoted():
+    """As the engine's other requests (Engine._provider_key): a key pasted with a line break or a
+    zero-width space is refused before anything is sent, in words that say nothing of it (h11 would
+    have quoted the header whole)."""
+    import httpx
+    import pytest
+
+    from datoolkit.llm import research, websearch
+    seen = []
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: seen.append(r) or httpx.Response(200, json={})))
+    for key in ("sk-secret123\n", "sk-sec​ret123"):
+        with pytest.raises(websearch.SearchError) as caught:
+            await websearch.web_search("https://nano-gpt.com/api/v1", key, "nginx 502", http=http)
+        assert "sk-sec" not in str(caught.value)
+        with pytest.raises(research.ScrapeError) as caught:
+            await research.scrape("https://nano-gpt.com/api/v1", key, ["https://example.com/"], http=http)
+        assert "sk-sec" not in str(caught.value)
+    assert not seen
