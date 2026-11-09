@@ -276,3 +276,26 @@ def test_every_locked_package_carries_a_hash_and_the_lock_tools_are_named_exactl
     locked = (PACKAGING / "lock-requirements.lock").read_text()
     for pin in ("pip==26.2.2", "pip-tools==7.6.1"):
         assert re.search(rf"(?m)^{re.escape(pin)}$", wanted) and re.search(rf"(?m)^{re.escape(pin)} ", locked), pin
+
+
+def test_the_lock_meets_every_floor_pyproject_sets():
+    """A relock keeps what the lock already pins, so a floor raised for an advisory (certifi's
+    root, brotli's out-of-bounds write, pyasn1's and dnspython's denials of service) is only as
+    good as the relock that followed it. (DA Assistant's, 9b1d6b8.)"""
+    import tomllib
+
+    def version(text):
+        return tuple(int(part) for part in re.findall(r"\d+", text))
+
+    def key(name):
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    deps = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    floors = [(found.group(1), found.group(2)) for dep in deps
+              if (found := re.match(r"([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?>=([0-9.]+)", dep))]
+    assert ("pyasn1", "0.6.5") in floors and ("dnspython", "2.9.0") in floors
+    locked = {key(name): pin for name, pin in
+              re.findall(r"(?m)^([\w.-]+)(?:\[[^\]]*\])?==(\S+) \\$", (PACKAGING / "requirements.lock").read_text())}
+    for name, floor in floors:
+        assert key(name) in locked, f"{name} is not in the AppImage lock"
+        assert version(locked[key(name)]) >= version(floor), f"{name}=={locked[key(name)]}, under its floor {floor}"
