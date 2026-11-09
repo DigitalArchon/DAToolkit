@@ -138,7 +138,9 @@ def offers_private_mode(base_url: str) -> bool:
 
 
 def relay_url(base_url: str) -> str:
-    parsed = urlparse(base_url)
+    """The relay's address, without a user name and password written into the provider's:
+    NanoGPT's relay takes the API key, never those."""
+    parsed = urlparse(netguard.without_password(base_url))
     return f"{parsed.scheme}://{parsed.netloc}{RELAY_PATH}"
 
 
@@ -329,7 +331,7 @@ class PrivateModeClient:
                  transport_factory: Callable[[str], httpx.AsyncBaseTransport] = sealing_transport,
                  plain_http: httpx.AsyncClient | None = None):
         if not offers_private_mode(base_url):
-            raise PrivateModeError(f"{base_url} does not offer NanoGPT Private Mode")
+            raise PrivateModeError(f"{netguard.shown(base_url)} does not offer NanoGPT Private Mode")
         if not api_key:
             raise PrivateModeError("An API key is required for Private Mode.")
         self.enclave = enclave

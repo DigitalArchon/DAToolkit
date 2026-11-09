@@ -1,4 +1,8 @@
-"""Persistent configuration. Never holds secrets - those live in the OS keyring (see creds.py)."""
+"""Persistent configuration. Never holds secrets - those live in the OS keyring (see creds.py).
+
+So is a password written into a provider's address (https://user:pass@host/v1, a model server
+behind one): config.toml has the address without it, and the keyring the address as typed
+(ADDRESS_SECRET). Until Nov 2026 the whole address went into the file, password and all."""
 
 from __future__ import annotations
 
@@ -12,9 +16,16 @@ from pathlib import Path
 
 import tomli_w
 
-from .llm import params
+from . import creds
+from .llm import netguard, params
 
 NANOGPT_BASE_URL = "https://nano-gpt.com/api/v1"
+# A provider's address written with a user name and password: config.toml has it without them
+# (netguard.without_password), and the keyring has it as typed, under this kind and the
+# provider's name, as its API key is kept. Put back together when the config is read, and only
+# while the file's address is that one less its password, so a password goes to no address but
+# the one it was typed for, whatever the file is edited to. (DA Assistant's config.py, 729a415.)
+ADDRESS_SECRET = "base_url_with_password"
 
 
 def config_dir() -> Path:
@@ -208,7 +219,44 @@ def load(path: Path | None = None) -> Config:
     if not path.exists():
         return Config()
     with path.open("rb") as f:
-        return from_dict(tomllib.load(f))
+        cfg = from_dict(tomllib.load(f))
+    if _with_passwords(cfg):
+        try:
+            save(cfg, path)             # the keyring has what the file had: out of the file
+        except OSError:
+            pass                        # read-only: it goes at the next save
+    return cfg
+
+
+def _stored_address(name: str) -> str:
+    try:
+        return creds.get_secret(ADDRESS_SECRET, name) or ""
+    except Exception:  # noqa: BLE001 - locked or unavailable: the file's address is what there is
+        return ""
+
+
+def _with_passwords(cfg: Config) -> bool:
+    """Each provider's address as it was typed: the file's, with the password the keyring has for
+    it. One the file has a password in (an older version wrote it, or it was edited in by hand)
+    is moved to the keyring, and out of the file once it is there; where the keyring can't take
+    it, it stays in the file and is used, as before. True if one moved."""
+    moved = False
+    for prov in cfg.providers:
+        written = prov.base_url or ""
+        if not written:
+            continue
+        stored = _stored_address(prov.name)
+        if netguard.without_password(written) != written:
+            if stored != written:
+                try:
+                    creds.set_secret(ADDRESS_SECRET, prov.name, written)
+                    stored = written
+                except Exception:  # noqa: BLE001 - no keyring to take it: it stays in the file
+                    pass
+            moved = moved or stored == written
+        elif stored and netguard.without_password(stored) == written:
+            prov.base_url = stored
+    return moved
 
 
 def load_or_set_aside(path: Path | None = None) -> tuple[Config, str]:
@@ -228,6 +276,18 @@ def load_or_set_aside(path: Path | None = None) -> tuple[Config, str]:
                           f"is kept as {kept}: fix it, quit, and put it back as {path.name}.")
 
 
+def _without_passwords(data: dict) -> dict:
+    """The config as written: each provider's address without the password the keyring holds
+    for it. One the keyring doesn't hold (no keyring could take it when an older version's file
+    was read) stays as it was, as an API key would: dropping it would lose it."""
+    for prov in data.get("providers", []):
+        full = prov.get("base_url") or ""
+        bare = netguard.without_password(full)
+        if bare != full and _stored_address(prov.get("name", "")) == full:
+            prov["base_url"] = bare
+    return data
+
+
 def save(cfg: Config, path: Path | None = None) -> None:
     path = path or config_dir() / "config.toml"
     private_dir(path.parent)
@@ -236,7 +296,7 @@ def save(cfg: Config, path: Path | None = None) -> None:
     tmp = Path(name)
     try:
         with os.fdopen(fd, "wb") as f:
-            tomli_w.dump(cfg.to_dict(), f)
+            tomli_w.dump(_without_passwords(cfg.to_dict()), f)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)

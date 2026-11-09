@@ -40,6 +40,13 @@ LOCAL_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "169.254.0.0/16", "fe80::/10", "fc00::/7"))
 # a name a resolver reads as written: "%", "/" and the like in a name could reach DNS as another
 _DNS_NAME = re.compile(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*")
+# what no address has in it, and Python's parser and httpx's may not agree on (DA Assistant's)
+UNSAFE = re.compile(r"[\\\s\x00-\x1f\x7f]")
+# Everything of a text up to its last "@" before a query or a fragment, the scheme and "//"
+# aside: where an address that can't be read may have a user name and password.
+_UP_TO_AT = re.compile(r"^((?:[^:/?#]+:)?//)?[^?#]*@")
+# An address anywhere in a text (an error quoting one), to the next space or quote
+_ADDRESS_IN_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://[^\s'\"<>]+", re.I)
 
 
 class InsecureURL(ValueError):
@@ -72,23 +79,72 @@ def is_local(host: str | None) -> bool:
 
 
 def problem(url: str | None) -> str | None:
-    """Why `url` may not be used, or None when it may."""
+    """Why `url` may not be used, or None when it may. The address is named as shown() has it,
+    without a password written into it: these are shown in Settings and the chat, and logged."""
     text = (url or "").strip()
     if not text:
         return "No address given."
-    parsed = urlparse(text)
-    scheme = parsed.scheme.lower()
+    if UNSAFE.search(text):
+        return (f"Not a web address: {shown(text)!r}. An address has no spaces, backslashes or control "
+                f"characters in it.")
     try:
+        parsed = urlparse(text)
+        scheme = parsed.scheme.lower()
         host = parsed.hostname
-    except ValueError:
-        host = None
+        parsed.port                 # raises on a port no address can have
+    except ValueError:              # "http://[fd00::5", half typed
+        return f"Not a web address: {shown(text)!r}."
     if scheme not in ("http", "https") or not host:
-        return f"Not a web address: {text!r}. It must start with https://"
+        return f"Not a web address: {shown(text)!r}. It must start with https://"
     if scheme == "https" or is_local(host):
         return None
-    return (f"{text} is not https, so the API key and everything sent with it would cross the "
+    return (f"{shown(text)} is not https, so the API key and everything sent with it would cross the "
             f"network unencrypted. Use an https:// address. Plain http is accepted only for this "
             f"machine and its local network (localhost, 10.x, 172.16-31.x, 192.168.x, .local).")
+
+
+def shown(url) -> str:
+    """`url` as it may be shown or logged: without the user name and password an address may
+    carry (https://alice:secret@host/v1). For any text at all, and never raising: what is said of
+    an address that can't be used names it too. One that can't be read as an address (half
+    typed, without a scheme, with a port no address can have) says nothing certain of where its
+    host begins, so all it has up to its last "@" goes. (DA Assistant's netguard.shown.)"""
+    text = str(url or "")
+    try:
+        parsed = urlparse(text)
+        parsed.port                 # raises on a port that is not a number
+    except ValueError:
+        parsed = None
+    if parsed is None or not parsed.netloc:
+        return _UP_TO_AT.sub(r"\1…@", text, count=1)
+    if "@" not in parsed.netloc:
+        return text
+    return parsed._replace(netloc="…@" + parsed.netloc.rsplit("@", 1)[1]).geturl()
+
+
+def without_password(url) -> str:
+    """`url` with the user name and password written into it taken out, as shown() does, but
+    leaving an address where they were: what config.toml keeps of an address whose password is
+    in the keyring. Text with neither is returned as it is. (DA Assistant's.)"""
+    text = str(url or "")
+    if "@" not in text:
+        return text
+    try:
+        parsed = urlparse(text)
+        parsed.port                 # raises on a port that is not a number
+    except ValueError:
+        parsed = None
+    if parsed is None or not parsed.netloc:
+        return _UP_TO_AT.sub(r"\1", text, count=1)
+    if "@" not in parsed.netloc:
+        return text
+    return parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[1]).geturl()
+
+
+def scrubbed(text) -> str:
+    """`text` with every address in it as shown() has it, without a user name and password: for
+    an error that quotes an address it was given (httpx's say "for url '...'", password and all)."""
+    return _ADDRESS_IN_TEXT.sub(lambda found: shown(found.group(0)), str(text or ""))
 
 
 def check(url: str | None) -> str:

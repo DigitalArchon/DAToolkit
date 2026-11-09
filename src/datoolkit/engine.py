@@ -204,10 +204,11 @@ def _elide(text: str, limit: int) -> str:
 
 class UserError(Exception):
     """An error to show the technician as-is, with any commands that fix it (shown so they can
-    be copied, not as a passing notice)."""
+    be copied, not as a passing notice). Never with the password of an address it quotes (one
+    written into a provider's address, an error of httpx's that names it): netguard.scrubbed."""
 
     def __init__(self, message: str, commands: list[str] | None = None):
-        super().__init__(message)
+        super().__init__(netguard.scrubbed(message))
         self.commands = list(commands or [])
 
 
@@ -378,6 +379,8 @@ class Engine:
             pass
 
     def emit(self, type_: str, **data) -> None:
+        if type_ == "toast":            # an error quoting an address never shows its password
+            data["text"] = netguard.scrubbed(data.get("text", ""))
         self._emit({"type": type_, **data})
 
     def log(self, event: str, **data) -> None:
@@ -422,6 +425,7 @@ class Engine:
         c = self.cfg.to_dict()
         for p in c["providers"]:
             p["has_key"] = self._has_secret("provider", p["name"])
+            p["shown_url"] = netguard.shown(p["base_url"])      # for lists: the form's field has it whole
             info = providers_mod.describe(p["base_url"], p.get("api", ""))
             p.update(kind=info["kind"], kind_label=info["kind_label"], api_effective=info["api"])
         for h, host in zip(c["hosts"], self.cfg.hosts):
@@ -443,7 +447,7 @@ class Engine:
         kind = info["kind"]
         tier = detect_tier(model, prov.base_url, prov.tier_overrides) if model else ""
         routable = bool(model) and routing.routable(kind, model, tier)
-        return {"provider": prov.name, "base_url": prov.base_url, **info, "model": model, "routable": routable,
+        return {"provider": prov.name, "base_url": netguard.shown(prov.base_url), **info, "model": model, "routable": routable,
                 "route": prov.routes.get(model) if routable else None,
                 "route_label": routing.label(kind, prov.routes.get(model)) if routable else ""}
 
@@ -563,6 +567,16 @@ class Engine:
         if clash and clash is not old:
             raise UserError(f"There is already a provider called {name}. The same address can be added again with "
                             f"another API key, under a name of its own (such as \"{name} PAYG\" beside \"{name} Sub Only\").")
+        # A password written into the address is kept in the keyring, as the key is, and config.toml
+        # has the address without it (config.ADDRESS_SECRET); one taken out of the address in
+        # Settings is taken out of the keyring. An address that didn't change is left alone: one
+        # whose password couldn't be read at start (a locked keyring) would lose it.
+        if netguard.without_password(base_url) != base_url:
+            creds.set_secret(config_mod.ADDRESS_SECRET, name, base_url)
+        elif old is None or old.base_url != base_url or original_name != name:
+            creds.delete_secret(config_mod.ADDRESS_SECRET, name)
+        if original_name and original_name != name:
+            creds.delete_secret(config_mod.ADDRESS_SECRET, original_name)
         if original_name and original_name != name and old:
             self._provider_renamed(original_name, name)
             key = creds.get_secret("provider", original_name)
@@ -617,6 +631,7 @@ class Engine:
         self._forget_tee(name)
         self.cfg.providers = [p for p in self.cfg.providers if p.name != name]
         creds.delete_secret("provider", name)
+        creds.delete_secret(config_mod.ADDRESS_SECRET, name)
         self._secrets_changed()
         if self.cfg.active_provider == name:
             self.cfg.active_provider = self.cfg.providers[0].name if self.cfg.providers else ""
@@ -673,7 +688,7 @@ class Engine:
                     ids = await client.list_models()
             except Exception as e:  # noqa: BLE001
                 if not (isinstance(client, AnthropicClient) and not client.official and prov.default_model):
-                    raise UserError(f"Could not list models from {prov.base_url}: {e}") from e
+                    raise UserError(f"Could not list models from {netguard.shown(prov.base_url)}: {e}") from e
                 # an Anthropic-compatible endpoint without a model list: its default model is the one
                 ids = [prov.default_model]
             if offers_private_mode(prov.base_url):
@@ -976,8 +991,9 @@ class Engine:
             result = self._retired(e)
             self.log("private_model_retired", role=slot, model=model, offered=e.offered)
         except Exception as e:  # noqa: BLE001
-            result = {"status": "failed", "model": model, "error": str(e), **({"kind": "tee"} if tee else {})}
-            self.log("enclave_attestation_failed", role=slot, model=model, error=str(e))
+            said = netguard.scrubbed(str(e))
+            result = {"status": "failed", "model": model, "error": said, **({"kind": "tee"} if tee else {})}
+            self.log("enclave_attestation_failed", role=slot, model=model, error=said)
         if slot in ("chat", "helper"):
             self._set_attestation(slot, result)
             self._changed()
@@ -3560,7 +3576,7 @@ class Engine:
             if (self.attestation or {}).get("model") == model:
                 self.attestation = retired
         except Exception as e:  # noqa: BLE001
-            error = f"not sent: {e}" if isinstance(e, UserError) else f"{type(e).__name__}: {e}"
+            error = f"not sent: {e}" if isinstance(e, UserError) else netguard.scrubbed(f"{type(e).__name__}: {e}")
             self._log_failed_round(in_flight, model, tier, entry, error)
             overflowed = not isinstance(e, UserError) and self._overflow_message(prov, model, e)
             if overflowed:

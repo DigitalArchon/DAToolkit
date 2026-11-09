@@ -3141,7 +3141,7 @@ function openSettings(tab = "providers") {
     const list = h("div", { class: "list" }, provs.length ? provs.map((p) => h("div", { class: "list-item" },
       h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: `prov-chip k-${p.kind}`, title: p.api_effective === "anthropic" ? "Anthropic Messages API" : "OpenAI-compatible API" }, p.kind_label),
         p.name === activeName ? h("span", { class: "small", title: "The chat model is on this provider" }, " · in use") : null,
-        "  ", h("span", { class: "muted small" }, p.base_url)),
+        "  ", h("span", { class: "muted small" }, p.shown_url || p.base_url)),
       h("span", { class: "small " + (p.has_key ? "" : "muted") }, p.has_key ? "🔑 key in keyring" : "no key"),
       h("button", { class: "small", onclick: () => pane.replaceChildren(providerForm(p)) }, "Edit"),
       h("button", { class: "small danger", onclick: async () => {

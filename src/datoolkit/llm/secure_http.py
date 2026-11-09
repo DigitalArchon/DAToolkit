@@ -68,12 +68,12 @@ def refuse_insecure_redirect(response: httpx.Response) -> None:
     source = str(response.request.url)
     if not is_secure(target):
         raise ProviderError(
-            f"{response.request.url.host} redirected to {target[:120]!r}; refusing to "
+            f"{response.request.url.host} redirected to {netguard.shown(target)[:120]!r}; refusing to "
             "send over an insecure connection"
         )
     if netguard.is_local(_host(target)) and not netguard.is_local(_host(source)):
         raise ProviderError(
-            f"{response.request.url.host} redirected to {target[:120]!r}, a server on this "
+            f"{response.request.url.host} redirected to {netguard.shown(target)[:120]!r}, a server on this "
             "computer or your local network; refused"
         )
 
