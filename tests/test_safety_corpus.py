@@ -206,6 +206,10 @@ def test_diagnostic_output_is_not_mangled(text, kept):
     "sudo cat /etc/NetworkManager/system-connections/Home.nmconnection", "type C:\\Users\\bob\\.ssh\\id_rsa",
     "Get-Content C:\\ProgramData\\ssh\\ssh_host_ed25519_key", "type %USERPROFILE%\\.aws\\credentials",
     "find / -name id_rsa -exec cat {} \\;", "type C:\\app\\.env",
+    # a person's own computer (DA Vibe Manager's): keys, browsers, saved passwords, mail, messages, files
+    "cat ~/.ssh/config", "cat ~/.ssh/known_hosts", "type C:\\Users\\bob\\.ssh\\config", "cat ~/.gnupg/private-keys-v1.d/x.key",
+    "sqlite3 ~/.mozilla/firefox/abc.default/places.sqlite", "cat ~/.local/share/keyrings/login.keyring",
+    "grep -r invoice ~/.thunderbird/", "cat ~/.config/Signal/config.json", "ls ~/Documents", "find ~ -name '*.pdf'",
 ])
 def test_reading_these_is_flagged_sensitive(command):
     assert sensitive(command)
@@ -213,6 +217,7 @@ def test_reading_these_is_flagged_sensitive(command):
 
 @pytest.mark.parametrize("command", ["find / -name id_rsa", "find / -name id_rsa -exec ls -l {} \\;",
                                      "ls /etc/NetworkManager/system-connections/", "dir C:\\Users\\bob\\.ssh",
+                                     "cat ~/.ssh/id_rsa.pub", "cat ~/.ssh/*.pub", "ls -la ~/.ssh/",
                                      ])
 def test_looking_at_names_only_is_not(command):
     assert sensitive(command) == []

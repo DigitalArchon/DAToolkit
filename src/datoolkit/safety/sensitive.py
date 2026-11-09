@@ -32,6 +32,27 @@ SECRET_FILES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?:\.bash_history|\.zsh_history|\.mysql_history|\.psql_history|ConsoleHost_history\.txt)\b", _I),
      "reads shell history (often holds typed passwords)"),
     (re.compile(r"\bntds\.dit\b|\\config\\(?:SAM|SECURITY)\b", _I), "reads Windows credential stores"),
+    # a person's own computer: their keys, browsers, passwords, mail and messages
+    # (not a public key, which is made to be given out)
+    (re.compile(r"\.ssh[\\/](?!\S*\.pub(?![\w.-]))"), "reads your SSH settings or keys"),
+    (re.compile(r"\.gnupg[\\/]"), "reads your encryption keys"),
+    (re.compile(r"\.mozilla/|\.config/(?:google-chrome|chromium|BraveSoftware|vivaldi|opera|microsoft-edge)|"
+                r"snap/(?:firefox|chromium)/|\.var/app/(?:org\.mozilla|com\.google\.Chrome|org\.chromium|com\.brave)", _I),
+     "reads your browser data (history, saved passwords, cookies)"),
+    (re.compile(r"\.local/share/keyrings|\.password-store|kwalletd|\.local/share/kwalletd"), "reads your saved passwords"),
+    (re.compile(r"\.thunderbird/|\.local/share/evolution|\.config/evolution|\.var/app/org\.mozilla\.Thunderbird", _I),
+     "reads your email"),
+    (re.compile(r"\.config/(?:Signal|discord|Element|Slack|teams|WhatsApp)|\.var/app/(?:org\.signal|com\.discordapp|"
+                r"im\.riot|org\.telegram)|TelegramDesktop", _I),
+     "reads your messages"),
+]
+
+# Places whose very file names are private: flagged even for listings and searches.
+PERSONAL_PLACES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"(?:~|\$HOME|\$\{HOME\}|/home/[\w.-]+)/(?:Documents|Desktop|Pictures|Photos|Videos|Music|Downloads|"
+                r"Dokumente|Bilder|Schreibtisch)\b"), "looks at your personal files"),
+    (re.compile(r"\b(?:find|tree|du|locate|grep\s+-\w*r\w*|ls\s+-\w*R\w*)\s+(?:~|\$HOME|\$\{HOME\}|/home(?:/[\w.-]+)?)/?(?=\s|$)"),
+     "looks through your whole home folder"),
 ]
 
 # First words that only look at names, sizes or metadata, never contents.
@@ -116,7 +137,7 @@ def sensitive(command: str) -> list[str]:
         for pat, why in SECRET_FILES:
             if why not in out and pat.search(seg):
                 out.append(why)
-    for pat, why in RULES:
+    for pat, why in PERSONAL_PLACES + RULES:
         if why not in out and pat.search(command):
             out.append(why)
     return out
