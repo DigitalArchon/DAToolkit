@@ -87,6 +87,29 @@ async def test_pairing_over_tls(env, tmp_path, monkeypatch):  # noqa: F811
     assert not app.state.companion.running
 
 
+async def test_every_answer_of_the_phones_carries_the_security_headers(env, tmp_path):  # noqa: F811
+    """Nothing was said of caching, sniffing, referrers or framing: a page or a reply could be kept by
+    the phone's browser, framed by another page, or read as another type. (SealedLore's set.)"""
+    from datoolkit.server.app import COMPANION_HEADERS
+
+    engine, _, _ = env
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    app.state.companion.token = "phone"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:
+        for method, path, headers in (("GET", "/pair", {}), ("GET", "/companion", {}), ("GET", "/static/companion.js", {}),
+                                      ("GET", "/api/companion/state", {"x-token": "phone"}),
+                                      ("GET", "/api/companion/state", {}),            # refused by the gate
+                                      ("GET", "/nowhere", {}), ("GET", "/", {})):
+            r = await c.request(method, path, headers=headers)
+            for name, value in COMPANION_HEADERS.items():
+                assert r.headers.get(name) == value, (path, name)
+    csp = COMPANION_HEADERS["Content-Security-Policy"]
+    assert "frame-ancestors 'none'" in csp and COMPANION_HEADERS["X-Frame-Options"] == "DENY"
+    assert COMPANION_HEADERS["Cache-Control"] == "no-store" and COMPANION_HEADERS["X-Content-Type-Options"] == "nosniff"
+    assert COMPANION_HEADERS["Referrer-Policy"] == "no-referrer"
+
+
 async def test_busy_port_is_a_clear_error(env, tmp_path):  # noqa: F811
     engine, _, _ = env
     server = companion.CompanionServer(FastAPI(), tmp_path)

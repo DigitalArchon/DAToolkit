@@ -80,6 +80,46 @@ class CompanionGate(TokenGate):
         self.companion = companion
 
 
+# On every response of the phone's (errors and refusals included): nothing of it is kept, sniffed,
+# sent on as a referrer or framed by another page, and its pages load nothing from anywhere else.
+# The pages' own meta policies stay; a header's is the only place frame-ancestors is honoured.
+# (SealedLore's phone/http.py, Nov 2026.)
+COMPANION_HEADERS = {
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'none'; "
+                                "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "geolocation=(), microphone=(), interest-cohort=()",
+}
+
+
+class SecurityHeaders:
+    """ASGI middleware: `headers` set on every HTTP response, whoever made it."""
+
+    def __init__(self, app, headers: dict[str, str]):
+        self.app = app
+        self.headers = [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in headers.items()]
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        names = {name for name, _ in self.headers}
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                kept = [(k, v) for k, v in message.get("headers", []) if k.lower() not in names]
+                message = {**message, "headers": kept + self.headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
 def window_limit(path: str) -> int:
     """The largest body the window's app takes at `path`."""
     return MAX_SAVED_FILE if path == "/api/desktop/save" else MAX_WINDOW_BODY
@@ -116,6 +156,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     comp = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     companion = CompanionServer(comp, companion_dir or config.config_dir())
     comp.add_middleware(CompanionGate, companion=companion)
+    comp.add_middleware(SecurityHeaders, headers=COMPANION_HEADERS)       # outermost: on the gate's refusals too
     app.state.companion = companion
 
     def check(t: str | None) -> bool:
