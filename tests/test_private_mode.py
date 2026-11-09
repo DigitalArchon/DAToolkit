@@ -9,13 +9,15 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from datoolkit.llm.client import LLMClient, detect_tier
+from datoolkit.llm.client import LLMClient, detect_tier, is_private_mode
 from datoolkit.llm import private_mode as _private_mode
 from datoolkit.llm.private_mode import (
     Attestation, Enclave, ModelRetired, PrivateModeClient, PrivateModeError, Verified, _NonEmptyBodyTransport,
     offered, offers_private_mode, relay_said, relay_url, sealing_transport)
 from datoolkit.llm.prompts import PROPOSE_TOOL
 from datoolkit.safety.hidden import visible
+
+from test_engine import env  # noqa: F401
 
 BASE = "https://nano-gpt.com/api/v1"
 RELAY = "https://nano-gpt.com/api/v1/private/tinfoil"
@@ -108,6 +110,37 @@ def test_detection():
     assert relay_url(BASE) == RELAY
     assert detect_tier("private/glm-5-3", BASE) == "e2ee"
     assert detect_tier("TEE/glm-5.3", BASE) == "tee"
+
+
+async def test_a_private_model_however_written_is_only_ever_sent_sealed():
+    """"Private/…" or " private/…" was a model like any other: sent in the clear by the plain
+    client, put in the Standard tier, and routable."""
+    from datoolkit.llm import routing, tee
+
+    for model in ("Private/GLM-5-3", " private/glm-5-3", "PRIVATE/kimi-k3 "):
+        assert is_private_mode(model) and tee.is_private_mode(model) and tee.is_tee(model)
+        assert detect_tier(model, BASE) == "e2ee"
+        assert not routing.routable("nanogpt", model, "standard")
+        with pytest.raises(RuntimeError, match="only ever sent sealed"):
+            async for _ in LLMClient(BASE, "sk").stream(model, []):
+                pass
+        with pytest.raises(RuntimeError, match="only ever sent sealed"):
+            await LLMClient(BASE, "sk").complete(model, [])
+    assert tee.is_tee(" Tee/glm-5.3") and detect_tier(" TEE/glm-5.3", BASE) == "tee"
+    assert not is_private_mode("privateer/x") and not is_private_mode("") and not is_private_mode(None)
+
+
+async def test_the_engine_gives_a_private_model_however_written_the_sealing_client(env):  # noqa: F811
+    from datoolkit.config import Provider
+    from datoolkit.engine import Engine
+
+    from datoolkit import creds
+
+    engine, _, _ = env
+    prov = Provider("NanoGPT", BASE)
+    creds.set_secret("provider", "NanoGPT", "sk-test")
+    assert isinstance(Engine._client(engine, prov, " Private/GLM-5-3"), PrivateModeClient)
+    assert not isinstance(Engine._client(engine, prov, "z-ai/glm-5.3"), PrivateModeClient)
 
 
 async def test_sealed_request_protocol():

@@ -31,8 +31,9 @@ SENSITIVITY_TIERS = {
 
 
 def is_private_mode(model_id: str) -> bool:
-    """NanoGPT Private Mode: only ever sent sealed (llm/private_mode.py)."""
-    return model_id.startswith("private/")
+    """NanoGPT Private Mode: only ever sent sealed (llm/private_mode.py). However it's written
+    ("Private/…", a space before it): when in doubt, sealed."""
+    return str(model_id or "").strip().lower().startswith("private/")
 
 
 def is_local_url(base_url: str) -> bool:
@@ -64,7 +65,7 @@ def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None =
         return "local"
     if is_private_mode(model_id):
         return "e2ee"
-    parts = model_id.lower().split("/")
+    parts = model_id.strip().lower().split("/")
     if "tee" in parts or parts[0] == "phala" or model_id.lower().endswith(("-tee", ":tee")):
         return "tee"
     return "standard"

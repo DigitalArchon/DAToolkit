@@ -27,6 +27,8 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from .client import is_private_mode
+
 PRIORITIES = ("latency", "speed", "price", "host")
 LABELS = {"": "Provider's own routing", "latency": "Fastest first word", "speed": "Fastest overall",
           "price": "Cheapest", "host": "A specific host"}
@@ -43,7 +45,7 @@ PRICE_TOLERANCE = 0.2
 
 
 def routable(kind: str, model: str, tier: str) -> bool:
-    return kind in ROUTABLE_KINDS and bool(model) and not model.startswith("private/") and tier == "standard"
+    return kind in ROUTABLE_KINDS and bool(model) and not is_private_mode(model) and tier == "standard"
 
 
 def validate(route: dict | None, kind: str) -> dict | None:
