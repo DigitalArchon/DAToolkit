@@ -98,26 +98,6 @@ def _json(value: Any) -> Any:
     return value
 
 
-def _jwt_claims(value: Any) -> list[dict[str, Any]]:
-    """Every JWT's payload found in a JSON value, in order."""
-    found: list[dict[str, Any]] = []
-    if isinstance(value, str) and value.count(".") == 2:
-        part = value.split(".")[1]
-        try:
-            claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
-        except (ValueError, binascii.Error):
-            return found
-        if isinstance(claims, dict):
-            found.append(claims)
-    elif isinstance(value, list):
-        for item in value:
-            found.extend(_jwt_claims(item))
-    elif isinstance(value, dict):
-        for item in value.values():
-            found.extend(_jwt_claims(item))
-    return found
-
-
 def is_tee(model: str) -> bool:
     """A model that runs in a trusted execution environment: nano-gpt's
     `TEE/*` (attested and signed) or `private/*` (end-to-end encrypted)."""
@@ -511,11 +491,8 @@ class TeeClient:
         try:
             gpus = self._nvidia(answer, nonce, self._client)
         except nras.KeysUnavailable as exc:
-            # Unchecked, but a verdict that says no is still believed.
-            if not any(
-                claims.get("x-nvidia-overall-att-result") is True for claims in _jwt_claims(answer)
-            ):
-                raise TeeRefused(f"NVIDIA rejected {self.model}'s GPU evidence") from exc
+            # Only NVIDIA's signature is unchecked: nras.verify held its verdict to our nonce,
+            # its issuer, its validity and every GPU's result before saying so.
             check.fall_short("NVIDIA signature unchecked")
             check.note(f"{exc}, so NVIDIA's verdict is unchecked")
         except nras.NrasError as exc:

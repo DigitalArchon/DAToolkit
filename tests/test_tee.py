@@ -5,6 +5,7 @@ Ported from SealedLore (its tests/test_tee.py), with the same fixture (tests/dat
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import struct
 from datetime import UTC, datetime
@@ -196,8 +197,8 @@ def test_nvidia_unreachable_is_partial_and_nvidia_rejecting_is_refused():
     assert keys.shortfalls == ["NVIDIA signature unchecked"]
     with pytest.raises(TeeRefused, match="NVIDIA rejected"):
         client_for(nras_status=400).attest()
-    with pytest.raises(TeeRefused, match="NVIDIA rejected"):
-        client_for(gpu=False, nvidia=nras.KeysUnavailable("no keys")).attest()
+    # A verdict that says no without NVIDIA's keys: nras.verify refuses it (see
+    # test_with_nvidias_keys_out_of_reach_only_the_signature_goes_unchecked).
     with pytest.raises(TeeRefused, match="GPU attestation failed: .*nonce"):
         client_for(nvidia=nras.NrasError("not made for this request's nonce")).attest()
 
@@ -218,10 +219,12 @@ def test_a_reply_signed_by_another_key_fails():
 FIXTURE = Path(__file__).parent / "data" / "tee_attestation.json"
 
 
-def fixture_server(fixture: dict, *, intel_status: int = 200, jwks: dict | None = None):
+def fixture_server(fixture: dict, *, intel_status: int = 200, jwks: dict | None = None,
+                   extra: dict | None = None):
     """One real attestation, captured live from TEE/glm-5.3-flash with Intel's
     collateral and NVIDIA's answer and keys exactly as they came (in the author's
-    AI-Assistant app, Sept 26 2026; the same nano-gpt endpoint)."""
+    AI-Assistant app, Sept 26 2026; the same nano-gpt endpoint). `extra`: more of
+    nano-gpt's fields in the attestation."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url.copy_with(query=None))
@@ -235,6 +238,7 @@ def fixture_server(fixture: dict, *, intel_status: int = 200, jwks: dict | None 
                     "nvidia_payload": json.dumps(
                         {"nonce": fixture["nonce"], "evidence_list": [{"evidence": "e"}]}
                     ),
+                    **(extra or {}),
                 },
             )
         if url == NRAS_URL:
@@ -396,19 +400,24 @@ def test_a_key_nvidia_does_not_publish_is_refused(real):
         nvidia(real, jwks={"keys": []})
 
 
-def test_the_whole_real_attestation_is_full(real, monkeypatch):
+def _real_client(real, monkeypatch, *, nvidia_now: float | None = None, **server) -> TeeClient:
+    """The real attestation, asked for with the nonce it was made for, checked by the real
+    verifiers at the time it was captured (NVIDIA's: at `nvidia_now`, when given)."""
     import datoolkit.llm.tee as tee_module
 
-    client = TeeClient(
+    monkeypatch.setattr(tee_module.secrets, "token_hex", lambda _n: real["nonce"])
+    return TeeClient(
         "https://nano-gpt.com/api/v1",
         "k",
         real["model"],
-        client=fixture_server(real),
+        client=fixture_server(real, **server),
         intel=lambda raw, s: dcap.verify(raw, s, now=at(real)),
-        nvidia=lambda a, n, s: nras.verify(a, n, s, now=real["now"]),
+        nvidia=lambda a, n, s: nras.verify(a, n, s, now=nvidia_now or real["now"]),
     )
-    monkeypatch.setattr(tee_module.secrets, "token_hex", lambda _n: real["nonce"])
-    result = client.attest()
+
+
+def test_the_whole_real_attestation_is_full(real, monkeypatch):
+    result = _real_client(real, monkeypatch).attest()
     assert result.level == "full" and not result.shortfalls
     assert (result.gpus, result.tcb_status) == (8, "UpToDate")
     assert result.signing_address == real["signing_address"]
@@ -844,4 +853,97 @@ def test_intels_collateral_is_fetched_again_after_a_sleep(boot_clock):
         assert len(gets) == 2
     finally:
         dcap._cache.clear()
+        session.close()
+
+
+# --- NVIDIA's verdict when its keys can't be had (Nov 2026) -------------------------------
+# From DA Vibe Manager's and DA Assistant's tests of the same module (nras.py is kept alike).
+
+
+def _claims(token: str) -> dict:
+    part = token.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+
+
+def _with_claims(token: str, claims: dict) -> str:
+    header, _claims_part, signature = token.split(".")
+    part = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"{header}.{part}.{signature}"
+
+
+def test_without_nvidias_keys_all_but_its_signature_is_still_checked(real, monkeypatch):
+    """NVIDIA's keys can't be fetched: its verdict counts as unchecked (a partial attestation),
+    but evidence made for another nonce (replayed) or out of date is refused all the same; and
+    keys fetched before, though more than an hour ago, are still NVIDIA's: used when no fresh
+    ones can be had."""
+    monkeypatch.setitem(nras._keys, "keys", {})
+    with pytest.raises(nras.KeysUnavailable):
+        nvidia(real, jwks={"no": "keys"})
+    with pytest.raises(nras.NrasError, match="nonce"):
+        nvidia(real, jwks={"no": "keys"}, nonce="00" * 32)
+    with pytest.raises(nras.NrasError, match="validity window"):
+        nvidia(real, jwks={"no": "keys"}, now=real["now"] + 86400)
+    assert nvidia(real) == 8                                           # fetched now: kept
+    monkeypatch.setitem(nras._keys, "at", dcap.since_boot() - nras.KEYS_TTL - 1)   # long ago
+    assert nvidia(real, jwks={"no": "keys"}) == 8
+    label, overall = real["nras_answer"][0]
+    forged = overall[:-4] + ("AAAA" if not overall.endswith("AAAA") else "BBBB")
+    with pytest.raises(nras.NrasError, match="signature does not verify"):
+        nvidia(real, answer=[[label, forged], real["nras_answer"][1]], jwks={"no": "keys"})
+
+
+def test_without_nvidias_keys_each_gpus_verdict_is_still_checked(real):
+    """Only the overall verdict, its nonce and its time were read without NVIDIA's keys: a GPU
+    whose token said its measurements failed, or a GPU token the overall one doesn't list,
+    passed as "unchecked"."""
+    label, overall = real["nras_answer"][0]
+    tokens = dict(real["nras_answer"][1])
+    gpu = sorted(tokens)[0]
+    tokens[gpu] = _with_claims(tokens[gpu], {**_claims(tokens[gpu]), "measres": "fail"})
+    # Listed by the overall verdict, digest and all: only the signatures, which go unchecked
+    # here, would have told it from NVIDIA's.
+    verdict = _claims(overall)
+    verdict["submods"][gpu][1][1] = hashlib.sha256(tokens[gpu].encode()).hexdigest()
+    forged = [[label, _with_claims(overall, verdict)], tokens]
+    with pytest.raises(nras.NrasError, match=f"{gpu} failing: measurements"):
+        nvidia(real, answer=forged, jwks={"no": "keys"})
+    unlisted = [[label, overall], dict(tokens)]
+    with pytest.raises(nras.NrasError, match="not the one NVIDIA's verdict lists"):
+        nvidia(real, answer=unlisted, jwks={"no": "keys"})
+
+
+def test_with_nvidias_keys_out_of_reach_only_the_signature_goes_unchecked(real, monkeypatch):
+    """The whole real attestation, NVIDIA's keys out of reach: partial, the signature named; a
+    verdict that says no, or one out of date, is refused, as it would be with them."""
+    result = _real_client(real, monkeypatch, jwks={"no": "keys"}).attest()
+    assert result.level == "partial" and result.shortfalls == ["NVIDIA signature unchecked"]
+    assert "so NVIDIA's verdict is unchecked" in result.detail
+    nras._keys.update(at=0.0, keys={})
+    with pytest.raises(TeeRefused, match="GPU attestation failed: a token is outside its validity"):
+        _real_client(real, monkeypatch, jwks={"no": "keys"}, nvidia_now=real["now"] + 86400).attest()
+    label, overall = real["nras_answer"][0]
+    rejected = {**real, "nras_answer": [[label, _with_claims(overall, {
+        **_claims(overall), "x-nvidia-overall-att-result": False})], real["nras_answer"][1]]}
+    with pytest.raises(TeeRefused, match="GPU attestation failed: NVIDIA rejected the GPU evidence"):
+        _real_client(rejected, monkeypatch, jwks={"no": "keys"}).attest()
+
+
+def test_nvidias_keys_are_fetched_again_after_a_sleep(boot_clock):
+    nras._keys.update(at=0.0, keys={})
+    gets = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gets.append(request)
+        return httpx.Response(200, json={"keys": [{"kid": "k1"}]})
+
+    session = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        for _ in range(2):
+            assert "k1" in nras._jwks(session)
+        assert len(gets) == 1
+        boot_clock(2)
+        nras._jwks(session)
+        assert len(gets) == 2
+    finally:
+        nras._keys.update(at=0.0, keys={})
         session.close()
