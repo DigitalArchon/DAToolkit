@@ -570,21 +570,29 @@ class Engine:
         if clash and clash is not old:
             raise UserError(f"There is already a provider called {name}. The same address can be added again with "
                             f"another API key, under a name of its own (such as \"{name} PAYG\" beside \"{name} Sub Only\").")
-        # A password written into the address is kept in the keyring, as the key is, and config.toml
-        # has the address without it (config.ADDRESS_SECRET); one taken out of the address in
-        # Settings is taken out of the keyring. An address that didn't change is left alone: one
-        # whose password couldn't be read at start (a locked keyring) would lose it.
-        if netguard.without_password(base_url) != base_url:
-            creds.set_secret(config_mod.ADDRESS_SECRET, name, base_url)
-        elif old is None or old.base_url != base_url or original_name != name:
+        renamed = bool(original_name and original_name != name and old)
+        # The secrets first, so a keyring that refuses them (none that keeps them safe, or a locked
+        # one: creds.KeyringUnavailable) leaves everything as it was. A password written into the
+        # address is kept in the keyring, as the key is, and config.toml has the address without
+        # it (config.ADDRESS_SECRET).
+        with_password = netguard.without_password(base_url) != base_url
+        try:
+            if with_password:
+                creds.set_secret(config_mod.ADDRESS_SECRET, name, base_url)
+            key = api_key or (creds.get_secret("provider", original_name) if renamed else None)
+            if key and (api_key or renamed):
+                creds.set_secret("provider", name, key)
+        except creds.KeyringUnavailable as e:
+            raise UserError(f"Provider not saved. {e}") from e
+        # One taken out of the address in Settings is taken out of the keyring. An address that
+        # didn't change is left alone: one whose password couldn't be read at start (a locked
+        # keyring) would lose it.
+        if not with_password and (old is None or old.base_url != base_url or original_name != name):
             creds.delete_secret(config_mod.ADDRESS_SECRET, name)
         if original_name and original_name != name:
             creds.delete_secret(config_mod.ADDRESS_SECRET, original_name)
-        if original_name and original_name != name and old:
+        if renamed:
             self._provider_renamed(original_name, name)
-            key = creds.get_secret("provider", original_name)
-            if key and not api_key:
-                creds.set_secret("provider", name, key)
             creds.delete_secret("provider", original_name)
             if self.cfg.active_provider == original_name:
                 self.cfg.active_provider = name
@@ -597,8 +605,6 @@ class Engine:
             self.cfg.providers[self.cfg.providers.index(old)] = prov
         else:
             self.cfg.providers.append(prov)
-        if api_key:
-            creds.set_secret("provider", name, api_key)
         if not self.cfg.active_provider:
             self.cfg.active_provider = name
         self._models.pop(name, None)
@@ -1170,17 +1176,19 @@ class Engine:
         if clash and clash is not old:
             raise UserError(f"There is already a host called {name}. The same address can be added again (another "
                             "user, another password), under a name of its own.")
-        if original_name and original_name != name and old:
-            pw = creds.get_secret("host", original_name)
-            if pw and not password:
+        renamed = bool(original_name and original_name != name and old)
+        try:                     # first, so a keyring that refuses it leaves everything as it was
+            pw = password or (creds.get_secret("host", original_name) if renamed else None)
+            if pw and (password or renamed):
                 creds.set_secret("host", name, pw)
+        except creds.KeyringUnavailable as e:
+            raise UserError(f"Host not saved. {e}") from e
+        if renamed:
             creds.delete_secret("host", original_name)
         if old:
             self.cfg.hosts[self.cfg.hosts.index(old)] = host
         else:
             self.cfg.hosts.append(host)
-        if password:
-            creds.set_secret("host", name, password)
         self._secrets_changed()
         self._save_config(self.cfg)
         self._changed()
@@ -1963,7 +1971,11 @@ class Engine:
             sess = self.sessions.sessions.get(sid)
             name = host_name or (sess.host_name if sess else "")
             if name:
-                creds.set_secret("host", name, answer)
+                try:
+                    creds.set_secret("host", name, answer)
+                except creds.KeyringUnavailable as e:   # used all the same, just not kept
+                    self.emit("toast", level="error", text=f"The password for {name} wasn't saved. {e}")
+                    return answer
                 if sess:
                     sess.used_stored_password = True
                 self._secrets_changed()
