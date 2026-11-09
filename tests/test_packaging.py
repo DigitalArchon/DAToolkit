@@ -120,3 +120,47 @@ def test_it_is_looked_for_only_to_make_the_builder_and_goes_in_as_a_copy():
 def test_the_results_go_where_dist_says():
     assert 'DIST="$(mkdir -p "${DIST:-dist}" && cd "${DIST:-dist}" && pwd)"' in WRAPPER
     assert 'run "$DIST" build' in WRAPPER and '"$PWD/dist"' not in WRAPPER
+
+
+# ---------------------------------------------------------------- downloads and certificates
+
+def _commands(text: str) -> list[str]:
+    """A script's commands, one to a line: a command continued over several lines is one."""
+    return re.sub(r"\\\n\s*", " ", text).splitlines()
+
+
+def test_every_download_is_https_only():
+    """A hash proves what arrived, not that nobody saw it asked for: no download may fall back to
+    http, through a redirect either."""
+    curls = []
+    for path in sorted((ROOT / "packaging").rglob("*.sh")) + sorted((ROOT / "tools").rglob("*.sh")):
+        for line in _commands(path.read_text()):
+            if re.search(r"\bcurl\s+-", line) and not line.lstrip().startswith("#"):
+                curls.append(path.name)
+                assert "--proto '=https'" in line and "--tlsv1.2" in line, f"{path.name}: {line.strip()}"
+    assert "build.sh" in curls
+    # the source archives are fetched by Python, whose urllib follows a redirect to http
+    assert "class HttpsOnly(urllib.request.HTTPRedirectHandler)" in BUILD
+    assert "urllib.request.urlopen(" not in BUILD
+
+
+def test_no_certificate_check_is_switched_off():
+    """Not in the build: no curl -k, no pip trusted host. Nor in the app, but where a certificate is
+    pinned instead of checked against a CA: an RDP server's (rdpcert.py, trust on first use) and the
+    companion's own, to which client_context trusts exactly that one certificate."""
+    for path in sorted((ROOT / "packaging").rglob("*")):
+        if path.is_file() and path.suffix in ("", ".sh", ".py", ".in") and not path.name.endswith(".png"):
+            text = path.read_text(errors="replace")
+            for forbidden in ("--insecure", "--trusted-host", "PIP_TRUSTED_HOST", "verify=False", "CERT_NONE",
+                              "_create_unverified_context"):
+                assert forbidden not in text, f"{path.name}: {forbidden}"
+            assert not re.search(r"\bcurl\b[^\n]*\s-k\b", text), path.name
+    allowed = {"sessions/rdpcert.py": 4, "companion.py": 1}
+    found = {}
+    for path in sorted((ROOT / "src" / "datoolkit").rglob("*.py")):
+        text = path.read_text()
+        hits = sum(text.count(f) for f in ("verify=False", "verify = False", "CERT_NONE", "check_hostname = False",
+                                           "_create_unverified_context", "disable_warnings"))
+        if hits:
+            found[str(path.relative_to(ROOT / "src" / "datoolkit"))] = hits
+    assert found == allowed
