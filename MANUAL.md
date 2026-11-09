@@ -595,7 +595,7 @@ did, the habits that tripped them up, and why each nudge and note exists.
 |---|---|---|
 | **Standard** | anything else | Everything |
 | **TEE** | ids starting `TEE/` or `phala/` | The model runs in an attested enclave, but prompts pass NanoGPT's gateway **in the clear** |
-| **E2EE** | NanoGPT `private/…` ids | Ciphertext only, plus your account, the model, timing, sizes and usage |
+| **E2EE** | NanoGPT `private/…` ids, however written (`Private/…` too) | Ciphertext only, plus your account, the model, timing, sizes and usage |
 | **Local** | localhost / private-IP base URL | Nothing leaves your network |
 
 **Requests go over https, or not at all.** A base URL that is plain `http://` is accepted
@@ -625,7 +625,8 @@ edit. Sovereign cases do neither.
 **How E2EE works** (`src/datoolkit/llm/private_mode.py`, following SealedLore's implementation):
 
 1. **Attest.** Before anything is sent (even NanoGPT's billing check), the enclave is attested
-   with Tinfoil's own verifier, pinned as `tinfoil==0.15.0`.
+   with Tinfoil's own verifier, pinned as `tinfoil==0.15.0`. Its own fetches follow no redirect
+   off https, nor one from the internet into this computer or its network.
    - The hardware report (AMD SEV-SNP or Intel TDX) must match the router release Tinfoil
      published, as recorded by Sigstore.
    - The report must bind the key that requests are sealed to.
@@ -636,7 +637,9 @@ edit. Sovereign cases do neither.
 3. **Refuse** anything that doesn't fit:
    - a reply that isn't sealed or isn't marked Private Mode, whatever its HTTP status (NanoGPT's
      relay can't read what it carries, but it could answer a request itself, with a redirect);
-   - a stream that ends early;
+   - a stream that ends early. An error the enclave itself sends partway through a reply (the
+     conversation too long for the model, say) is shown as its own ("the model stopped: …"),
+     so a context overflow is explained as one, with the way to compact;
    - a failed attestation. Nothing is sent, and a `private/` model never falls back to the
      plain endpoint.
 
@@ -650,7 +653,7 @@ edit. Sovereign cases do neither.
      and click to re-check.
    - Replies are marked "end-to-end encrypted".
    - Each attestation is recorded in the case's `events.jsonl`.
-   - Attestation is redone every five minutes.
+   - Attestation is redone every five minutes (time the computer spends asleep counts).
 
 NanoGPT retires Private Mode models from time to time, and the enclave (Tinfoil's router,
 whatever the model) would still attest. So before a `private/` model is attested or sent to,
@@ -670,39 +673,69 @@ Verifying an enclave contacts NanoGPT's relay (for the attestation bundle), Sigs
 GitHub.
 
 **How TEE attestation works** (`src/datoolkit/llm/tee.py`, `dcap.py`, `nras.py`, `ethsig.py`,
-ported from SealedLore with the checks unchanged, and tested against a real attestation
-captured from `TEE/glm-5.3-flash`):
+ported from SealedLore with the checks unchanged, `dcap.py` and `nras.py` kept alike in every
+app of the author's that attests TEE models, and tested against a real attestation captured from
+`TEE/glm-5.3-flash`):
 
 1. **Attest before sending.** NanoGPT's `/tee/attestation` is asked for evidence bound to a
    fresh random nonce. Nothing goes to a TEE model (chat, vision helper, write-ups or the
    second-opinion reviewer) until that holds, and it is made again before a send once it is
-   15 minutes old.
+   15 minutes old (time the computer spends asleep counts).
    - The Intel TDX quote's own bytes must bind the enclave's reply-signing key and our nonce
-     (never NanoGPT's JSON copy of them). For per-instance providers (Chutes), each instance's
-     key, bound into its quote, must have signed our nonce, and every instance must attest.
-   - The quote is verified up to Intel's SGX root, which is pinned in the code: the PCK chain,
-     the quoting enclave, the quote's signature, Intel's revocation lists, and Intel's signed
-     TCB information. A debug TD, a revoked or unlisted TCB, or a forged chain is refused.
+     (never NanoGPT's JSON copy of them), or bind RedPill's attested keys, that key among
+     them, and our nonce. For per-instance providers (Chutes), each instance's key, bound
+     into its quote, must have signed our nonce and that very quote, and every instance must
+     attest.
+   - The quote is verified up to Intel's SGX root, which is pinned in the code: the PCK chain
+     (every certificate that signed another a certificate authority allowed to), Intel's own
+     TDX quoting enclave (checked on every quote, whether or not Intel's service can be
+     reached), the quote's signature, Intel's revocation lists, and Intel's TCB information,
+     which counts only when signed by Intel's TCB signing certificate. A debug TD, a TCB Intel
+     revoked (the platform's, the TDX module's or the quoting enclave's) or never listed, or a
+     forged chain is refused.
    - The GPU evidence goes to NVIDIA's attestation service. Its ES384-signed verdict must be
      for our nonce, current, and pass for every GPU (measurements, secure boot, debug off).
+     If NVIDIA's signing keys can't be fetched, the verdict is still held to all of that and
+     only its signature goes unchecked; keys fetched before are used when fresh ones can't be.
 2. **Refuse** evidence relayed for a nonce the relay chose (replayable), no attestation at
-   all (Tinfoil-hosted `TEE/` models; use their `private/` twin), or anything that fails
-   the checks above. Nothing is sent.
-3. **Partial** when nothing failed but something couldn't be checked or isn't current:
-   Intel's collateral or NVIDIA's service out of reach, no GPU evidence offered, or a TCB
-   status other than UpToDate. The top bar shows **🛡 TEE attested (partial)**, and the tooltip
-   names each shortfall.
-4. **Check each reply's signature.** Every reply's completion id is looked up at
-   `/tee/signature/`, and the signer recovered from its EIP-191 signature must be the attested
-   key. Replies are marked ✔ signed, ✖ signature mismatch, unsigned (the provider signs
-   none) or signature unchecked.
+   all (Tinfoil-hosted `TEE/` models; use their `private/` twin), attested keys past their
+   expiry, or anything that fails the checks above. Nothing is sent.
+3. **Partial** when nothing failed but something couldn't be checked, isn't current, or falls
+   short: Intel's collateral or NVIDIA's service or keys out of reach, no GPU evidence
+   offered, a TCB status other than UpToDate, the receipt keys not in the quote (through
+   NanoGPT the quote binds the key that signs each reply's record, and RedPill's receipt keys
+   are only published beside it), and RedPill's gateway, which passes each request on to the
+   model's host, so that the model itself runs in an enclave isn't shown by its quote. The
+   top bar shows **🛡 TEE attested (partial)**, and the tooltip names each shortfall. Sending
+   still goes ahead.
+4. **Check each reply.** After each reply DA Toolkit fetches the record NanoGPT keeps for it
+   (by the receipt id the reply named, waiting a little while it is written, or by its id),
+   signed by the attested key with EIP-191. The record names a hash of the reply as the
+   gateway sent it, which for most models is the exact stream DA Toolkit received; where
+   RedPill's signed receipt comes with it, that is checked too (Ed25519, under the keys kept
+   at attestation, for the same request and reply, its upstream verified). Each reply is
+   marked with what its check showed:
+   - **✔ verified**: signed by the attested key, for the exact bytes received, its receipt
+     (where read) holding;
+   - **signed, text not compared**: signed by the attested key, but NanoGPT rebuilds this
+     model's replies, so the text can't be compared with the record;
+   - **⚠ reply not verified**: no record of the reply could be read (the provider keeps none,
+     it was out of reach, or the gateway's keys changed since the attestation);
+   - **✖ check failed**: the reply doesn't match its record: another key signed it, it names
+     other bytes, or its receipt doesn't hold;
+   - **unsigned**: the provider signs no replies (Chutes); every instance that could answer
+     was attested before sending instead.
 
-What this doesn't prove: which software the enclave runs, or that a reply's text is byte for
-byte what was signed (the signed record hashes the request and reply as NanoGPT's gateway saw
-them). The prompt also passes NanoGPT's gateway in the clear, so TEE models stay out of
-Confidential cases. Verifying contacts NanoGPT, Intel (`api.trustedservices.intel.com`,
-`certificates.trustedservices.intel.com`) and NVIDIA (`nras.attestation.nvidia.com`). Intel's
-collateral and NVIDIA's keys are cached for an hour.
+What this proves: a genuine, current, non-debug Intel TDX machine (and, where evidence is
+offered, NVIDIA GPUs) holds the key, live, bound to our nonce, and each reply's record was
+signed by that key, for the exact text received where NanoGPT passes the stream through. What it
+doesn't prove: which software the enclave runs (its measurements aren't compared with published
+ones), or what was sent (the record hashes the request as NanoGPT forwarded it, which DA
+Toolkit can't reproduce). The prompt also passes NanoGPT's gateway in the clear, so TEE models
+stay out of Confidential cases; for that, use a `private/` model. Verifying contacts NanoGPT,
+Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`) and NVIDIA
+(`nras.attestation.nvidia.com`). Intel's collateral and NVIDIA's keys are cached for an hour
+(time asleep counts).
 
 ## SSH, WinRM, RDP and windows
 
