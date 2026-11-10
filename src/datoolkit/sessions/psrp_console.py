@@ -133,7 +133,8 @@ _KERBEROS = (
     ("Preauthentication failed", "the domain refused the password."),
     ("Server not found in Kerberos database", "the domain has no service of that name: connect by the computer's "
      "full DNS name as the domain knows it (e.g. fs01.corp.example.com), not an address or another alias."),
-    ("not found in Kerberos database", "the domain doesn't know this user: give it as user@REALM."),
+    ("not found in Kerberos database", "the domain has no such user (check the name; Kerberos takes it as "
+     "user@REALM, the realm being the domain in capitals)."),
     ("Clock skew too great", "this computer's clock and the domain's differ by more than five minutes."),
     ("Client's credentials have been revoked", "the domain refused this account (disabled or locked out)."),
     ("Password has expired", "the account's password has expired: change it first."),
