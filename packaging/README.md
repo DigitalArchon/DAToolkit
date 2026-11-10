@@ -69,6 +69,9 @@ inside the image (`/usr/python/lib/...`), pip's console scripts (which would nam
 Python) are left out, and the build stops if any file still names the folder it was built in.
 Most runtime packages are installed only as prebuilt wheels; the few without one
 (`SDIST_ONLY` in `appimage/build.sh`) are built from their pinned sources with the pinned tools.
+Two of them, gssapi and krb5, are Cython: Cython 3.3.0 picks between equally valid C by the order
+of a set that hashes by memory address, so `appimage/cython-site/sitecustomize.py` (on the path
+for those builds only) has it go in source order instead.
 
 ## Verifying a release
 

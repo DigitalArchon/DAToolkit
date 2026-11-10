@@ -11,15 +11,14 @@ import os
 import re
 import shlex
 import sys
-from pathlib import Path
 
-from lab import PASS, SCRATCH, App, Term
+from lab import CREDS, PASS, SCRATCH, App, Term
 
 FQDN = "win11test.lab.test"
 PROMPT = r"\[win11test\.lab\.test\]: PS [^\n]*> $"
 results = []
 creds = {k: shlex.split(v)[0] for k, v in (line.split("=", 1) for line in
-         Path("~/.config/testlab/dc-credentials").expanduser().read_text().splitlines() if "=" in line and not line.startswith("#"))}
+         (CREDS / "dc-credentials").read_text().splitlines() if "=" in line and not line.startswith("#"))}
 DUSER, DPASS = creds["DC_USER"], creds["DC_USER_PASS"]
 
 

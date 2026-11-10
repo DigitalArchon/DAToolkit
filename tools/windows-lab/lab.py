@@ -28,9 +28,13 @@ SCRATCH = Path(os.environ.get("WINLAB_WORK", "~/.cache/datoolkit-winlab")).expan
 WIN = "192.168.1.214"
 
 
+# the lab's secrets (never in this repo): ~/.config/testlab, or a copy elsewhere (WINLAB_CREDS)
+CREDS = Path(os.environ.get("WINLAB_CREDS") or "~/.config/testlab").expanduser()
+
+
 def vm_creds() -> tuple[str, str]:
     vals = {}
-    for line in Path("~/.config/testlab/vm-credentials").expanduser().read_text().splitlines():
+    for line in (CREDS / "vm-credentials").read_text().splitlines():
         if "=" in line and not line.lstrip().startswith("#"):
             k, v = line.split("=", 1)
             vals[k.strip()] = shlex.split(v)[0] if v.strip() else ""
@@ -68,7 +72,9 @@ class App:
         for d in ("config", "data", "state", "cache"):
             (self.root / d).mkdir(parents=True, exist_ok=True)
         self.log = open(self.root / "app.log", "a")
-        self.proc = subprocess.Popen([PY, "-m", "datoolkit", "--no-open", "--port", str(self.port)], cwd=REPO,
+        # WINLAB_APP: an AppImage's AppRun (extracted), run as a technician would, instead of a Python
+        app = [os.environ["WINLAB_APP"]] if os.environ.get("WINLAB_APP") else [PY, "-m", "datoolkit"]
+        self.proc = subprocess.Popen(app + ["--no-open", "--port", str(self.port)], cwd=REPO if REPO.is_dir() else Path.home(),
                                      env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in self.proc.stdout:
             self.log.write(line)

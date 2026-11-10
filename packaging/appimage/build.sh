@@ -128,8 +128,11 @@ build_sdist pycairo
 build_sdist pygobject
 for name in $SDIST_ONLY; do
     # setuptools compiles with the compiler python-build-standalone was built with (clang), which
-    # this image hasn't: gcc takes the same flags (meson, for the two above, finds gcc itself)
-    CC="gcc -pthread" "$V/pip" wheel -q --no-build-isolation --no-deps -w "$W/wheels" "$(unpack "${name//-/_}")"
+    # this image hasn't: gcc takes the same flags (meson, for the two above, finds gcc itself).
+    # cython-site/sitecustomize.py makes Cython's type inference iterate in source order, not by
+    # memory address: without it gssapi's C differed from one build to the next.
+    PYTHONPATH="$P/cython-site" CC="gcc -pthread" \
+        "$V/pip" wheel -q --no-build-isolation --no-deps -w "$W/wheels" "$(unpack "${name//-/_}")"
 done
 "$V/pip" wheel -q --no-build-isolation --no-deps -w "$W/wheels" "$W/src"     # DAToolkit itself
 # the rest of the runtime lock: wheels only
