@@ -851,6 +851,10 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
   Docker's is, or the guacd package's service user). One another user of the computer started
   is refused, saying whose it is, and is sent nothing. Add RDP
   hosts under Settings → Hosts with the security mode and keyboard layout.
+  - **The case log records whether the desktop really connected.** guacd takes the connection
+    before it tries the remote desktop, so a wrong password or a security mode the server
+    refuses is logged as a failed connection with guacd's reason (and shown in the case
+    timeline), not as connected.
   - **The container runs only while you need it.** Where guacd comes from upstream's
     container, DA Toolkit starts it (as `datoolkit-guacd`, with podman, or Docker if that's
     what you have) when you open an RDP host, and stops and removes it when the last RDP

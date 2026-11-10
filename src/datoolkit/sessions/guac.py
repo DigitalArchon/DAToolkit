@@ -334,6 +334,48 @@ class Parser:
         return out
 
 
+class ConnectWatch:
+    """Reads what guacd sends after `ready`, without changing it, for what the audit log needs:
+    when the remote desktop is really connected, and why guacd gave up.
+
+    `ready` only says guacd took the connection parameters. The RDP connection is made after
+    it and can still fail (a wrong password, a security mode the server refuses), which guacd
+    reports with an `error` instruction. Connected is the first `sync` ending a frame that holds
+    something besides the pointer: guacd 1.3 sends no `sync` until the RDP connection is up,
+    while 1.6 sends one at once, before it connects, ending a frame of only `cursor` and `mouse`
+    (both seen against Windows 11, Nov 2026)."""
+
+    # what a frame may hold that doesn't show a connected desktop
+    _NOT_DRAWING = frozenset({"cursor", "mouse", "nop", "sync", "ack", "argv", "required", "msg", "error",
+                              "disconnect", "log", "name"})
+
+    def __init__(self) -> None:
+        self._parser = Parser()
+        self._drawn = False
+        self.connected = False
+        self.error = ""          # guacd's reason, from its first `error` instruction
+        self.code = ""           # its Guacamole status code (769: unauthorized, 519: upstream refused, ...)
+
+    def feed(self, text: str) -> list[str]:
+        """The events this text completes: "connected" and "error", once each. Raises GuacError
+        on text that isn't the Guacamole protocol."""
+        events = []
+        for ins in self._parser.feed(text):
+            op = ins[0] if ins else ""
+            if op == "error":
+                if not self.error:
+                    self.error, self.code = (ins[1] if len(ins) > 1 else "error"), (ins[2] if len(ins) > 2 else "")
+                    events.append("error")
+            elif op == "sync":
+                if self._drawn and not self.connected:
+                    self.connected = True
+                    events.append("connected")
+                self._drawn = False
+            elif op not in self._NOT_DRAWING:
+                self._drawn = True
+        return events
+
+
 async def _read_instruction(reader: asyncio.StreamReader, parser: Parser, decoder, pending: list) -> list[str]:
     while not pending:
         data = await reader.read(65536)

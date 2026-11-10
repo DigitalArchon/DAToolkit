@@ -1904,16 +1904,38 @@ class Engine:
             raise KeyError(sid)
         return dict(sess.params)
 
-    def rdp_state(self, sid: str, connected: bool, error: str = "", pin_enforced: bool | None = None) -> None:
+    # The audit trail of one browser connection of an RDP session (server/app.py's relay):
+    # rdp_connecting when guacd has taken the parameters, then rdp_connected once the remote
+    # desktop is really there (guac.ConnectWatch), and rdp_disconnected when it ends; or
+    # rdp_connect_failed, with guacd's reason, when it never got that far. The relay hands over
+    # its own session object: closing a session takes it out of the session list first.
+
+    def rdp_connecting(self, sess: RdpSession) -> None:
+        sess.connected = False
+        self.log("rdp_connecting", session_id=sess.id)
+        self._sessions_changed()
+
+    def rdp_connected(self, sess: RdpSession, pin_enforced: bool | None) -> None:
         """`pin_enforced`: whether guacd itself checked the certificate against the pin on this
-        connection (guacd 1.6+), or only DA Toolkit's probe did."""
-        sess = self.sessions.sessions.get(sid)
-        if isinstance(sess, RdpSession):
-            sess.connected = connected
-            if connected:
-                sess.pin_enforced = pin_enforced
-            self.log("rdp_connected" if connected else "rdp_disconnected", session_id=sid, error=error,
-                     **({"pin_enforced": pin_enforced} if connected else {}))
+        connection (guacd 1.6+), or only DA Toolkit's probe did (None: no certificate)."""
+        sess.connected = True
+        sess.pin_enforced = pin_enforced
+        self.log("rdp_connected", session_id=sess.id, pin_enforced=pin_enforced)
+        self._sessions_changed()
+
+    def rdp_ended(self, sess: RdpSession, connected: bool, error: str = "", code: str = "",
+                  current: bool = True) -> None:
+        """One connection of `sess` ended. `connected`: whether it got as far as the desktop;
+        `error`, `code`: guacd's reason and status code, if it gave one; `current`: whether it
+        was still the session's connection (not one a Reconnect has replaced)."""
+        detail = {**({"error": error} if error else {}), **({"code": code} if code else {})}
+        if connected:
+            self.log("rdp_disconnected", session_id=sess.id, **detail)
+        else:
+            self.log("rdp_connect_failed", session_id=sess.id,
+                     **(detail or {"error": "closed before the remote desktop connected"}))
+        if current:
+            sess.connected = False
             self._sessions_changed()
 
     # ---------------------------------------------------------------- windows
@@ -2777,6 +2799,11 @@ class Engine:
                     "proposal_edited": lambda: f"Edited #{e.get('num')}: {e.get('command')}",
                     "session_opened": lambda: f"Opened session {e.get('id')} ({e.get('kind')} {e.get('target', '')})",
                     "session_closed": lambda: f"Closed session {e.get('session_id')}",
+                    "rdp_connected": lambda: f"Remote desktop {e.get('session_id')} connected"
+                                             + (" (guacd checked the pinned certificate itself)" if e.get("pin_enforced") else ""),
+                    "rdp_connect_failed": lambda: f"Remote desktop {e.get('session_id')} did not connect: {e.get('error')}",
+                    "rdp_disconnected": lambda: f"Remote desktop {e.get('session_id')} disconnected"
+                                                + (f": {e.get('error')}" if e.get("error") else ""),
                     "credential_prompt": lambda: f"Prompt on {e.get('session_id')}: {e.get('prompt')}",
                     "hypotheses": lambda: "Hypotheses: " + "; ".join(f"{h.get('id')} {h.get('confidence', 0):.2f} {h.get('status')}" for h in e.get("items", [])),
                     "turn_error": lambda: f"AI error: {e.get('error')}",

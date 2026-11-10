@@ -2,6 +2,7 @@
 device linking, session-cut rules, and the browser <-> guacd relay."""
 
 import asyncio
+import json
 import re
 import datetime
 import socket
@@ -42,11 +43,29 @@ def test_encode_and_incremental_parse():
         guac.Parser().feed("x.abc;")
 
 
+# What guacd sends after `ready`, as recorded against Windows 11 (Nov 2026). guacd 1.3 starts
+# with the joining user's display (no sync) and sends its first sync once RDP is up; 1.6 sends a
+# sync straight away, ending a frame of only the pointer, before RDP connects.
+_JOIN_13 = (guac.encode("size", "0", "1024", "768") + guac.encode("size", "-1", "11", "16")
+            + guac.encode("img", "1", "14", "-1", "image/png", "0", "0") + guac.encode("blob", "1", "iVBORw0K")
+            + guac.encode("end", "1") + guac.encode("cursor", "0", "0", "-1", "0", "0", "11", "16"))
+_JOIN_16 = guac.encode("cursor", "0", "0", "-1", "0", "0", "0", "0") + guac.encode("mouse", "0", "0", "0") + guac.encode("sync", "100")
+_DESKTOP = (guac.encode("size", "0", "1024", "768") + guac.encode("rect", "0", "0", "0", "1024", "768")
+            + guac.encode("cfill", "14", "0", "0", "0", "0", "255") + guac.encode("sync", "200"))
+GUACD_13_OK = _JOIN_13 + guac.encode("sync", "200") + guac.encode("copy", "-2", "0", "0", "41", "39", "14", "0", "5", "5")
+GUACD_13_BADPASS = _JOIN_13 + guac.encode("error", "Authentication failure (invalid credentials?)", "769")
+GUACD_16_OK = _JOIN_16 + _DESKTOP
+GUACD_16_BADPASS = _JOIN_16 + guac.encode("error", "Authentication failure (invalid credentials?)", "769")
+GUACD_16_NLA_EXT = _JOIN_16 + guac.encode("error", "Security negotiation failed (wrong security type?)", "769")
+
+
 class FakeGuacd:
     """A guacd that offers a few args, records the handshake and what arrives afterwards."""
 
-    def __init__(self, reply_ready=True, args=("VERSION_1_3_0", "hostname", "password", "ignore-cert")):
+    def __init__(self, reply_ready=True, args=("VERSION_1_3_0", "hostname", "password", "ignore-cert"),
+                 after=guac.encode("sync", "7")):
         self.args = list(args)
+        self.after = after               # what it sends after `ready` (see GUACD_13_OK and the rest)
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(1)
@@ -73,7 +92,7 @@ class FakeGuacd:
             if not self.reply_ready:
                 conn.sendall(guac.encode("error", "Aborted. See logs.", "519").encode())
                 return
-            conn.sendall((guac.encode("ready", "$abc") + guac.encode("sync", "7")).encode())
+            conn.sendall((guac.encode("ready", "$abc") + self.after).encode())
             while True:
                 data = conn.recv(65536)
                 if not data:
@@ -592,7 +611,7 @@ def test_rdp_session_cut_rules():
 # ---------------------------------------------------------------- the relay
 
 def test_ws_relay_handshakes_pings_and_forwards(tmp_path, monkeypatch):
-    g = FakeGuacd()
+    g = FakeGuacd(after=GUACD_13_OK)
     monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", g.port))
     token = "tok"
     holder = {}
@@ -613,9 +632,12 @@ def test_ws_relay_handshakes_pings_and_forwards(tmp_path, monkeypatch):
             with client.websocket_connect("/ws/rdp/dc01?t=wrong", subprotocols=["guacamole"]) as ws:
                 ws.receive_text()
         with client.websocket_connect("/ws/rdp/dc01?t=tok&width=1000&height=700", subprotocols=["guacamole"]) as ws:
-            first = ws.receive_text()
-            ins = guac.Parser().feed(first)
-            assert ins[0][0] == "" and len(ins[0]) == 2 and ins[1] == ["sync", "7"]   # tunnel uuid, then guacd's data
+            got = ws.receive_text()
+            while not got.endswith(guac.encode("copy", "-2", "0", "0", "41", "39", "14", "0", "5", "5")):
+                got += ws.receive_text()
+            ins = guac.Parser().feed(got)
+            assert ins[0][0] == "" and len(ins[0]) == 2                  # the tunnel's uuid first
+            assert "".join(guac.encode(*i) for i in ins[1:]) == GUACD_13_OK     # then guacd's data, untouched
             ping = guac.encode("", "ping", "123")
             ws.send_text(ping)
             assert ws.receive_text() == ping                     # answered here, not sent to guacd
@@ -628,7 +650,86 @@ def test_ws_relay_handshakes_pings_and_forwards(tmp_path, monkeypatch):
         assert g.handshake[-1] == ["connect", "VERSION_1_3_0", "dc01", "pw", "true"]
         assert g.handshake[1] == ["size", "1000", "700", "96"]
         assert g.received == guac.encode("key", "65", "1") + guac.encode("size", "1200", "640")
-        assert "rdp_connected" in (e.case.dir / "events.jsonl").read_text()
+        for _ in range(100):
+            if "rdp_disconnected" in (e.case.dir / "events.jsonl").read_text():
+                break
+            threading.Event().wait(0.02)
+        assert _rdp_events(e) == [("rdp_connecting", {}), ("rdp_connected", {"pin_enforced": None}), ("rdp_disconnected", {})]
+
+
+def _rdp_events(e) -> list:
+    out = []
+    for line in (e.case.dir / "events.jsonl").read_text().splitlines():
+        ev = json.loads(line)
+        if ev.get("event", "").startswith("rdp_"):
+            out.append((ev["event"], {k: v for k, v in ev.items() if k not in ("event", "ts", "session_id")}))
+    return out
+
+
+def _relay(tmp_path, monkeypatch, g, until):
+    """Open an RDP session's tunnel against the fake guacd `g`, read until `until` is in what
+    arrives, close the page's side; returns the engine."""
+    monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", g.port))
+    holder = {}
+
+    def make(emit):
+        from datoolkit.config import Config
+        from datoolkit.engine import Engine
+        holder["e"] = Engine(Config(), emit, tmp_path / "rt", save_config=lambda c: None)
+        return holder["e"]
+
+    with TestClient(create_app("tok", make)) as client:
+        e = holder["e"]
+        e.new_case("relay", "open")
+        e.sessions.add(RdpSession(id="dc01", name="dc01", params={"hostname": "dc01", "password": "pw", "ignore-cert": "true"}))
+        with client.websocket_connect("/ws/rdp/dc01?t=tok", subprotocols=["guacamole"]) as ws:
+            got = ""
+            while until not in got:
+                got += ws.receive_text()
+        for _ in range(100):
+            if any(k in ("rdp_disconnected", "rdp_connect_failed") for k, _ in _rdp_events(e)):
+                break
+            threading.Event().wait(0.02)
+    return e
+
+
+@pytest.mark.parametrize("stream, events", [
+    # a wrong password: guacd 1.3 and 1.6 both said ready, and the RDP connection then failed
+    (GUACD_13_BADPASS, [("rdp_connecting", {}), ("rdp_connect_failed", {"error": "Authentication failure (invalid credentials?)",
+                                                                          "code": "769"})]),
+    (GUACD_16_BADPASS, [("rdp_connecting", {}), ("rdp_connect_failed", {"error": "Authentication failure (invalid credentials?)",
+                                                                          "code": "769"})]),
+    # guacd 1.6's first sync comes before RDP connects: the desktop only with the next one
+    (GUACD_16_OK, [("rdp_connecting", {}), ("rdp_connected", {"pin_enforced": None}), ("rdp_disconnected", {})]),
+])
+def test_the_audit_log_says_whether_the_desktop_connected(tmp_path, monkeypatch, stream, events):
+    """Found against Windows 11 (Nov 2026): rdp_connected was logged once guacd had taken the
+    parameters, before the RDP connection was tried, so a wrong password read as connected."""
+    last = guac.Parser().feed(stream)[-1]
+    e = _relay(tmp_path, monkeypatch, FakeGuacd(after=stream), guac.encode(*last))
+    assert _rdp_events(e) == events
+    tl = [x["text"] for x in e.timeline()["events"] if x["kind"].startswith("rdp_")]
+    assert tl[-1] == (f"Remote desktop dc01 did not connect: {events[-1][1]['error']}" if events[-1][0] == "rdp_connect_failed"
+                      else "Remote desktop dc01 disconnected")
+
+
+def test_guacd_refusing_the_handshake_is_a_failed_connection(tmp_path, monkeypatch):
+    e = _relay(tmp_path, monkeypatch, FakeGuacd(reply_ready=False), "Could not start RDP via guacd")
+    assert _rdp_events(e) == [("rdp_connect_failed", {"error": "guacd: Aborted. See logs."})]
+
+
+@pytest.mark.parametrize("stream, connected_at", [
+    (GUACD_13_OK, "sync"), (GUACD_16_OK, "sync"), (GUACD_13_BADPASS, None), (GUACD_16_BADPASS, None),
+])
+def test_connect_watch_in_any_chunks(stream, connected_at):
+    """Fed one character at a time, as guacd's stream can be split anywhere."""
+    w = guac.ConnectWatch()
+    events = [ev for ch in stream for ev in w.feed(ch)]
+    assert w.connected == (connected_at is not None)
+    assert events == (["connected"] if connected_at else ["error"])
+    assert (w.error, w.code) == (("", "") if connected_at else ("Authentication failure (invalid credentials?)", "769"))
+    whole = guac.ConnectWatch()
+    assert whole.feed(stream) == events
 
 
 def test_desktop_resizes_only_when_asked_and_can_be_maximized():

@@ -893,6 +893,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         width, height = clamp(q.get("width"), 200, 8192, 1280), clamp(q.get("height"), 200, 8192, 800)
         dpi = clamp(q.get("dpi"), 48, 480, 96)
         writer = None
+        # what guacd sends is watched (never changed) for when the desktop is really connected
+        # and why it wasn't: `ready` comes before the RDP connection is even tried
+        watch: guac.ConnectWatch | None = guac.ConnectWatch()
+        connected, failure, pin = False, "", None
         try:
             try:
                 try:
@@ -906,18 +910,31 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                 _, names, leftover, decoder = await guac.handshake(reader, writer, "rdp", params, width, height, dpi,
                                                                    _local_timezone())
             except (OSError, asyncio.TimeoutError, guac.GuacError, UserError) as e:
-                msg = str(e) or type(e).__name__
-                engine.rdp_state(sid, False, msg)
-                await ws.send_text(guac.tunnel_uuid() + guac.encode("error", f"Could not start RDP via guacd: {msg}", "519"))
-                await ws.close()
+                failure = str(e) or type(e).__name__
+                await ws.send_text(guac.tunnel_uuid() + guac.encode("error", f"Could not start RDP via guacd: {failure}", "519"))
                 return
-            engine.rdp_state(sid, True, pin_enforced=guac.enforces_pin(names, params) if params.get("cert-fingerprints") else None)
+            pin = guac.enforces_pin(names, params) if params.get("cert-fingerprints") else None
+            engine.rdp_connecting(sess)
+
+            def watched(text: str) -> None:
+                nonlocal watch, connected
+                if watch is None:
+                    return
+                try:
+                    if "connected" in watch.feed(text):
+                        connected = True
+                        engine.rdp_connected(sess, pin)
+                except guac.GuacError:     # not the protocol after all: stop watching, keep relaying
+                    watch = None
+
+            watched(leftover)
             await ws.send_text(guac.tunnel_uuid() + leftover)
 
             async def down():            # guacd -> browser
                 while data := await reader.read(65536):
                     text = decoder.decode(data)
                     if text:
+                        watched(text)
                         await ws.send_text(text)
 
             async def up():              # browser -> guacd; tunnel pings are answered here
@@ -940,9 +957,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         finally:
             if writer:
                 writer.close()
-            if sess.relay is asyncio.current_task():
+            current = sess.relay is asyncio.current_task()
+            if current:
                 sess.relay = None
-                engine.rdp_state(sid, False)
+            engine.rdp_ended(sess, connected, error=failure or (watch.error if watch else ""),
+                             code="" if failure or not watch else watch.code, current=current)
             try:
                 await ws.close()
             except (RuntimeError, WebSocketDisconnect):     # the page went first (closed or reconnected)
