@@ -124,11 +124,36 @@ def _read_line(prompt: str) -> str:
         signal.signal(signal.SIGINT, _interrupt)
 
 
+# What MIT Kerberos says when it fails, and what a technician can do about it. Each was seen
+# against the lab's Samba AD domain (Nov 2026); the messages come from gssapi and krb5.
+_KERBEROS = (
+    ("Cannot find KDC for realm", "this computer can't find a domain controller (KDC) for the realm. Kerberos "
+     "finds it through DNS (_kerberos._udp.<realm>), so this computer must use the domain's DNS (on its network or "
+     "over the VPN), or /etc/krb5.conf must name the KDC under [realms]. The realm is the domain in capitals."),
+    ("Preauthentication failed", "the domain refused the password."),
+    ("Server not found in Kerberos database", "the domain has no service of that name: connect by the computer's "
+     "full DNS name as the domain knows it (e.g. fs01.corp.example.com), not an address or another alias."),
+    ("not found in Kerberos database", "the domain doesn't know this user: give it as user@REALM."),
+    ("Clock skew too great", "this computer's clock and the domain's differ by more than five minutes."),
+    ("Client's credentials have been revoked", "the domain refused this account (disabled or locked out)."),
+    ("Password has expired", "the account's password has expired: change it first."),
+)
+
+
 def _connection_problem(e: Exception, auth: str, ssl: bool = True) -> str:
-    if isinstance(e, ImportError) and "gssapi" in str(e).lower():
-        return (f"{auth.capitalize()} authentication needs the Python gssapi package and the system's Kerberos "
-                "libraries (MIT krb5), which this installation of DA Toolkit doesn't include. Use NTLM or Negotiate "
-                "(which uses NTLM without them).")
+    text = str(e)
+    if isinstance(e, ImportError) or "requires the Python gssapi library" in text:
+        if "libgssapi_krb5" in text:
+            return (f"{auth.capitalize()} authentication needs MIT Kerberos' libgssapi_krb5 on this computer "
+                    "(libgssapi-krb5-2 on Debian and Ubuntu, krb5-libs on Fedora, krb5 on Arch). Use NTLM without it.")
+        if "gssapi" in text.lower():
+            return (f"{auth.capitalize()} authentication needs the Python gssapi package, which this installation "
+                    "doesn't have (the AppImage does; from source: pip install 'datoolkit[kerberos]', with MIT krb5's "
+                    "headers to build it). Use NTLM or Negotiate, which uses NTLM without it.")
+    if auth in ("kerberos", "negotiate"):
+        for needle, meaning in _KERBEROS:
+            if needle in text:
+                return f"Kerberos: {meaning} ({needle})"
     text = f"{type(e).__name__}: {e}"
     if auth == "basic" and type(e).__name__ == "AuthenticationError":
         # Windows turns Basic away without saying why, which reads like a wrong password

@@ -20,7 +20,8 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path("/home/user/Documents/DAToolkit")
-PY = str(REPO / ".venv/bin/python")
+# the Python that runs the instance: the repo's venv, or another (a venv with the kerberos extra)
+PY = os.environ.get("WINLAB_PYTHON") or str(REPO / ".venv/bin/python")
 # instances, screenshots, browser profiles and reports: outside the repo
 SCRATCH = Path(os.environ.get("WINLAB_WORK", "~/.cache/datoolkit-winlab")).expanduser()
 (SCRATCH / "win").mkdir(parents=True, exist_ok=True)
@@ -46,7 +47,7 @@ def plain(b: bytes | str) -> str:
 
 
 class App:
-    def __init__(self, name: str, port: int = 48591):
+    def __init__(self, name: str, port: int = 48591, extra_env: dict | None = None):
         self.root = SCRATCH / "inst" / name
         self.port = port
         self.base = f"http://127.0.0.1:{port}"
@@ -55,10 +56,11 @@ class App:
         self.rules: list[tuple[str, str | None]] = []    # (regex on the prompt text, answer); None = cancel
         self.proc: subprocess.Popen | None = None
         self.token = ""
+        self.extra_env = extra_env or {}
 
     def env(self) -> dict:
         return {**os.environ, "XDG_CONFIG_HOME": str(self.root / "config"), "XDG_DATA_HOME": str(self.root / "data"),
-                "XDG_STATE_HOME": str(self.root / "state"), "XDG_CACHE_HOME": str(self.root / "cache")}
+                "XDG_STATE_HOME": str(self.root / "state"), "XDG_CACHE_HOME": str(self.root / "cache"), **self.extra_env}
 
     def start(self, fresh: bool = True) -> None:
         if fresh and self.root.exists():

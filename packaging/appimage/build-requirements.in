@@ -4,3 +4,5 @@ meson
 ninja
 setuptools>=77
 packaging
+# gssapi and krb5 (WinRM Kerberos) are Cython extensions, and both ask for exactly this Cython
+Cython==3.3.0

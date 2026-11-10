@@ -10,6 +10,7 @@ release from its commit and get the same file, byte for byte.
 | Python 3.12 ([python-build-standalone](https://github.com/astral-sh/python-build-standalone)) | GTK 3 and **WebKitGTK 4.1** (the app window) |
 | Every Python dependency, pinned with hashes | `ssh`, `setsid` (util-linux), `xdg-open` |
 | PyGObject and pycairo, built from pinned sources | `guacd` for RDP (optional) |
+| gssapi and krb5 (WinRM Kerberos), built from pinned sources | MIT Kerberos' `libgssapi_krb5` (installed wherever OpenSSH is) |
 | A fallback `libgirepository-2.0` for hosts that lack it | The Secret Service keyring (GNOME Keyring, KWallet) |
 
 WebKitGTK is deliberately **not** bundled: it renders the AI's output and the RDP canvas, so it
@@ -59,7 +60,7 @@ of the AppImage. Downloads are https only, redirects included, cached in
 | Base image (digest), apt snapshot, Python build, AppImage runtime | `appimage/pins.sh` |
 | Runtime Python packages (wheels, with hashes) | `appimage/requirements.lock` |
 | PyGObject, pycairo (source archives, with hashes) | `appimage/sdists.lock` |
-| meson, meson-python, ninja, setuptools (with hashes) | `appimage/build-requirements.lock` |
+| meson, meson-python, ninja, setuptools, Cython (with hashes) | `appimage/build-requirements.lock` |
 | pip and pip-tools, which write the locks, and what they run on (with hashes) | `appimage/lock-requirements.lock` |
 
 Changing any of these changes the AppImage, which is the point: an update is a reviewed commit.

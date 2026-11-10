@@ -817,10 +817,17 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
   - Password and host-key prompts appear as dialogs. A saved password is supplied once per
     session; if it's rejected, you're asked.
   - Old network gear may need extra options, e.g. `KexAlgorithms=+diffie-hellman-group14-sha1`.
-- **WinRM** opens a PowerShell remoting console (pypsrp) supporting NTLM, Negotiate and Basic,
-  on 5985 or 5986. Kerberos needs the Python `gssapi` package and the system's Kerberos
-  libraries (MIT krb5), which DA Toolkit doesn't include; without them a Kerberos host says
-  so when it connects. Negotiate then uses NTLM.
+- **WinRM** opens a PowerShell remoting console (pypsrp) supporting NTLM, Kerberos, Negotiate
+  and Basic, on 5985 or 5986.
+  - **Kerberos** (and Negotiate, which tries Kerberos first and falls back to NTLM) needs:
+    the user as `user@REALM` (the realm is the domain in capitals; `user@corp.example.com` is
+    taken as `user@CORP.EXAMPLE.COM`), the computer by its full DNS name as the domain knows it
+    (not an IP address), and this computer able to find a domain controller: through the
+    domain's DNS (on its network, or over the VPN), or named in `/etc/krb5.conf`. Since it
+    needs a name, plain HTTP (5985) works only for `.local` domains (see below); elsewhere use
+    HTTPS (5986). The AppImage brings the Python side; MIT Kerberos' `libgssapi_krb5` comes from
+    the system, where OpenSSH already put it. A failure says which of these it was.
+    Negotiate with `DOMAIN\user`, or with an address, uses NTLM.
   - Commands are single-line. `Read-Host` and `Get-Credential` prompts and tab completion are
     not supported.
   - Variables persist between commands.

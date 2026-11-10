@@ -19,6 +19,7 @@ RUN rm -f /etc/apt/sources.list && printf '%s\n' \
  && apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
       ca-certificates curl gcc libc6-dev pkg-config \
       libgirepository-2.0-dev libcairo2-dev libffi-dev gir1.2-freedesktop \
+      libkrb5-dev \
       squashfs-tools desktop-file-utils \
  && rm /etc/apt/apt.conf.d/99hostca /hostca.crt \
  && rm -rf /var/lib/apt/lists/*

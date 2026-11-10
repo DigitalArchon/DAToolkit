@@ -3514,7 +3514,7 @@ function openSettings(tab = "providers") {
       name: h("input", { type: "text", value: x.name || "", placeholder: "e.g. acme-fs01" }),
       host: h("input", { type: "text", value: x.host || "", placeholder: "hostname or IP" }),
       port: h("input", { type: "number", value: x.port || "", placeholder: ssh ? "22" : rdp ? "3389" : (x.winrm_ssl === false ? "5985" : "5986") }),
-      user: h("input", { type: "text", value: x.user || "", placeholder: ssh ? "username" : rdp ? "DOMAIN\\user or user" : "DOMAIN\\user or user@domain" }),
+      user: h("input", { type: "text", value: x.user || "", placeholder: ssh ? "username" : rdp ? "DOMAIN\\user or user" : "DOMAIN\\user, or user@domain (Kerberos)" }),
       rdp_security: h("select", {}, [["any", "Negotiate (any)"], ["nla", "NLA"], ["tls", "TLS"], ["rdp", "Legacy RDP security"]]
         // a host saved with Extended NLA (offered before; no guacd can do it) opens on NLA here
         .map(([v, l]) => h("option", { value: v, selected: v === (x.rdp_security === "nla-ext" ? "nla" : x.rdp_security || "any") }, l))),

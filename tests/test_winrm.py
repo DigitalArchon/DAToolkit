@@ -2,6 +2,7 @@
 say-so, and the certificate checked by DA Toolkit (pinned) when the system CA store isn't used."""
 
 import asyncio
+import json
 import ssl
 
 import pytest
@@ -399,3 +400,51 @@ def test_windows_recipes_run_on_powershell_5_and_workgroup_computers():
             assert "$PSVersionTable.PSVersion.Major -ge 7" in cmd
         if "$env:USERDNSDOMAIN" in cmd:
             assert "if ($env:USERDNSDOMAIN)" in cmd
+
+
+def test_kerberos_needs_user_at_realm_and_a_name():
+    """Checked against the lab's Samba AD domain (Nov 2026): Kerberos refused LAB\\user (MIT reads
+    it as "LABuser@REALM") and an IP address (no service of that name), and took user@lab.test
+    for a realm of its own. Negotiate falls back to NTLM for the first two."""
+    def host(user, address="fs01.corp.local", auth="kerberos"):
+        return Host("fs01", "winrm", address, user=user, auth=auth, winrm_ssl=False)
+    assert "user@REALM" in winrm.problem(host("CORP\\alice"))
+    assert "DNS name" in winrm.problem(host("alice@CORP.LOCAL", "10.0.0.5"))
+    assert winrm.problem(host("alice@CORP.LOCAL")) is None
+    assert winrm.problem(host("CORP\\alice", "10.0.0.5", auth="negotiate")) is None      # NTLM then
+    # a name that isn't .local still needs HTTPS for plain-HTTP's sake, Kerberos or not
+    assert "HTTPS" in winrm.problem(host("alice@CORP.EXAMPLE.COM", "fs01.corp.example.com"))
+    assert winrm.problem(Host("fs01", "winrm", "fs01.corp.example.com", user="alice@CORP.EXAMPLE.COM",
+                              auth="kerberos")) is None
+    assert winrm.kerberos_user("alice@corp.example.com", "kerberos") == "alice@CORP.EXAMPLE.COM"
+    assert winrm.kerberos_user("alice@corp.example.com", "negotiate") == "alice@CORP.EXAMPLE.COM"
+    assert winrm.kerberos_user("alice@corp.example.com", "ntlm") == "alice@corp.example.com"
+    assert winrm.kerberos_user("CORP\\alice", "negotiate") == "CORP\\alice"
+    assert json.loads(winrm.console_config(host("alice@corp.local")))["user"] == "alice@CORP.LOCAL"
+
+
+async def test_saving_a_kerberos_host_that_cannot_work_is_refused(env):  # noqa: F811
+    engine, _, _ = env
+    with pytest.raises(UserError, match="Host not saved. Kerberos needs the user as user@REALM"):
+        engine.save_host({"name": "fs01", "kind": "winrm", "host": "fs01.corp.local", "user": "CORP\\alice",
+                          "auth": "kerberos", "winrm_ssl": False})
+
+
+def test_kerberos_failures_say_what_to_do():
+    """The texts are what gssapi and krb5 raised against the lab's domain."""
+    from datoolkit.sessions import psrp_console
+
+    def says(text, auth="kerberos"):
+        return psrp_console._connection_problem(Exception(text), auth)
+    assert "domain's DNS" in says('Cannot find KDC for realm "LAB.TEST" -1765328230')
+    assert "refused the password" in says("Preauthentication failed -1765328360")
+    assert "full DNS name" in says("SpnegoError (4294967295): Major (851968): Unspecified GSS failure.  Minor code may "
+                                   "provide more information, Minor (2529638919): Server not found in Kerberos database")
+    assert "user@REALM" in says("Client 'LABdat-tech@LAB.TEST' not found in Kerberos database -1765328378")
+    assert "five minutes" in says("Clock skew too great", "negotiate")
+    assert says("Preauthentication failed", "ntlm") == "Exception: Preauthentication failed"   # not Kerberos
+    missing_lib = ImportError("GSSAPIProxy requires the Python gssapi library: libgssapi_krb5.so.2: cannot open "
+                              "shared object file: No such file or directory")
+    msg = psrp_console._connection_problem(missing_lib, "kerberos")
+    assert "libgssapi-krb5-2" in msg and "krb5-libs" in msg and "pip install" not in msg
+    assert "datoolkit[kerberos]" in psrp_console._connection_problem(ImportError("No module named 'gssapi'"), "kerberos")

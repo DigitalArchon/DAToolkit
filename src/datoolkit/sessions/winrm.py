@@ -10,14 +10,41 @@ RDP (engine.open_winrm). Nothing ever connects with the certificate unchecked.""
 
 from __future__ import annotations
 
+import ipaddress
 import json
 
 from ..config import Host
 from ..llm import netguard
 
 
+def kerberos_user(user: str, auth: str) -> str:
+    """The user as Kerberos (and Negotiate's Kerberos) needs it: an AD realm is the domain in
+    capitals, and MIT Kerberos takes "user@lab.test" for a realm of its own, which has no KDC."""
+    if auth in ("kerberos", "negotiate") and "@" in user and "\\" not in user:
+        name, realm = user.rsplit("@", 1)
+        return f"{name}@{realm.upper()}"
+    return user
+
+
+def _is_ip(address: str) -> bool:
+    try:
+        ipaddress.ip_address(address.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
 def problem(host: Host) -> str | None:
     """Why this WinRM host may not be connected to as configured, or None."""
+    if host.auth == "kerberos":
+        # both checked against the lab's domain (Nov 2026): neither can ever work
+        if "\\" in host.user:
+            return ("Kerberos needs the user as user@REALM (e.g. alice@CORP.EXAMPLE.COM): DOMAIN\\user is NTLM's "
+                    "form. Use that form, or Negotiate, which takes DOMAIN\\user and uses NTLM with it.")
+        if _is_ip(host.host):
+            return ("Kerberos needs the computer's DNS name as the domain knows it (e.g. fs01.corp.example.com), "
+                    "not an IP address: the domain issues tickets by name. Use the name, or Negotiate, which falls "
+                    "back to NTLM for an address.")
     if host.winrm_ssl:
         return None
     if not netguard.is_local(host.host):
@@ -44,6 +71,6 @@ def console_config(host: Host, pin: str = "") -> str:
     whose certificate DA Toolkit pins (`pin`, its SHA-256) has pypsrp's CA check off, and
     every connection the console makes must present that certificate (the engine's check
     before it starts was of another connection); otherwise it checks against the CA store."""
-    return json.dumps({"host": host.host, "port": host.port, "user": host.user, "auth": host.auth,
+    return json.dumps({"host": host.host, "port": host.port, "user": kerberos_user(host.user, host.auth), "auth": host.auth,
                        "ssl": host.winrm_ssl, "cert_validation": host.winrm_cert_validation,
                        **({"pin": pin} if pin else {})})

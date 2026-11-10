@@ -61,6 +61,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+# WinRM with Kerberos (and Negotiate's Kerberos): gssapi and krb5, which pyspnego uses. Neither
+# publishes a Linux wheel, so installing this extra compiles them against MIT krb5's headers
+# (libkrb5-dev / krb5-devel / krb5); at run time they load the system's libgssapi_krb5. The
+# AppImage includes it (packaging/appimage/build.sh).
+kerberos = ["pypsrp[kerberos]>=0.8"]
 
 [project.scripts]
 datoolkit = "datoolkit.app:main"

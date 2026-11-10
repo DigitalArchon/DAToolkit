@@ -58,7 +58,8 @@ if [ "$mode" = lock ]; then
             cp "$name.lock" "/out/$name.lock"
         fi
         if [ "$name" = requirements ]; then
-            "$V/pip-compile" -q --generate-hashes --allow-unsafe --no-strip-extras \
+            # with the kerberos extra: the AppImage does WinRM Kerberos (SDIST_ONLY, below)
+            "$V/pip-compile" -q --generate-hashes --allow-unsafe --no-strip-extras --extra kerberos \
                 --output-file "/out/$name.lock" "$W/src/pyproject.toml"
         else
             "$V/pip-compile" -q --generate-hashes --allow-unsafe --output-file "/out/$name.lock" "$name.in"
@@ -73,8 +74,10 @@ fi
 
 # PyGObject and pycairo have no Linux wheels: build them from their pinned sources against the
 # GLib 2.80 / girepository-2.0 headers. They load the host's GLib, GTK and WebKitGTK at run time.
-# Locked runtime packages that publish no wheel at all, built the same way (pure Python).
-SDIST_ONLY="proxy-tools"
+# Locked runtime packages that publish no wheel at all, built the same way: proxy-tools (pure
+# Python), and gssapi and krb5 (WinRM Kerberos), Cython extensions built against MIT krb5's
+# headers, which load the host's libgssapi_krb5 at run time, as its OpenSSH does.
+SDIST_ONLY="proxy-tools gssapi krb5"
 fetch_sdists() {  # lock [names...]: fetch pinned source archives from PyPI, checked against the lock
     "$W/buildpy/bin/python3" - "$W/sdists" "$@" <<'PY'
 import hashlib, json, re, sys, urllib.request
@@ -124,7 +127,9 @@ build_sdist pycairo
 "$V/pip" install -q --no-deps "$W/wheels"/pycairo-*.whl     # PyGObject builds its cairo support against it
 build_sdist pygobject
 for name in $SDIST_ONLY; do
-    "$V/pip" wheel -q --no-build-isolation --no-deps -w "$W/wheels" "$(unpack "${name//-/_}")"
+    # setuptools compiles with the compiler python-build-standalone was built with (clang), which
+    # this image hasn't: gcc takes the same flags (meson, for the two above, finds gcc itself)
+    CC="gcc -pthread" "$V/pip" wheel -q --no-build-isolation --no-deps -w "$W/wheels" "$(unpack "${name//-/_}")"
 done
 "$V/pip" wheel -q --no-build-isolation --no-deps -w "$W/wheels" "$W/src"     # DAToolkit itself
 # the rest of the runtime lock: wheels only
@@ -141,6 +146,10 @@ PY="$W/AppDir/usr/python/bin/python3"
 "$PY" -m pip install -q --no-compile --no-deps --require-hashes --only-binary :all: -r "$W/binary.lock"
 "$PY" -m pip install -q --no-compile --no-deps "$W/wheels"/*.whl
 "$PY" -m pip uninstall -q -y pip                  # nothing is installed at run time
+# gssapi's and krb5's extensions come with python-build-standalone's -g: 30 MB of debug info,
+# stripped as meson strips the others (strip is deterministic)
+find "$W"/AppDir/usr/python/lib/python3.*/site-packages/gssapi "$W"/AppDir/usr/python/lib/python3.*/site-packages/krb5 \
+    -name '*.so' -exec strip --strip-unneeded {} +
 # The console scripts pip wrote for the packages (datoolkit, uvicorn, keyring, normalizer, ...)
 # start #!/work/AppDir/usr/python/bin/python3, which is nowhere but in this container: on a
 # user's machine they would run nothing, and they would carry the build path. AppRun runs
