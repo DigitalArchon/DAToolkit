@@ -15,6 +15,7 @@ then Enter), RDP through the real page in headless Firefox (WebDriver BiDi).
 | `rdp_test.py` | RDP through guacd: certificate prompt, desktop drawn, Win+R, exact typing, Run on a queued item, clipboard both ways, Ctrl+Alt+Del, live resize, reconnect, linking, security modes, wrong password |
 | `cert_test.py` | prompts against `winrm enumerate` and the Cert: drive; a regenerated RDP certificate refused, then pinned again (**changes the VM**) |
 | `basic_test.py` | Basic over HTTPS and HTTP (**turns Basic and AllowUnencrypted on, then off**) |
+| `kerberos_test.py` | Kerberos and Negotiate against the lab's Samba AD domain (`LAB.TEST` on dc1, win11 joined: LAB.md); what can't work refused when saved; Negotiate's NTLM fallback |
 
 Run each under a memory cap, one at a time on the VM's RDP session:
 
@@ -23,11 +24,17 @@ Run each under a memory cap, one at a time on the VM's RDP session:
 Needs: the VM running with WinRM, RDP and SSH as LAB.md describes; `~/.config/testlab/vm-credentials`;
 the `p330-2-win11` ssh alias (for checks on the Windows side); guacd on 127.0.0.1:4822; Firefox.
 Output (instances, screenshots, reports) goes to `~/.cache/datoolkit-winlab` (`WINLAB_WORK`).
+`WINLAB_PYTHON` runs the instance with another Python (one with the `kerberos` extra), `WINLAB_APP`
+with an extracted AppImage's `AppRun`, and `WINLAB_CREDS` reads the lab's secrets from a copy (on
+a VM). Kerberos needs this computer to resolve `win11test.lab.test` and find the KDC: run it on a
+lab VM pointed at the DC's DNS (LAB.md), with the AppImage.
 
 After an RDP test the VM's `test` session is no longer on the console: give it back with `tscon`
 (LAB.md), and close the PowerShell windows the test opened there.
 
-Results of the first run (2026-11-10, Windows 11 Enterprise 26H2 build 26300, guacd 1.3):
-everything passes on branch `windows-lab-fixes` except what the Windows side refuses by design
-(TLS-only and legacy RDP against an NLA-only server, `nla-ext` with guacd 1.3, Kerberos without a
-domain, the PowerShell 7 ping sweep on 5.1 before the recipes were fixed).
+Results (2026-11-10, Windows 11 Enterprise 26H2 build 26300, guacd 1.3 and the 1.6.0 image): everything
+passes on branch `windows-lab-fixes`. What Windows refuses by design is checked as refused: TLS-only and
+legacy RDP against an NLA-only server, and a wrong password, each logged as `rdp_connect_failed` with
+guacd's reason. Extended NLA isn't offered (no guacd available can speak it). Kerberos passed through the
+AppImage on Ubuntu 26.04 with the domain's DNS and no krb5.conf, and directly on Fedora 44, CachyOS and
+Mint 22.3.
