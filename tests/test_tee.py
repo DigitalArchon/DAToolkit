@@ -25,7 +25,14 @@ from datoolkit.llm.ethsig import (
 )
 from datoolkit.llm.client import LLMClient
 from datoolkit.llm.secure_http import ProviderError
-from datoolkit.llm.tee import NRAS_URL, RECEIPT_KEYS_LOOSE, TeeClient, TeeRefused, is_tee
+from datoolkit.llm.tee import (
+    NRAS_URL,
+    OWN_ENCLAVE_UNCHECKED,
+    RECEIPT_KEYS_LOOSE,
+    TeeClient,
+    TeeRefused,
+    is_tee,
+)
 
 KEY = 0xB25C7DB31FEED9122727BF0939DC769A96564B2DE4C4726D035B36ECF1E5B364
 ADDRESS = "0x5ce9454909639D2D17A3F753ce7d93fa0b9aB12E"
@@ -1023,13 +1030,24 @@ def receipt_server(
     seen: list | None = None,
     not_after: int = 4_000_000_000,
     streams: dict[str, bytes] | None = None,
+    aci: str = "none",
+    plain=None,
+    record_key: int = KEY,
+    more_keys: tuple[int, ...] = (),
 ):
     """nano-gpt as live (Nov 4 2026): the attestation's quote binds the signing
     key; the keyset beside it lists that key as its e2ee key ("e2ee"), or the
     quote binds the keyset itself ("statement"), or neither ("none"); the
     signature lookup returns the record the signing key signed and RedPill's
     receipt, signed by the keyset's Ed25519 key, for `stream`'s bytes, or, with
-    `streams`, for the bytes of the reply each lookup names (its receipt id)."""
+    `streams`, for the bytes of the reply each lookup names (its receipt id).
+
+    `aci` is what `report=aci` answers (Nov 10 2026): RedPill's report
+    binding the keyset to our nonce ("bound"), to another ("unbound"), a 400
+    ("400"), or the plain report as before nano-gpt offered it ("none").
+    `plain(nonce) -> (status, body)` stands in for the plain report. The
+    record is signed by `record_key` (the signing key by default), and the
+    keyset lists `more_keys` as secp256k1 e2ee keys too."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from datoolkit.llm import tee
@@ -1048,7 +1066,15 @@ def receipt_server(
                 "key_id": "dstack-kms-e2ee-v1",
                 "algo": "secp256k1-aes-256-gcm-hkdf-sha256",
                 "public_key": _public(KEY if tied != "none" else 7),
-            }
+            },
+            # live, beside it: an X25519 key, which signs nothing
+            {"key_id": "dstack-kms-e2ee-x25519-v1", "algo": "x25519-aes-256-gcm-hkdf-sha256",
+             "public_key": "fc" * 32},
+            *(
+                {"key_id": f"dstack-kms-e2ee-v{2 + i}", "algo": "secp256k1-aes-256-gcm-hkdf-sha256",
+                 "public_key": _public(key)}
+                for i, key in enumerate(more_keys)
+            ),
         ],
         "tls_public_keys": [],
     }
@@ -1068,6 +1094,34 @@ def receipt_server(
             )
         if "/tee/attestation" in url:
             nonce = request.url.params["nonce"]
+            if request.url.params.get("report") == "aci" and aci != "none":
+                if aci == "400":
+                    return httpx.Response(
+                        400,
+                        json={"error": "report=aci is only available for models served through RedPill"},
+                    )
+                bound_to = nonce if aci == "bound" else "ab" * 32
+                statement = (
+                    f'{{"keyset_digest":"{keyset_digest}","nonce":"{bound_to}",'
+                    '"purpose":"aci.report_data.v1"}'
+                ).encode()
+                report = hashlib.sha256(statement).digest() + bytes(32)
+                return httpx.Response(
+                    200,
+                    json={
+                        "api_version": "aci/1",
+                        "workload_keyset_digest": keyset_digest,
+                        "attestation": {
+                            "tee_type": "tdx",
+                            "workload_keyset": keyset,
+                            "report_data": report[:32].hex(),
+                            "evidence": {"quote": fake_quote(report)},
+                        },
+                    },
+                )
+            if plain is not None:
+                status, body = plain(nonce)
+                return httpx.Response(status, json=body)
             if tied == "statement":
                 statement = (
                     f'{{"keyset_digest":"{keyset_digest}","nonce":"{nonce}",'
@@ -1119,7 +1173,7 @@ def receipt_server(
                 200,
                 json={
                     "text": text,
-                    "signature": sign(personal_hash(text.encode()), KEY, 4242).hex(),
+                    "signature": sign(personal_hash(text.encode()), record_key, 4242).hex(),
                     "signing_address": address,
                     "signing_algo": "ecdsa",
                     "receipt": receipt,
@@ -1277,3 +1331,148 @@ def test_expired_receipt_keys_are_refused():
     for tied in ("statement", "e2ee"):
         with pytest.raises(TeeRefused, match="attested keys expired"):
             receipt_client(tied=tied, not_after=1)
+
+
+# --- the gateway's own report (report=aci, nano-gpt, Nov 10 2026) ----------------------
+# From SealedLore's tests of the same change (268ed20). Here a key the gateway's report binds
+# is RedPill's gateway, so its attestation names the model's own enclave short (DA Vibe
+# Manager's rule), where SealedLore's is whole.
+
+SECOND = 0x5EC0D  # another secp256k1 key the keyset may list (live, one, and an X25519 key)
+
+
+def test_the_gateways_report_binds_the_receipt_keys_and_only_the_models_own_enclave_is_short():
+    seen: list = []
+    client = receipt_client(aci="bound", seen=seen)
+    result = client.attest()
+    assert result.level == "partial" and result.shortfalls == [OWN_ENCLAVE_UNCHECKED]
+    assert "binds its receipt keys" in result.detail and "gateway's Intel TDX quote" in result.detail
+    assert client.keyset is not None and result.signers == [address_of(KEY).lower()]
+    assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
+    asked = [r for r in seen if "/tee/attestation" in str(r.url)]
+    aci = [r for r in asked if r.url.params.get("report") == "aci"]
+    assert aci and all(
+        len(r.url.params["nonce"]) == 64 and r.url.params["nonce"] == r.url.params["nonce"].lower()
+        for r in asked
+    )
+    assert len({r.url.params["nonce"] for r in asked}) == len(asked), "a fresh nonce for each"
+    assert all(r.extensions["timeout"]["read"] == 90.0 for r in asked), "Chutes' evidence can take a minute"
+    assert not any("X-TEE-Verification-Route" in r.headers for r in asked)
+
+
+def test_a_reply_is_checked_against_every_key_the_gateways_quote_binds():
+    """A record signed by another secp256k1 key of the keyset is the gateway's too (its X25519 key
+    signs nothing); without the gateway's report only the attested signing key counts, and a key
+    outside the keyset never does."""
+    both = receipt_client(aci="bound", more_keys=(SECOND,), record_key=SECOND)
+    assert both.attest().signers == sorted({address_of(KEY).lower(), address_of(SECOND).lower()})
+    assert both.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
+    alone = receipt_client(aci="400", more_keys=(SECOND,), record_key=SECOND)
+    assert alone.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "failed"
+    outside = receipt_client(aci="bound", record_key=SECOND)
+    assert outside.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "failed"
+
+
+def test_a_gateway_report_for_another_nonce_is_refused():
+    with pytest.raises(TeeRefused, match="gateway didn't bind its keys to our nonce"):
+        receipt_client(aci="unbound")
+
+
+def test_without_the_gateways_report_the_receipt_keys_are_named_short():
+    result = receipt_client(aci="400").attest()
+    assert RECEIPT_KEYS_LOOSE in result.shortfalls
+
+
+def test_a_gateway_whose_keys_dont_hold_the_signing_key_counts_for_nothing():
+    client = receipt_client(aci="bound", tied="none")
+    result = client.attest()
+    assert RECEIPT_KEYS_LOOSE in result.shortfalls
+    assert "don't include the signing key" in result.detail
+    assert client.keyset is None
+
+
+def test_expired_gateway_keys_are_refused():
+    with pytest.raises(TeeRefused, match="attested keys expired"):
+        receipt_client(aci="bound", not_after=1)
+
+
+RELAYED = {
+    "attestation_type": "chutes",
+    "nonce": "f9" * 32,
+    "all_attestations": [{"intel_quote": "", "gpu_evidence": []}],
+}
+
+
+def test_the_gateway_stands_in_for_a_model_whose_own_evidence_was_relayed():
+    """Live, TEE/deepseek-v3.2: its own report is Chutes' for the relay's nonce,
+    its replies RedPill's, with receipts."""
+    client = receipt_client(aci="bound", plain=lambda nonce: (200, RELAYED))
+    result = client.attest()
+    assert result.level == "partial" and result.shortfalls == ["no GPU evidence", OWN_ENCLAVE_UNCHECKED]
+    assert "the gateway that answers it is attested instead" in result.detail
+    assert result.signing_address is None and result.signers == [address_of(KEY).lower()]
+    assert client.signs() and client.signs("rcpt-1")
+    assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
+    # Without the gateway, refused as before.
+    with pytest.raises(TeeRefused, match="nonce the relay chose"):
+        receipt_client(aci="400", plain=lambda nonce: (200, RELAYED))
+
+
+def test_a_slow_attestation_is_asked_again_with_a_new_nonce_then_the_gateway_stands_in():
+    timeout = {
+        "error": "RedPill attestation service took too long to respond. Please retry.",
+        "code": "tee_attestation_upstream_timeout",
+    }
+    asked: list[str] = []
+
+    def once(nonce):
+        asked.append(nonce)
+        return (504, timeout) if len(asked) == 1 else (200, RELAYED)
+
+    receipt_client(aci="bound", plain=once)
+    assert len(asked) == 2 and asked[0] != asked[1]
+    always = receipt_client(aci="bound", plain=lambda nonce: (504, timeout))
+    assert always.attest().shortfalls == ["no GPU evidence", OWN_ENCLAVE_UNCHECKED]
+    assert "its own attestation timed out: the gateway that answers it" in always.attest().detail
+    with pytest.raises(TeeRefused, match="provider's side"):
+        receipt_client(aci="400", plain=lambda nonce: (504, timeout))
+
+
+@pytest.mark.parametrize(
+    "answer, refusal",
+    [
+        ((429, {"error": "Rate limit exceeded"}), "couldn't be fetched: .*429: Rate limit exceeded"),
+        ((502, {"error": "Unable to reach the attestation service"}), "provider's side"),
+        ((400, {"error": "No attestation for this model"}), "offers no attestation"),
+        ((200, {"error": "the upstream failed"}), "couldn't attest .*the upstream failed"),
+    ],
+)
+def test_only_a_timeout_lets_the_gateway_stand_in(answer, refusal):
+    """Not a rate limit, a refusal, an outage or an answer holding nothing to check (SealedLore's
+    gateway stands in for each): for a model Chutes answers first, the gateway's report covers
+    none of the instances that answer most of its requests (live, a 429 had TEE/glm-5.1 attested
+    through the gateway alone)."""
+    with pytest.raises(TeeRefused, match=refusal):
+        receipt_client(model="TEE/glm-5.1", aci="bound", plain=lambda nonce: answer)
+
+
+def test_a_chutes_model_with_the_gateway_checks_the_replies_redpill_answers(instances):
+    """Chutes answers first and signs nothing; a reply RedPill answers instead
+    names its receipt, checked against the gateway's bound keys."""
+    client = receipt_client(
+        model="TEE/glm-5.1", aci="bound", plain=lambda nonce: (200, instances.body(nonce))
+    )
+    result = client.attest()
+    assert result.level == "full" and result.instances == 2
+    assert "RedPill's gateway answers instead is checked against its attested keys" in result.detail
+    assert client.signs("rcpt-1") and not client.signs(None)
+    assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
+    with pytest.raises(ProviderError, match="signs no replies"):
+        client.check_reply("req_9", body_hash=streamed())
+    # Chutes alone (report=aci answers 400): unsigned, as before.
+    alone = receipt_client(
+        model="TEE/kimi-k3", aci="400", plain=lambda nonce: (200, instances.body(nonce))
+    )
+    assert not alone.signs("rcpt-1") and alone.attest().signers == []
+    with pytest.raises(ProviderError, match="signs no replies"):
+        alone.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed())

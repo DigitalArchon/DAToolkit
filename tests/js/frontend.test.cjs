@@ -326,6 +326,18 @@ test("a TEE reply's mark says how far its check went, and anything short of veri
     /exact bytes this app received/);
 });
 
+test("a TEE model's tooltip names every key its replies are checked against", async () => {
+  const app = await page("a");
+  const title = (att) => app.call("attestLabel",
+    { status: "verified", kind: "tee", level: "partial", summary: "s", detail: "d", ...att }).title;
+  assert.match(title({ signing_address: "0xaa", signers: ["0xaa", "0xbb"] }), /\nReply-signing keys: 0xaa, 0xbb\n/);
+  assert.match(title({ signing_address: "0xaa" }), /\nReply-signing key: 0xaa\n/);    // as attested before signers
+  assert.match(title({ signers: ["0xbb"] }), /\nReply-signing key: 0xbb\n/);           // through the gateway alone
+  assert.match(title({ signers: ["0xbb"], instances: 12 }),
+    /\nA reply RedPill's gateway answers instead is checked against: 0xbb\n/);
+  assert.doesNotMatch(title({ signers: [], instances: 12 }), /Reply-signing|checked against/);
+});
+
 test("plain http to anywhere but this computer, its network or an onion is a link that isn't secure", async () => {
   const app = await page("a");
   const insecure = (url) => app.call("insecureLink", url);

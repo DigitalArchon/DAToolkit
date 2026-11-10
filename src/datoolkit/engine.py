@@ -1092,14 +1092,17 @@ class Engine:
         """Was this reply the attested enclave's, as received? Checked off the event loop (it waits
         for a receipt): "verified": its record was signed by the enclave's key, for the exact bytes
         this app got, its receipt (where read) holding; "signed": signed, the bytes not comparable;
-        "failed"; "unchecked": no record could be read; "unsigned": the provider signs none. A
+        "failed"; "unchecked": no record could be read; "unsigned": the provider signs none (Chutes,
+        unless RedPill's gateway answered instead and named its receipt: llm/tee.py signs). A
         failed one has its model, `key`, attested again before its next request (_tee_guard)."""
         rid, receipt_id, body_hash, route = record
         try:
             outcome = await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
                                               body_hash=body_hash, route=route)
         except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
-            outcome = "unsigned" if client.signing_address is None else "unchecked"
+            # signed by the keys a model attested through RedPill's gateway alone, too, which has
+            # no signing address of its own
+            outcome = "unchecked" if client.signs(receipt_id) else "unsigned"
         if outcome == "failed":
             self._tee_doubted.add(key)
         return outcome

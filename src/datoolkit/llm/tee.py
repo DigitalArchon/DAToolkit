@@ -6,24 +6,29 @@ TEE/ models it is RedPill's gateway (its "aci/1" report, relayed by nano-gpt), w
 request on to the model's host (Phala, NEAR AI, Tinfoil, Chutes...). Its quote is the gateway VM's;
 the GPU evidence is the upstream node's, made with our nonce but not bound to the gateway's quote;
 that the model itself runs in an enclave isn't in the report. So such an attestation is "partial"
-here ("the model's own enclave unchecked"), and the top bar says so. For a model sealed end to
-end, use a private/ one (llm/private_mode.py).
+here ("the model's own enclave unchecked"), and the top bar says so, a model attested through
+the gateway alone too. For a model sealed end to end, use a private/ one (llm/private_mode.py).
 
 nano-gpt's `TEE/*` models run inside a trusted execution environment. Two
 calls let a client check that (docs.nano-gpt.com/api-reference/tee-verification):
 
 - `GET {base}/tee/attestation?model=&nonce=` returns the enclave's
   `signing_address`, an Intel TDX quote (`intel_quote`) and NVIDIA GPU evidence
-  (`nvidia_payload`). The quote's report data, read from its own bytes, must be
-  the signing address, zero padding, then our nonce. The quote is verified up
-  to Intel's pinned root, with Intel's revocation lists and TCB ratings
-  (llm/dcap.py). The GPU evidence goes to NVIDIA's attestation service,
+  (`nvidia_payload`), or, for a model Chutes answers, each instance's evidence.
+  The quote's report data, read from its own bytes, must be the signing
+  address, zero padding, then our nonce. With `&report=aci` (Nov 10 2026),
+  RedPill's gateway's own report: its quote binds the gateway's whole keyset,
+  the receipt key and the record-signing keys, to our nonce
+  (`_attest_gateway`). Both are asked for, each with its own nonce. Each quote
+  is verified up to Intel's pinned root, with Intel's revocation lists and TCB
+  ratings (llm/dcap.py). The GPU evidence goes to NVIDIA's attestation service,
   and NVIDIA's signed answer must be for our nonce and pass
   (llm/nras.py). `attest` refuses (`TeeRefused`) or returns a "full" or
   "partial" attestation: see its docstring.
 - `GET {base}/tee/signature/{receipt or completion id}?model=` returns a
   `text` and an EIP-191 `signature`; the signer recovered from them must be
-  the attested address (llm/ethsig.py). Since Nov 2026 (RedPill's signed
+  an attested address (llm/ethsig.py): the signing key the quote binds, or a
+  key of the keyset the gateway's quote binds. Since Nov 2026 (RedPill's signed
   receipts; nano-gpt's fix of the lookup, which had answered 404) the text's
   `sha256(response)` is the hash of the exact bytes a stream carried, and the
   answer carries RedPill's receipt too (`check_reply`; from SealedLore's copy
@@ -36,10 +41,12 @@ nano-gpt passes a model's stream through); and, where read, the gateway's
 receipt for that reply says its upstream was verified. What it doesn't
 prove: which software that machine runs (no measurement is compared to a
 published one), what was sent (the request is hashed as nano-gpt forwarded
-it), or, through nano-gpt, that the receipt's key is in the quote (it binds
-the signing key; the receipt keyset is only published beside it). Nor is the
-call end-to-end private: plaintext passes nano-gpt's gateway. For that, a
-`private/` model (llm/private_mode.py).
+it), or, where nano-gpt has no gateway report for a model, that the
+receipt's key is in the quote (`RECEIPT_KEYS_LOOSE`). Nor is the call
+end-to-end private: plaintext passes nano-gpt's gateway. For that, a
+`private/` model (llm/private_mode.py). Every request to a TEE model is
+streamed (llm/client.py, engine.py), so nano-gpt's exact mode for whole
+replies (`X-NanoGPT-TEE-Response`) isn't needed.
 """
 
 from __future__ import annotations
@@ -65,6 +72,9 @@ from .secure_http import ProviderError, make_client
 
 NRAS_URL = "https://nras.attestation.nvidia.com/v3/attest/gpu"
 TIMEOUT_SECONDS = 30.0
+# Chutes' evidence can take about a minute (nano-gpt, Nov 10 2026; live, 25 s
+# for TEE/gemma4-31b:thinking's 40 instances, in SealedLore).
+ATTESTATION_TIMEOUT_SECONDS = 90.0
 # A stream's receipt is complete just after the stream ends (nano-gpt's own
 # example waits up to about 20 seconds).
 RECEIPT_WAIT_SECONDS = 20.0
@@ -73,8 +83,13 @@ RECEIPT_RETRY_SECONDS = 2.0
 # never match the receipt's hash (nano-gpt, Nov 2026).
 REBUILT_STREAMS = frozenset({"TEE/gemma-4-31b-it"})
 # Named in the attestation's shortfalls: the quote binds the key that signs
-# each reply's record, not the receipt keys around it.
+# each reply's record, not the receipt keys around it (where nano-gpt has no
+# gateway report for the model, `_attest_gateway`).
 RECEIPT_KEYS_LOOSE = "receipt keys not in the quote"
+# Named in the attestation's shortfalls: what is attested is RedPill's
+# gateway, which passes each request on to the model's host (from DA Vibe
+# Manager's copy of this module, Nov 2026).
+OWN_ENCLAVE_UNCHECKED = "the model's own enclave unchecked (RedPill's gateway)"
 
 
 @dataclass
@@ -87,6 +102,10 @@ class Attestation:
 
     verified: bool = False
     signing_address: str | None = None
+    # Every key a reply's record may be signed by (lowercase addresses): the attested signing
+    # key, or each key of the keyset the gateway's quote binds. Empty for a provider that signs
+    # no replies.
+    signers: list[str] = field(default_factory=list)
     nonce_ok: bool = False
     gpu_ok: bool | None = None
     checked_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
@@ -273,12 +292,19 @@ class _Checks:
         self.tcb(other.status)
         self.gpus += other.gpus
 
-    def attestation(self, *, signing_address: str | None = None, instances: int = 0) -> Attestation:
+    def attestation(
+        self,
+        *,
+        signing_address: str | None = None,
+        signers: frozenset[str] = frozenset(),
+        instances: int = 0,
+    ) -> Attestation:
         return Attestation(
             verified=True,
             level="partial" if self.shortfalls else "full",
             shortfalls=list(self.shortfalls),
             signing_address=signing_address,
+            signers=sorted(signers),
             nonce_ok=True,
             gpu_ok=True if self.gpus else None,
             gpus=self.gpus,
@@ -290,6 +316,18 @@ class _Checks:
 
 class TeeRefused(ProviderError):
     """The enclave's attestation doesn't hold: nothing may be sent to it."""
+
+
+@dataclass(frozen=True)
+class _Gateway:
+    """RedPill's gateway, attested for our nonce (`TeeClient._attest_gateway`)."""
+
+    keyset: dict[str, Any]
+    # The addresses of the secp256k1 keys the keyset lists: those that sign
+    # each reply's record (the gateway's e2ee key, live Nov 2026; the X25519
+    # e2ee key beside it signs nothing).
+    signers: frozenset[str]
+    check: _Checks
 
 
 class TeeClient:
@@ -309,6 +347,11 @@ class TeeClient:
         self._client = client or make_client(base_url, timeout=httpx.Timeout(TIMEOUT_SECONDS))
         self._owns = client is None
         self.signing_address: str | None = None
+        # Who may sign a reply's record: the attested signing key, or every
+        # key of the keyset a quote binds (lowercase addresses).
+        self.signers: frozenset[str] = frozenset()
+        # Attested by its instances (Chutes), whose replies carry no record.
+        self.instances = False
         # The receipt keys, when tied to the attested quote (`_take_keyset`).
         self.keyset: dict[str, Any] | None = None
         self.keyset_digest: str | None = None
@@ -322,7 +365,12 @@ class TeeClient:
             self._client.close()
 
     def _get(
-        self, path: str, params: dict[str, str], *, route: str | None = None
+        self,
+        path: str,
+        params: dict[str, str],
+        *,
+        route: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         if route:
@@ -331,7 +379,12 @@ class TeeClient:
         last: str = ""
         for base in [self._base] if self._base else _bases(self.base_url):
             try:
-                response = self._client.get(f"{base}{path}", params=params, headers=headers)
+                response = self._client.get(
+                    f"{base}{path}",
+                    params=params,
+                    headers=headers,
+                    **({"timeout": timeout} if timeout is not None else {}),
+                )
             except httpx.HTTPError as exc:
                 last = netguard.scrubbed(exc)
                 continue
@@ -372,6 +425,16 @@ class TeeClient:
           quote binding that instance's own key, which signs a body carrying our
           nonce, the quote and the GPU evidence (`_attest_instances`).
 
+        Beside it, with a nonce of its own, RedPill's gateway's own report
+        (`report=aci`, Nov 10 2026: `_attest_gateway`), whose quote binds the
+        gateway's whole keyset to our nonce. Where it holds, a signing key in
+        that keyset takes the bound receipt keys; a model whose own report was
+        relayed for a nonce not ours, or timed out, is attested through the
+        gateway alone (`_attest_gateway_alone`); and a Chutes model's reply
+        RedPill answers instead is checked against the gateway's keys. Where
+        nano-gpt has none (a model only Chutes or Tinfoil serves, an outage),
+        the model's own report is taken as before.
+
         Refuses (`TeeRefused`, and nothing may be sent) when an enclave can't be
         trusted: no attestation, a quote that doesn't bind our nonce (directly, or
         by a key the quote binds), a quote Intel's chain doesn't vouch for (forged,
@@ -379,7 +442,9 @@ class TeeClient:
         whose NVIDIA verdict is unsigned, stale, for another nonce or negative
         (llm/dcap.py, llm/nras.py), any instance that failed to attest
         (a request could be routed to it), evidence relayed for a nonce the
-        relay chose (RedPill: replayable), or attested keys past their expiry.
+        relay chose (RedPill: replayable) with no attested gateway to stand in,
+        a gateway report in RedPill's shape that doesn't bind our nonce, or
+        attested keys past their expiry.
 
         What merely couldn't be checked (Intel's collateral or NVIDIA's service out
         of reach, no GPU evidence offered) or isn't current (any Intel TCB status
@@ -389,39 +454,37 @@ class TeeClient:
         the report data was read from nano-gpt's copy, and neither Intel's nor
         NVIDIA's signatures were checked. Anything can echo a string.
         """
-        nonce = secrets.token_hex(32)
+        self.signing_address = None
+        self.signers = frozenset()
+        self.keyset = self.keyset_digest = None
+        self.instances = False
+        gateway = self._attest_gateway()
         try:
-            body = self._get("/tee/attestation", {"model": self.model, "nonce": nonce})
+            body, nonce = self._fetch_attestation()
         except ProviderError as exc:
-            reason = exc.body or ""
-            if exc.status_code == 400:
-                # Live (Sept 2026): the Tinfoil-hosted TEE/ models offer no
-                # attestation here; nano-gpt says fresh attestation for them only
-                # comes through Tinfoil's own flow, the one their private/ twins use.
-                hint = (
-                    "; its end-to-end encrypted private/ version, where nano-gpt offers "
-                    "one, is attested that way"
-                    if "tinfoil" in reason.lower()
-                    else ""
-                )
-                raise TeeRefused(
-                    f"{self.model} offers no attestation"
-                    + (f" (nano-gpt: {reason})" if reason else "")
-                    + hint
-                ) from exc
-            if exc.status_code is not None and exc.status_code >= 500:
-                raise TeeRefused(
-                    f"nano-gpt couldn't fetch {self.model}'s attestation just now ({exc}); "
-                    "this is on the provider's side, and may pass if tried again"
-                ) from exc
-            raise TeeRefused(f"{self.model}'s attestation couldn't be fetched: {exc}") from exc
+            # Only a timeout lets the gateway stand in (live, Nov 10 2026: TEE/qwen3.6-27b's
+            # report, a 504 twice). SealedLore lets it stand in for any failure, but a refusal
+            # (400), a rate limit (429) or an outage says nothing of where the model's requests go,
+            # and for a model Chutes answers first the gateway's report covers none of the
+            # instances that answer most of them: live, a 429 had TEE/glm-5.1 attested through the
+            # gateway alone, its 12 instances unchecked. A Chutes model whose evidence times out
+            # still is: its instances' replies then show as not verified, never as verified.
+            if gateway is not None and exc.status_code == 504:
+                return self._attest_gateway_alone(gateway, "its own attestation timed out")
+            raise self._refused(exc) from exc
         if isinstance(body.get("evidence"), list):
-            return self._attest_instances(body, nonce)
+            return self._attest_instances(body, nonce, gateway)
         if isinstance(body.get("all_attestations"), list) and "signing_address" not in body:
             # RedPill relaying Chutes (live, Sept 2026: TEE/glm-5.1, TEE/qwen3.5-27b,
-            # TEE/qwen3.5-397b-a17b). The quotes are made for a nonce the relay
-            # chose, not ours nor derived from it, and nothing signed ties them to
-            # ours: they would read the same replayed from any earlier day.
+            # TEE/qwen3.5-397b-a17b; Nov 10 2026: TEE/deepseek-v3.2). The quotes are
+            # made for a nonce the relay chose, not ours nor derived from it, and
+            # nothing signed ties them to ours: they would read the same replayed
+            # from any earlier day. The gateway that answers, attested for our
+            # nonce, can stand in (`_attest_gateway_alone`).
+            if gateway is not None:
+                return self._attest_gateway_alone(
+                    gateway, "its upstream's evidence was relayed for a nonce not ours"
+                )
             why = (
                 "made for a nonce the relay chose, not ours"
                 if body.get("nonce") != nonce
@@ -433,7 +496,9 @@ class TeeClient:
                 "show the enclave is live for this request"
             )
         if body.get("signing_address") or body.get("intel_quote"):
-            return self._attest_signing_key(body, nonce)
+            return self._attest_signing_key(body, nonce, gateway)
+        # Nor does one that holds nothing to check (SealedLore's gateway stands in for it too),
+        # for the same reason.
         if body.get("error"):
             raise TeeRefused(f"nano-gpt couldn't attest {self.model}: {body['error']}")
         raise TeeRefused(
@@ -441,7 +506,136 @@ class TeeClient:
             f"(it holds {', '.join(sorted(body)) or 'nothing'})"
         )
 
-    def _attest_signing_key(self, body: dict[str, Any], nonce: str) -> Attestation:
+    def _fetch_attestation(self, *, aci: bool = False) -> tuple[dict[str, Any], str]:
+        """nano-gpt's attestation for a fresh nonce, and the nonce. A 504 (the
+        provider's evidence took too long: `tee_attestation_upstream_timeout`)
+        is asked once more with a new nonce, as nano-gpt says to.
+
+        No `X-TEE-Verification-Route` goes with it, though nano-gpt reads one
+        here too (nor does SealedLore send one): attestation comes before the
+        request, so no reply has named a route yet, and a route a past reply
+        named would pin the next attestation to that reply's route (nano-gpt
+        answers with that route's report: for a Chutes model, RedPill's in
+        place of the instances it is routed to first), or, an hour old, make it
+        answer 400, a refusal. Without one, both routes a model may take are
+        attested: its own report, and the gateway's (`report=aci` needs none).
+        The route goes on the signature lookups (`_signature`)."""
+        for attempt in range(2):
+            nonce = secrets.token_hex(32)
+            params = {"model": self.model, "nonce": nonce}
+            if aci:
+                params["report"] = "aci"
+            try:
+                body = self._get("/tee/attestation", params, timeout=ATTESTATION_TIMEOUT_SECONDS)
+            except ProviderError as exc:
+                if exc.status_code == 504 and not attempt:
+                    continue
+                raise
+            return body, nonce
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _refused(self, exc: ProviderError) -> TeeRefused:
+        """Why the attestation couldn't be had, as a refusal."""
+        reason = exc.body or ""
+        if exc.status_code == 400:
+            # Live (Sept 2026): the Tinfoil-hosted TEE/ models offer no
+            # attestation here; nano-gpt says fresh attestation for them only
+            # comes through Tinfoil's own flow, the one their private/ twins use.
+            hint = (
+                "; its end-to-end encrypted private/ version, where nano-gpt offers "
+                "one, is attested that way"
+                if "tinfoil" in reason.lower()
+                else ""
+            )
+            return TeeRefused(
+                f"{self.model} offers no attestation"
+                + (f" (nano-gpt: {reason})" if reason else "")
+                + hint
+            )
+        if exc.status_code is not None and exc.status_code >= 500:
+            return TeeRefused(
+                f"nano-gpt couldn't fetch {self.model}'s attestation just now ({exc}); "
+                "this is on the provider's side, and may pass if tried again"
+            )
+        return TeeRefused(f"{self.model}'s attestation couldn't be fetched: {exc}")
+
+    def _attest_gateway(self) -> _Gateway | None:
+        """RedPill's gateway, attested for our nonce (`report=aci`, nano-gpt,
+        Nov 10 2026), or None where nano-gpt has no such report: a model only
+        Chutes or Tinfoil serves (HTTP 400), an outage, or another shape.
+
+        The quote's report data is the SHA-256 of RedPill's attestation
+        statement, the gateway's whole keyset and our nonce, zero padded
+        (`_statement`): the hardware binds the receipt key and the keys that
+        sign each reply's record, which nano-gpt's other report doesn't (it
+        binds one signing key, the keyset published beside it). Every model
+        RedPill serves is answered by the same gateway image (live, in
+        SealedLore: 14 of 14 quotes alike, plain and aci). Refuses a report in
+        RedPill's shape that doesn't bind our nonce, Intel doesn't vouch for,
+        or whose keys are past their expiry."""
+        try:
+            body, nonce = self._fetch_attestation(aci=True)
+        except ProviderError:
+            return None
+        report = body.get("attestation") if body.get("api_version") == "aci/1" else None
+        evidence = report.get("evidence") if isinstance(report, dict) else None
+        keyset = report.get("workload_keyset") if isinstance(report, dict) else None
+        if not (isinstance(evidence, dict) and isinstance(keyset, dict) and evidence.get("quote")):
+            return None
+        try:
+            raw = bytes.fromhex(str(evidence["quote"]))
+            quote = dcap.parse_quote(raw)
+        except (ValueError, dcap.DcapError) as exc:
+            raise TeeRefused(
+                f"{self.model}'s gateway's Intel TDX quote couldn't be read ({exc})"
+            ) from exc
+        # From the quote's own bytes, never nano-gpt's copy (`report_data`,
+        # `quote_report_data`).
+        if quote.report_data != _statement(keyset, nonce):
+            raise TeeRefused(f"{self.model}'s gateway didn't bind its keys to our nonce")
+        self._refuse_expired(keyset)
+        check = _Checks("the gateway's Intel TDX quote binds its keys to our nonce")
+        self._check_quote(raw, check)
+        signers = frozenset(
+            address
+            for entry in keyset.get("e2ee_public_keys") or []
+            if isinstance(entry, dict)
+            and (address := _address_of_public(entry.get("public_key"))) is not None
+        )
+        return _Gateway(keyset=keyset, signers=signers, check=check)
+
+    def _refuse_expired(self, keyset: dict[str, Any] | None) -> None:
+        """Keys the gateway's keyset holds only until a time now past are
+        refused (DA Vibe Manager's rule): what was attested is keys no longer
+        in force. A keyset that names no such time isn't used for the receipts,
+        and falls short (`_take_keyset`)."""
+        expires = keyset.get("not_after") if keyset is not None else None
+        if isinstance(expires, (int, float)) and expires < time.time():
+            raise TeeRefused(f"{self.model}'s attested keys expired on {datetime.fromtimestamp(expires, UTC):%Y-%m-%d}")
+
+    def _attest_gateway_alone(self, gateway: _Gateway, why: str) -> Attestation:
+        """The gateway, attested for our nonce, stands for a model whose own
+        attestation timed out or can't be checked (live, Nov 10 2026, in
+        SealedLore: TEE/deepseek-v3.2, relayed for a nonce not ours;
+        TEE/qwen3.6-27b, a 504). Its replies are signed by the gateway's bound keys and carry its
+        receipts; the model's own enclave and GPUs are then the gateway's word
+        in each receipt (`upstream.verified`), not checked here: so it falls
+        short, of GPU evidence and of the model's own enclave."""
+        check = _Checks(f"{why}: the gateway that answers it is attested instead")
+        check.merge(gateway.check)
+        check.fall_short("no GPU evidence")
+        check.fall_short(OWN_ENCLAVE_UNCHECKED)
+        check.note(
+            "its own enclave isn't attested here: each reply's receipt carries the "
+            "gateway's word that its upstream was verified"
+        )
+        self.signers = gateway.signers
+        self._take_keyset(gateway.keyset, "the quote binds its receipt keys", check)
+        return check.attestation(signers=self.signers)
+
+    def _attest_signing_key(
+        self, body: dict[str, Any], nonce: str, gateway: _Gateway | None = None
+    ) -> Attestation:
         """aci/1: one enclave, its reply-signing key and our nonce in its quote."""
         address = body.get("signing_address")
         address = address if isinstance(address, str) and address.startswith("0x") else None
@@ -459,18 +653,35 @@ class TeeClient:
         report_data = quote.report_data
         keyset = _keyset_of(body)
         holds = keyset is not None and _holds_key(keyset, address)
+        signers = frozenset({address.lower()})
+        # The signing key is one of the keys the gateway's own quote binds.
+        bound_by_gateway = gateway is not None and address.lower() in gateway.signers
         if (
             report_data[:20] == bytes.fromhex(address[2:])
             and not any(report_data[20:32])
             and report_data[32:] == bytes.fromhex(nonce)
         ):
             check = _Checks("the Intel TDX quote binds the signing key to our nonce")
-            tie = "its receipt keys are published beside the attested signing key" if holds else ""
-            # The receipts' word that the model was verified then rests on the
-            # relay's JSON, not the hardware (nano-gpt, Nov 2026), and the same
-            # with no keyset at all: said either way, so leaving it out never
-            # reads better than sending it.
-            check.fall_short(RECEIPT_KEYS_LOOSE)
+            if bound_by_gateway and gateway is not None:
+                # The gateway's report binds the keyset this key is in: the
+                # receipt key is the hardware's too (nano-gpt's report=aci, Nov
+                # 10 2026). Its keys sign records as this one does.
+                check.merge(gateway.check)
+                keyset, signers = gateway.keyset, gateway.signers
+                tie = "the gateway's quote binds its receipt keys, the signing key among them"
+            else:
+                tie = (
+                    "its receipt keys are published beside the attested signing key"
+                    if holds
+                    else ""
+                )
+                # The receipts' word that the model was verified then rests on
+                # the relay's JSON, not the hardware, and the same with no
+                # keyset at all: said either way, so leaving it out never reads
+                # better than sending it.
+                check.fall_short(RECEIPT_KEYS_LOOSE)
+                if gateway is not None:
+                    check.note("the gateway's attested keys don't include the signing key")
         elif keyset is not None and holds and report_data == _statement(keyset, nonce):
             check = _Checks(
                 "the Intel TDX quote binds the gateway's keys, its signing key among them, "
@@ -479,16 +690,15 @@ class TeeClient:
             tie = "the quote binds its receipt keys"
         else:
             raise TeeRefused(f"{self.model}'s attestation didn't bind its signing key to our nonce")
-        expires = keyset.get("not_after") if keyset is not None else None
-        if isinstance(expires, (int, float)) and expires < time.time():
-            raise TeeRefused(f"{self.model}'s attested keys expired on {datetime.fromtimestamp(expires, UTC):%Y-%m-%d}")
+        self._refuse_expired(keyset)
         caps = body.get("service_capabilities") if isinstance(body.get("service_capabilities"), dict) else {}
-        if body.get("api_version") == "aci/1" or caps.get("serving") == "aggregator":
-            # RedPill's gateway (live, Nov 2026: the same key since Sept): it passes requests on to the model's
-            # host. Its quote is the gateway's; the GPU evidence is an upstream node's, made with our nonce but
-            # not bound to that quote; that the model itself runs in an enclave isn't shown here (RedPill says it
-            # in a signed receipt per reply). From DA Vibe Manager's copy of this module (Nov 2026).
-            check.fall_short("the model's own enclave unchecked (RedPill's gateway)")
+        if bound_by_gateway or body.get("api_version") == "aci/1" or caps.get("serving") == "aggregator":
+            # RedPill's gateway (live, Nov 2026: the same key since Sept; a key its own report binds,
+            # since Nov 10): it passes requests on to the model's host. Its quote is the gateway's; the
+            # GPU evidence is an upstream node's, made with our nonce but not bound to that quote; that
+            # the model itself runs in an enclave isn't shown here (RedPill says it in a signed receipt
+            # per reply). From DA Vibe Manager's copy of this module (Nov 2026).
+            check.fall_short(OWN_ENCLAVE_UNCHECKED)
             check.note("this is RedPill's gateway, which passes each request on to the model's host: the gateway's "
                        "quote and the GPUs' evidence are checked, not that the model itself runs in an enclave")
         self._check_quote(raw, check)
@@ -497,14 +707,16 @@ class TeeClient:
             payload if isinstance(payload, dict) else None, nonce, check, "this request's nonce"
         )
         self.signing_address = address
+        self.signers = signers
         self._take_keyset(keyset if tie else None, tie, check)
-        return check.attestation(signing_address=address)
+        return check.attestation(signing_address=address, signers=signers)
 
     def _take_keyset(self, keyset: dict[str, Any] | None, tie: str, check: _Checks) -> None:
         """The gateway's receipt-signing keys (RedPill's aci/1 `workload_keyset`),
         kept for the receipts (`check_reply`) only when tied to the quote: it
-        commits to them (RedPill's statement), or they are published with the
-        signing key it binds (nano-gpt, Nov 2026). The second is the weaker tie:
+        commits to them (RedPill's statement, or the gateway's report=aci), or
+        they are published with the signing key it binds (nano-gpt's other
+        report, Nov 2026). The second is the weaker tie:
         the quote binds that key, not the keyset around it. A keyset tied
         neither way, or expired, is not used, and receipts go unread."""
         self.keyset = self.keyset_digest = None
@@ -518,7 +730,9 @@ class TeeClient:
         self.keyset, self.keyset_digest = keyset, _digest(_canonical(keyset))
         check.note(tie)
 
-    def _attest_instances(self, body: dict[str, Any], nonce: str) -> Attestation:
+    def _attest_instances(
+        self, body: dict[str, Any], nonce: str, gateway: _Gateway | None = None
+    ) -> Attestation:
         """Per instance: each quote binds an instance key, which signed our nonce.
 
         For each instance, all of these before it counts:
@@ -534,6 +748,13 @@ class TeeClient:
           NVIDIA's verdict matches that and nothing else), so it is bound to the
           quote, and through the signature to this request.
         The instances are checked in parallel; the attestation takes the worst.
+
+        A model Chutes answers first falls back to RedPill now and then (nano-gpt,
+        Nov 10 2026): with the gateway attested too, such a reply's record and
+        receipt are checked against its bound keys, and the gateway's checks
+        count with the instances'. The attestation stays the instances': for
+        that reply, the model's own enclave is the gateway's word in its receipt,
+        as the detail says.
         """
         failed = [str(i) for i in body.get("failed_instance_ids") or []]
         instances = body["evidence"]
@@ -551,8 +772,21 @@ class TeeClient:
         )
         for result in results:
             check.merge(result)
-        attestation = check.attestation(instances=len(instances))
-        attestation.detail += "; this provider signs no replies, so answers show as unsigned"
+        self.instances = True
+        if gateway is None:
+            attestation = check.attestation(instances=len(instances))
+            attestation.detail += "; this provider signs no replies, so answers show as unsigned"
+            return attestation
+        check.merge(gateway.check)
+        self.signers = gateway.signers
+        self._take_keyset(
+            gateway.keyset,
+            "a reply RedPill's gateway answers instead is checked against its attested keys, "
+            "the model's own enclave behind it then the gateway's word in its receipt",
+            check,
+        )
+        attestation = check.attestation(signers=self.signers, instances=len(instances))
+        attestation.detail += "; the instances sign no replies, so their answers show as unsigned"
         return attestation
 
     def _check_instance(self, item: dict[str, Any], nonce: str) -> _Checks:
@@ -687,16 +921,19 @@ class TeeClient:
         route: str | None = None,
     ) -> str:
         """Was this reply the attested enclave's, as received? "verified":
-        signed by the attested key, for these exact bytes, its receipt (where
-        read) holding; "signed": signed by it, the bytes not comparable (a
-        stream nano-gpt rebuilds, or none); "failed". Raises ProviderError when
-        the check couldn't be made (the reply is then "unchecked").
+        signed by a key the quote binds (`signers`), for these exact bytes, its
+        receipt (where read) holding; "signed": signed by it, the bytes not
+        comparable (a stream nano-gpt rebuilds, or none); "failed". Raises
+        ProviderError when the check couldn't be made (the reply is then
+        "unchecked"), or when the provider signs no such reply (`signs`: the
+        reply is "unsigned").
 
         nano-gpt's record for a reply (Nov 2026: RedPill's signed receipts,
         looked up by the receipt id its headers name, or the reply's id):
 
         - `text`, "sha256(request):sha256(response)" as the gateway hashed
-          them, signed (EIP-191) by the signing key the quote bound;
+          them, signed (EIP-191) by the signing key the quote bound, or by a
+          key of the keyset the gateway's quote binds (`_attest_gateway`);
         - the response's hash is the hash of the exact bytes a stream carried
           (`body_hash`, llm/client.py), except where nano-gpt rebuilds a model's
           stream (`REBUILT_STREAMS`) or a reply wasn't streamed;
@@ -709,10 +946,7 @@ class TeeClient:
         lookup = receipt_id or response_id
         if not lookup:
             raise ProviderError("the reply carried no id to check")
-        if self.signing_address is None:
-            # Per-instance providers (Chutes) sign no replies: nano-gpt answers "TEE
-            # signature is not available for this model". Every instance that
-            # could answer was attested before sending instead.
+        if not self.signs(receipt_id):
             raise ProviderError("this model's provider signs no replies")
         body = self._signature(lookup, route, wait=receipt_id is not None)
         text, signature = body.get("text"), body.get("signature")
@@ -722,7 +956,7 @@ class TeeClient:
             signer = recover_personal(text, signature)
         except ValueError:
             return "failed"
-        if signer.lower() != self.signing_address.lower():
+        if signer.lower() not in self.signers:
             return "failed"
         request_hash, _colon, response_hash = text.partition(":")
         compared = bool(body_hash) and self.model not in REBUILT_STREAMS
@@ -733,6 +967,16 @@ class TeeClient:
             if not self._receipt_holds(receipt, request_hash, response_hash):
                 return "failed"
         return "verified" if compared else "signed"
+
+    def signs(self, receipt_id: str | None = None) -> bool:
+        """Whether the attested provider signs a reply that named this receipt
+        (or none), so that a record not found leaves it "unchecked" rather than
+        "unsigned". Per-instance providers (Chutes) sign no replies: nano-gpt
+        answers "TEE signature is not available for this model", and every
+        instance that could answer was attested before sending instead. Only a
+        reply RedPill's gateway answered names a receipt (nano-gpt, Nov 10
+        2026): one checked against the gateway's keys, where it was attested."""
+        return bool(self.signers) and not (self.instances and receipt_id is None)
 
     def _signature(self, lookup: str, route: str | None, *, wait: bool) -> dict[str, Any]:
         """The reply's record; for a reply that named its receipt, tried again

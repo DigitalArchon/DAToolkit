@@ -530,6 +530,16 @@ function renderTop() {
 // Attestation state of a model, as short text and a CSS class (chat model and vision helper).
 // TEE models: Intel TDX + NVIDIA attestation (llm/tee.py); "partial" names what couldn't be checked.
 const TEE_CLEAR = "A TEE model runs in an attested enclave, but prompts still pass NanoGPT's gateway in the clear; only private/ models are end-to-end encrypted.";
+// The keys a TEE model's replies are checked against (llm/tee.py signers): its attested signing key,
+// or every key RedPill's gateway's quote binds; for a model attested by its instances (Chutes, which
+// signs no replies), those of the gateway, for a reply it answers in their place.
+function teeSigners(att) {
+  const keys = att.signers?.length ? att.signers : att.signing_address ? [att.signing_address] : [];
+  if (!keys.length) return "";
+  const what = att.instances ? "A reply RedPill's gateway answers instead is checked against" :
+    `Reply-signing key${keys.length > 1 ? "s" : ""}`;
+  return `\n${what}: ${keys.join(", ")}`;
+}
 function attestLabel(att) {
   if (!att) return null;
   const tee = att.kind === "tee";
@@ -540,7 +550,7 @@ function attestLabel(att) {
   if (tee) {
     const partial = att.level === "partial";
     return { text: partial ? "🛡 TEE attested (partial)" : "🛡 TEE attested", cls: partial ? "warn" : "ok",
-      title: `${att.summary}.\n${att.detail}.` + (att.signing_address ? `\nReply-signing key: ${att.signing_address}` : "") + `\n${TEE_CLEAR}` };
+      title: `${att.summary}.\n${att.detail}.${teeSigners(att)}\n${TEE_CLEAR}` };
   }
   return { text: att.latest_release ? "🔐 attested (older release)" : "🔐 attested", cls: "ok",
     title: `End-to-end encrypted to an attested enclave.\n${att.summary}\nKey sha256: ${(att.hpke_key_sha256 || "").slice(0, 16)}…` };
@@ -553,7 +563,7 @@ const TEE_SIGNATURE = {
   verified: ["✔ verified", "ok", "The attested enclave's key signed this reply's record, and the record is for the exact bytes this app received. Where the gateway keeps a signed receipt it was read too, saying the model the reply came from was verified; that part is only as strong as the receipt's key, which the attestation names when the hardware's quote doesn't bind it."],
   signed: ["signed, text not compared", "", "The attested enclave's key signed this reply's record, but the reply's text can't be compared with it (NanoGPT rebuilds this model's replies), so a change on the way here wouldn't show."],
   failed: ["✖ check failed", "bad", "This reply doesn't match its record: not signed by the attested enclave's key, not the bytes that were signed, or its receipt doesn't hold (another key, another reply, or a model that wasn't verified). Treat it with suspicion. The enclave is attested again before anything more is sent to it."],
-  unsigned: ["unsigned", "", "This model's provider signs no replies; every instance that could answer was attested before sending instead."],
+  unsigned: ["unsigned", "", "This model's provider (Chutes) signs no replies; every instance that could answer was attested before sending instead. A reply RedPill's gateway answers in its place names a receipt, and is checked against the gateway's attested keys."],
   unchecked: ["⚠ reply not verified", "warn", "No signed record of this reply could be read (the provider kept none, it was out of reach, or the gateway's keys changed since it was attested), so nothing shows it came from the enclave that was attested. That is not a failed check."],
 };
 function teeBadge(e) {

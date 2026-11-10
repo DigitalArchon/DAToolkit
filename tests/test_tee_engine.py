@@ -16,7 +16,15 @@ from datoolkit.llm.tee import NRAS_URL, TeeClient
 from test_engine import env, sse, wait_turn  # noqa: F401
 from test_models import _png
 from test_research import DOC, FakeWeb, agent_turns, nano, research_call, say
-from test_tee import RECEIPT_KEYS_LOOSE, UP_TO_DATE, InstanceEvidence, receipt_server, tee_server
+from test_tee import (
+    OWN_ENCLAVE_UNCHECKED,
+    RECEIPT_KEYS_LOOSE,
+    RELAYED,
+    UP_TO_DATE,
+    InstanceEvidence,
+    receipt_server,
+    tee_server,
+)
 
 
 def tee_factory(calls: list | None = None, *, server=tee_server, **options):
@@ -177,6 +185,66 @@ async def test_a_provider_that_signs_no_replies_shows_them_unsigned(env):  # noq
     engine.send("x")
     await wait_turn(engine)
     assert await signature_of(engine.chat[-1]) == "unsigned"
+
+
+async def test_a_model_attested_through_the_gateway_alone_has_its_replies_checked(env):  # noqa: F811
+    """Live, TEE/deepseek-v3.2 (Nov 10 2026): its own evidence is relayed for a nonce not ours, and
+    was refused; RedPill's gateway, attested for ours, stands in. Its replies are signed by the
+    gateway's keys, and there is no signing address: a record that can't be read leaves a reply
+    unchecked, never unsigned."""
+    engine, fake, _ = env
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    relayed = {"aci": "bound", "plain": lambda nonce: (200, RELAYED)}
+    engine._tee_factory = tee_factory(server=receipt_server, stream=reply.encode(), **relayed)
+    engine.new_case("g", "open")
+    engine.select_model("Fake", "TEE/deepseek-v3.2")
+    att = await settled(engine)
+    assert (att["status"], att["level"]) == ("verified", "partial")
+    assert att["shortfalls"] == ["no GPU evidence", OWN_ENCLAVE_UNCHECKED]
+    assert att["summary"].startswith("partially verified: no GPU evidence")
+    assert att["signing_address"] is None and len(att["signers"]) == 1
+    fake.stream_headers = {"X-Receipt-Id": "rcpt-1"}
+    fake.responses.append(reply)
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "verified"
+    engine._tee_factory = tee_factory(server=receipt_server, not_ready=1, **relayed)   # no record kept
+    engine.select_model("Fake", "TEE/deepseek-v3.2")
+    await settled(engine)
+    fake.stream_headers = {}
+    fake.responses.append(sse(({"role": "assistant", "content": "Again."}, "stop")))
+    engine.send("and now?")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "unchecked"
+
+
+async def test_a_chutes_model_shows_its_own_replies_unsigned_and_checks_those_redpill_answers(env):  # noqa: F811
+    """Chutes answers first and signs nothing; a reply RedPill's gateway answers instead names its
+    receipt (nano-gpt, Nov 10 2026), and is checked against the gateway's attested keys."""
+    engine, fake, _ = env
+    evidence = InstanceEvidence(1)
+    reply = sse(({"role": "assistant", "content": "Hi"}, "stop"))
+    seen: list = []
+    engine._tee_factory = tee_factory(server=receipt_server, aci="bound", stream=reply.encode(), seen=seen,
+                                      plain=lambda nonce: (200, evidence.body(nonce)))
+    engine.new_case("k", "open")
+    engine.select_model("Fake", "TEE/kimi-k2.6")
+    att = await settled(engine)
+    assert (att["status"], att["level"], att["instances"]) == ("verified", "full", 1)
+    assert att["signing_address"] is None and att["signers"]
+    fake.stream_headers = {"X-TEE-Verification-Route": "chutes-r"}          # Chutes answered
+    fake.responses.append(reply)
+    engine.send("x")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "unsigned"
+    assert not [r for r in seen if "/tee/signature/" in str(r.url)], "nothing to look up"
+    fake.stream_headers = {"X-Receipt-Id": "rcpt-1", "X-TEE-Verification-Route": "redpill-r"}   # RedPill did
+    fake.responses.append(reply)
+    engine.send("y")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "verified"
+    lookup = [r for r in seen if "/tee/signature/" in str(r.url)][-1]
+    assert "/tee/signature/rcpt-1" in str(lookup.url) and lookup.headers["X-TEE-Verification-Route"] == "redpill-r"
 
 
 async def test_a_tee_vision_helper_is_attested_before_an_image_goes_to_it_and_its_description_checked(env):  # noqa: F811
