@@ -763,7 +763,11 @@ app of the author's that attests TEE models, and tested against a real attestati
    record, and RedPill's receipt keys are only published beside it), and RedPill's gateway,
    which passes each request on to the model's host, so that the model itself runs in an
    enclave isn't shown by its quote. A model attested through the gateway alone has no GPU
-   evidence either: its own enclave is then the gateway's word, in each reply's receipt. The
+   evidence either: its own enclave is then the gateway's word, in each reply's receipt. A
+   model Chutes answers first that the gateway answers now and then (GLM 5.1 and 5.2, Kimi
+   K2.6) is partial the same way, its instances attested and the gateway too; where NanoGPT
+   couldn't give the gateway's report just then (a rate limit, an outage), it falls short of
+   **RedPill's gateway unchecked** instead. The
    top bar shows **🛡 TEE attested (partial)**, and the tooltip names each shortfall and the
    keys its replies are checked against. Sending still goes ahead.
 4. **Check each reply,** wherever it comes from: the chat's, an image's description by the
