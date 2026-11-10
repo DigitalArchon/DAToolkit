@@ -230,7 +230,7 @@ async def test_a_chutes_model_shows_its_own_replies_unsigned_and_checks_those_re
     engine.new_case("k", "open")
     engine.select_model("Fake", "TEE/kimi-k2.6")
     att = await settled(engine)
-    assert (att["status"], att["level"], att["instances"]) == ("verified", "full", 1)
+    assert (att["status"], att["level"], att["instances"]) == ("verified", "partial", 1)
     assert att["signing_address"] is None and att["signers"]
     fake.stream_headers = {"X-TEE-Verification-Route": "chutes-r"}          # Chutes answered
     fake.responses.append(reply)
