@@ -1855,7 +1855,9 @@ class Engine:
             return
         details = (f"Subject: {cert['subject']}\nIssuer: {cert['issuer']}"
                    f"{' (self-signed)' if cert['self_signed'] else ''}\nValid until: {cert['not_after']}\n"
-                   f"SHA-256: {cert['sha256']}")
+                   f"SHA-256: {cert['sha256']}"
+                   # what Windows itself shows (its tools name a certificate by its SHA-1 thumbprint)
+                   + (f"\nThumbprint (SHA-1, as Windows shows it): {cert['sha1']}" if cert.get("sha1") else ""))
         if pinned:
             self.log(f"{kind}_cert_mismatch", target=where, pinned=pinned["sha256"], got=cert["sha256"])
             raise UserError(f"The certificate of {where} has CHANGED since it was pinned on {pinned.get('pinned', '?')}. "
@@ -1863,9 +1865,9 @@ class Engine:
                             "was rebuilt or its certificate renewed, or that someone is intercepting the connection. "
                             "Verify with the device owner; if the change is legitimate, remove the pin under "
                             "Settings → Hosts and connect again.")
-        hint = ("for Windows: the Remote Desktop certificate in certlm.msc" if kind == "rdp"
-                else "on Windows, `winrm enumerate winrm/config/listener` names the listener's certificate; "
-                     "open it in certlm.msc")
+        hint = ("on Windows, `Get-ChildItem 'Cert:\\LocalMachine\\Remote Desktop'` in PowerShell shows the Remote "
+                "Desktop certificate's thumbprint, as certlm.msc does" if kind == "rdp"
+                else "on Windows, `winrm enumerate winrm/config/listener` shows the listener certificate's thumbprint")
         answer = await self.ask_user(sid, (
             f"First connection to {where}. It presented this certificate:\n{details}\n\n"
             f"Verify the fingerprint with the device owner or at the console ({hint}). Trust it and pin it for "

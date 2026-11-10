@@ -835,10 +835,11 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
     host is saved and again when a session opens.
   - **The certificate is always checked.** Over HTTPS it is verified against the system's CA
     store, or, with **Validate certificate** unticked (a self-signed listener), by DA Toolkit
-    itself: on first connection you are shown its fingerprint to verify (on Windows,
-    `winrm enumerate winrm/config/listener` names the listener's certificate), and it is
-    pinned; a different certificate then blocks the connection until you forget the pin under
-    Settings → Hosts, as for RDP.
+    itself: on first connection you are shown its fingerprints to verify, and it is pinned; a
+    different certificate then blocks the connection until you forget the pin under Settings →
+    Hosts, as for RDP. Windows' own tools show a certificate's SHA-1 thumbprint, so that is
+    shown too (on Windows, `winrm enumerate winrm/config/listener` shows the listener's); the
+    pin itself is the SHA-256.
 - **RDP** opens the remote desktop in a tab, through Apache Guacamole's `guacd` on
   127.0.0.1:4822 (see the install table in the README: `sudo apt install guacd` on Ubuntu
   and Mint, and upstream's container on Debian, Arch and CachyOS). If guacd isn't there,
@@ -861,9 +862,11 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
     `systemctl --user disable podman-restart.service` if nothing else uses it.
   - **Certificates are trusted on first use and pinned.** Before every connection DA Toolkit
     reads the server's TLS certificate itself. The first time it shows you the subject,
-    issuer and SHA-256 fingerprint to verify (on Windows: the Remote Desktop certificate in
-    `certlm.msc`); after that, a different certificate blocks the connection until you forget
-    the pin in Settings → Hosts. Servers offering only legacy RDP security have no
+    issuer, SHA-256 fingerprint and the SHA-1 thumbprint Windows itself shows, to verify (on
+    Windows: `Get-ChildItem 'Cert:\LocalMachine\Remote Desktop'` in PowerShell, or the Remote
+    Desktop certificate in `certlm.msc`; `.GetCertHashString('SHA256')` on it gives the
+    SHA-256); after that, a different certificate blocks the connection until you forget the
+    pin in Settings → Hosts. Servers offering only legacy RDP security have no
     certificate, so you are warned on every connection. With guacd 1.6 or later (the
     container) the pin is also handed to guacd, which checks the certificate on the
     connection itself; guacd 1.3 (Ubuntu's and Mint's package) cannot, so there the check

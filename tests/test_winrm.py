@@ -359,3 +359,31 @@ def test_basic_refused_by_windows_names_its_defaults():
     assert "AllowUnencrypted" not in psrp_console._connection_problem(e, "basic", ssl=True)
     assert "off by default" not in psrp_console._connection_problem(AuthenticationError("x"), "ntlm")
 
+
+async def test_the_certificate_prompt_shows_the_thumbprint_windows_shows(env, tmp_path):  # noqa: F811
+    """Windows names a certificate by its SHA-1 thumbprint (certlm.msc, `winrm enumerate`, the
+    Cert: drive), so the technician is shown that beside the SHA-256 that is pinned."""
+    import hashlib
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    engine, _, events = env
+    engine.new_case("c", "open")
+    c1, k1, fp1 = _self_signed(tmp_path, "win11")
+    der = x509.load_pem_x509_certificate(c1.read_bytes()).public_bytes(serialization.Encoding.DER)
+    thumb = hashlib.sha1(der).hexdigest().upper()
+    server, port = await tls_server(c1, k1)
+    async with server:
+        got = await rdpcert.fetch_tls("127.0.0.1", port)
+        assert got["sha1"] == thumb and got["sha256"] == fp1
+        engine.cfg.hosts.append(Host("win11", "winrm", "127.0.0.1", port=port, user="test", auth="ntlm",
+                                     winrm_cert_validation=False))
+        engine.open_session = lambda kind, host_name="", _cert_checked=False: {"id": host_name}
+        opener = asyncio.create_task(engine.open_winrm("win11"))
+        await answer_prompts(engine, ["yes"])
+        await opener
+    text = [e for e in events if e["type"] == "prompt"][-1]["prompt"]["text"]
+    assert f"SHA-256: {fp1}" in text and f"Thumbprint (SHA-1, as Windows shows it): {thumb}" in text
+    assert engine.pins.get("127.0.0.1", port)["sha256"] == fp1 and "sha1" not in engine.pins.get("127.0.0.1", port)
+

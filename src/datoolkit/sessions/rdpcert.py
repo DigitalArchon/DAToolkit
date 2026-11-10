@@ -45,6 +45,12 @@ def fingerprint(der: bytes) -> str:
     return ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
 
 
+def thumbprint(der: bytes) -> str:
+    """The certificate's SHA-1 as Windows shows it (certlm.msc, the Cert: drive, `winrm
+    enumerate`), for the technician to compare by eye. Only ever shown: the pin is the SHA-256."""
+    return hashlib.sha1(der, usedforsecurity=False).hexdigest().upper()
+
+
 def describe(der: bytes) -> dict:
     try:
         c = x509.load_der_x509_certificate(der)
@@ -99,7 +105,7 @@ async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
         der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
         if not der:
             raise CertError(f"{host}:{port} sent no certificate")
-        return {"tls": True, "protocol": protocol, "sha256": fingerprint(der), **describe(der)}
+        return {"tls": True, "protocol": protocol, "sha256": fingerprint(der), "sha1": thumbprint(der), **describe(der)}
     except (asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError, ConnectionError) as e:
         raise CertError(f"TLS handshake with {host}:{port} failed: {e or type(e).__name__}") from e
     finally:
@@ -121,7 +127,7 @@ async def fetch_tls(host: str, port: int) -> dict:
         der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
         if not der:
             raise CertError(f"{host}:{port} sent no certificate")
-        return {"tls": True, "protocol": "tls", "sha256": fingerprint(der), **describe(der)}
+        return {"tls": True, "protocol": "tls", "sha256": fingerprint(der), "sha1": thumbprint(der), **describe(der)}
     except (asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError, ConnectionError) as e:
         raise CertError(f"TLS handshake with {host}:{port} failed: {e or type(e).__name__}") from e
     finally:
