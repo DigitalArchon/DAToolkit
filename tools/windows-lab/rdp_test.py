@@ -93,10 +93,14 @@ async def main():
         app.api("POST", "/api/settings", {"companion_port": 48599})
         app.api("POST", "/api/case", {"name": "Win11 RDP lab test", "sensitivity": "open"})
         for name, sec in (("LabW11-RDP", "any"), ("LabW11-RDP-NLA", "nla"), ("LabW11-RDP-TLS", "tls"),
-                          ("LabW11-RDP-Legacy", "rdp"), ("LabW11-RDP-NLAEXT", "nla-ext"), ("LabW11-RDP-BadPass", "nla")):
+                          ("LabW11-RDP-Legacy", "rdp"), ("LabW11-RDP-BadPass", "nla")):
             r = app.api("POST", "/api/hosts", {"host": {"name": name, "kind": "rdp", "host": WIN, "user": USER,
                                                         "rdp_security": sec, "rdp_layout": "en-us-qwerty"}})
             check(r.get("ok"), f"host {name} saved", r)
+        # Extended NLA: no guacd available can speak it, so it is refused when saved
+        r = app.api("POST", "/api/hosts", {"host": {"name": "LabW11-RDP-NLAEXT", "kind": "rdp", "host": WIN, "user": USER,
+                                                    "rdp_security": "nla-ext"}})
+        check(r.get("_error") and "Extended NLA" in str(r.get("detail")), "Extended NLA refused when saved", r)
         app.api("POST", "/api/hosts", {"host": {"name": "LabW11-WinRM", "kind": "winrm", "host": WIN, "user": USER,
                                                 "auth": "ntlm", "winrm_ssl": False}})
 
@@ -215,7 +219,7 @@ async def main():
             await asyncio.sleep(2)
 
             # ---- the other security modes
-            for host, expect in (("LabW11-RDP-NLA", True), ("LabW11-RDP-NLAEXT", None), ("LabW11-RDP-TLS", False),
+            for host, expect in (("LabW11-RDP-NLA", True), ("LabW11-RDP-TLS", False),
                                  ("LabW11-RDP-Legacy", False)):
                 n = len(app.prompts)
                 t0 = time.monotonic()
