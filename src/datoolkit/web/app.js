@@ -1642,19 +1642,24 @@ function rdpConnect(r) {
   r.fitTimer = null;
   const client = new Guacamole.Client(new Guacamole.WebSocketTunnel(`ws://${location.host}/ws/rdp/${encodeURIComponent(r.id)}`));
   r.client = client;
+  r.error = "";
   const display = client.getDisplay();
   r.view.replaceChildren(display.getElement());
   client.onstatechange = (st) => {
     if (client !== r.client) return;
     r.state = st;
-    r.status.textContent = RDP_STATES[st] || "";
+    // the disconnect that follows an error keeps its reason (a wrong password, a security
+    // mode the server refuses) on the bar after the toast is gone
+    r.status.textContent = st === 5 && r.error ? `disconnected: ${r.error}` : RDP_STATES[st] || "";
     r.host.classList.toggle("rdp-off", st === 5);
     rdpFit(r);
   };
   client.onerror = (status) => {
-    r.status.textContent = `error: ${status.message || status.code}`;
+    if (client !== r.client) return;
+    r.error = status.message || `error ${status.code}`;
+    r.status.textContent = `error: ${r.error}`;
     r.status.title = r.status.textContent;
-    toast(`RDP ${r.id}: ${status.message || `error ${status.code}`}`, "error", 12000);
+    toast(`RDP ${r.id}: ${r.error}`, "error", 12000);
   };
   client.onclipboard = (stream, mimetype) => {
     if (!/^text\//.test(mimetype)) return;

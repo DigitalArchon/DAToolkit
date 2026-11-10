@@ -945,7 +945,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                 engine.rdp_state(sid, False)
             try:
                 await ws.close()
-            except RuntimeError:
+            except (RuntimeError, WebSocketDisconnect):     # the page went first (closed or reconnected)
                 pass
 
     @app.websocket("/ws/term/{sid}")
