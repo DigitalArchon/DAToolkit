@@ -387,3 +387,15 @@ async def test_the_certificate_prompt_shows_the_thumbprint_windows_shows(env, tm
     assert f"SHA-256: {fp1}" in text and f"Thumbprint (SHA-1, as Windows shows it): {thumb}" in text
     assert engine.pins.get("127.0.0.1", port)["sha256"] == fp1 and "sha1" not in engine.pins.get("127.0.0.1", port)
 
+
+def test_windows_recipes_run_on_powershell_5_and_workgroup_computers():
+    """Found on Windows 11 26H2 (PowerShell 5.1, a workgroup computer): a step needing
+    PowerShell 7 failed, and the domain lookup refused an empty $env:USERDNSDOMAIN."""
+    from datoolkit import recipes
+
+    steps = [s.command for r in recipes.load_all() if r.os == "windows" for s in r.steps]
+    for cmd in steps:
+        if "-Parallel" in cmd:
+            assert "$PSVersionTable.PSVersion.Major -ge 7" in cmd
+        if "$env:USERDNSDOMAIN" in cmd:
+            assert "if ($env:USERDNSDOMAIN)" in cmd

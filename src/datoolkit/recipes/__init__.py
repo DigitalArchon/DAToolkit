@@ -85,8 +85,9 @@ BUILTIN: list[Recipe] = [
     _r("lan-discovery-windows", "Who is on the LAN", "windows", [
         ("Get-NetIPConfiguration | Select-Object InterfaceAlias, IPv4Address, IPv4DefaultGateway, DNSServer | Format-List | Out-String -Width 200", "Our addresses, gateway and DNS"),
         ("Get-NetNeighbor -AddressFamily IPv4 | Where-Object State -ne Unreachable | Sort-Object IPAddress | Format-Table IPAddress, LinkLayerAddress, State -AutoSize | Out-String -Width 200", "Neighbours already seen"),
-        ("$gw = (Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1).NextHop; $net = $gw -replace '\\.\\d+$',''; 1..254 | ForEach-Object -Parallel { if (Test-Connection -ComputerName \"$using:net.$_\" -Count 1 -Quiet -TimeoutSeconds 1) { \"$using:net.$_\" } } -ThrottleLimit 64 2>$null | Sort-Object { [version]$_ }", "Ping sweep of the gateway's /24 (PowerShell 7; on 5.1 use the next step)"),
-        ("$gw = (Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1).NextHop; $net = $gw -replace '\\.\\d+$',''; 1..254 | ForEach-Object { $ip=\"$net.$_\"; if ((New-Object Net.NetworkInformation.Ping).Send($ip, 300).Status -eq 'Success') { $ip } }", "Ping sweep, PowerShell 5.1 (slower)"),
+        # one step for both: Windows ships PowerShell 5.1, which can't run ForEach-Object -Parallel
+        # (it parses it, so the 7 branch is only skipped there)
+        ("$gw = (Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1).NextHop; $net = $gw -replace '\\.\\d+$',''; if ($PSVersionTable.PSVersion.Major -ge 7) { 1..254 | ForEach-Object -Parallel { if (Test-Connection -ComputerName \"$using:net.$_\" -Count 1 -Quiet -TimeoutSeconds 1) { \"$using:net.$_\" } } -ThrottleLimit 64 2>$null | Sort-Object { [version]$_ } } else { 1..254 | ForEach-Object { $ip=\"$net.$_\"; if ((New-Object Net.NetworkInformation.Ping).Send($ip, 300).Status -eq 'Success') { $ip } } }", "Ping sweep of the gateway's /24 (in parallel on PowerShell 7; up to ~80 s on 5.1)"),
         ("Get-NetNeighbor -AddressFamily IPv4 -State Reachable,Stale | ForEach-Object { try { $n=[Net.Dns]::GetHostEntry($_.IPAddress).HostName } catch { $n='' }; [pscustomobject]@{IP=$_.IPAddress; MAC=$_.LinkLayerAddress; Name=$n} } | Format-Table -AutoSize | Out-String -Width 200", "Reverse-resolve the neighbours found"),
     ], description="The Advanced IP Scanner question in PowerShell. nmap via winget adds MAC vendor lookup.",
        tags=["network", "lan"], install="winget install --id Insecure.Nmap -e --accept-source-agreements --accept-package-agreements",
@@ -129,7 +130,9 @@ BUILTIN: list[Recipe] = [
     ], tags=["network", "dns"]),
     _r("dns-reach-windows", "DNS and reachability", "windows", [
         ("Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Format-Table InterfaceAlias, ServerAddresses -AutoSize | Out-String -Width 200", "Resolver configuration"),
-        ("Resolve-DnsName example.com -Type A | Select-Object Name, IPAddress; Resolve-DnsName $env:USERDNSDOMAIN -ErrorAction SilentlyContinue | Select-Object -First 3 Name, IPAddress | Out-String -Width 200", "Resolve public and domain names"),
+        # $env:USERDNSDOMAIN is unset on a workgroup computer (and for a local account): Resolve-DnsName
+        # refuses an empty name, and that error is not one -ErrorAction can silence
+        ("Resolve-DnsName example.com -Type A | Select-Object Name, IPAddress; if ($env:USERDNSDOMAIN) { Resolve-DnsName $env:USERDNSDOMAIN -ErrorAction SilentlyContinue | Select-Object -First 3 Name, IPAddress | Out-String -Width 200 } else { 'No domain to resolve: USERDNSDOMAIN is not set (a workgroup computer, or a local account).' }", "Resolve public and domain names"),
         ("Test-NetConnection example.com -Port 443 -InformationLevel Quiet; Test-NetConnection 1.1.1.1 -Port 53 -InformationLevel Quiet", "TCP reachability"),
         ("Get-NetTCPConnection -State Listen | Sort-Object LocalPort | Select-Object LocalAddress, LocalPort, OwningProcess, @{n='Proc';e={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name}} | Format-Table -AutoSize | Out-String -Width 200", "Listening TCP ports"),
         ("Get-NetTCPConnection -State Established | Measure-Object | Select-Object Count", "Established connections"),
