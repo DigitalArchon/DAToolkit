@@ -3515,8 +3515,9 @@ function openSettings(tab = "providers") {
       host: h("input", { type: "text", value: x.host || "", placeholder: "hostname or IP" }),
       port: h("input", { type: "number", value: x.port || "", placeholder: ssh ? "22" : rdp ? "3389" : (x.winrm_ssl === false ? "5985" : "5986") }),
       user: h("input", { type: "text", value: x.user || "", placeholder: ssh ? "username" : rdp ? "DOMAIN\\user or user" : "DOMAIN\\user or user@domain" }),
-      rdp_security: h("select", {}, [["any", "Negotiate (any)"], ["nla", "NLA"], ["nla-ext", "NLA (extended)"], ["tls", "TLS"], ["rdp", "Legacy RDP security"]]
-        .map(([v, l]) => h("option", { value: v, selected: v === (x.rdp_security || "any") }, l))),
+      rdp_security: h("select", {}, [["any", "Negotiate (any)"], ["nla", "NLA"], ["tls", "TLS"], ["rdp", "Legacy RDP security"]]
+        // a host saved with Extended NLA (offered before; no guacd can do it) opens on NLA here
+        .map(([v, l]) => h("option", { value: v, selected: v === (x.rdp_security === "nla-ext" ? "nla" : x.rdp_security || "any") }, l))),
       rdp_layout: h("select", {}, layouts.map((v) => h("option", { value: v, selected: v === (x.rdp_layout || "en-us-qwerty") }, v))),
       auth: h("select", {}, (ssh ? [["agent", "SSH agent / default keys"], ["key", "Key file"], ["password", "Password"]]
         : [["ntlm", "NTLM"], ["kerberos", "Kerberos"], ["negotiate", "Negotiate"], ["basic", "Basic (HTTPS only!)"]])

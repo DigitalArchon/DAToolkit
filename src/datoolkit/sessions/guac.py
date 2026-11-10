@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import os
+import re
 import pwd
 import shutil
 import subprocess
@@ -157,8 +158,18 @@ async def probe(timeout: float = 3) -> bool:
         writer.close()
 
 
+def apt_has(package: str, run=_run) -> bool | None:
+    """Whether apt can install `package` here (a candidate version), or None without apt."""
+    try:
+        r = run(["apt-cache", "policy", package], 15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"Candidate:\s*(\S+)", r.stdout or "")
+    return bool(m) and m.group(1) != "(none)"
+
+
 def install_help(release: dict[str, str] | None = None, which=_which,
-                 installed: bool | None = None) -> tuple[str, list[str]]:
+                 installed: bool | None = None, run=_run) -> tuple[str, list[str]]:
     """What to tell a technician whose guacd isn't answering: a sentence and the commands to
     run, for this distribution. guacd must listen on 127.0.0.1:4822 (its default)."""
     if installed is None:
@@ -169,7 +180,12 @@ def install_help(release: dict[str, str] | None = None, which=_which,
     release = os_release() if release is None else release
     ids = {release.get("ID", "")} | set(release.get("ID_LIKE", "").split())
     if ids & {"ubuntu", "linuxmint"}:
-        return "guacd isn't installed. Install it (it starts as a service):", ["sudo apt install guacd"]
+        # Ubuntu 26.04 dropped guacd with FreeRDP 2 (it has only FreeRDP 3, which guacd 1.6.0
+        # doesn't build against); 24.04 and Mint 22 have 1.3. Asked of apt, not guessed from the version.
+        if apt_has("guacd", run) is not False:
+            return "guacd isn't installed. Install it (it starts as a service):", ["sudo apt install guacd"]
+        return _container_help(f"guacd isn't installed, and {release.get('PRETTY_NAME') or release.get('NAME') or 'this release'} "
+                               "doesn't package it.", which, "sudo apt install podman")
     if ids & {"fedora", "rhel", "centos"}:
         epel = " (on RHEL and its rebuilds, enable EPEL first)" if "fedora" not in release.get("ID", "") else ""
         return (f"guacd isn't installed. Install it with its RDP plugin, then start it{epel}:",

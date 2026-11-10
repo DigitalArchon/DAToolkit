@@ -208,6 +208,14 @@ def _elide(text: str, limit: int) -> str:
     return f"{text[:head]}… [{len(text) - head - tail:,} characters left out] …{text[-tail:]}"
 
 
+# Extended NLA (guacd's "nla-ext", RDP's HYBRID_EX) can't work with any guacd DA Toolkit can use:
+# Ubuntu's 1.3, Fedora's 1.6.0 and upstream's 1.6.0 image are all built on FreeRDP 2, which asks
+# the server for it and then has no code to speak it (nego_security_connect). FreeRDP 3 has, but
+# guacd 1.6.0 doesn't build against it. Windows accepts plain NLA on the same servers. (Checked
+# against Windows 11 with guacd 1.3 and the 1.6.0 image, Nov 2026.)
+_NLA_EXT = ("Extended NLA can't connect with any guacd available (they are all built on FreeRDP 2, which "
+            "can't speak it); Windows accepts NLA on the same servers: choose NLA.")
+
 class UserError(Exception):
     """An error to show the technician as-is, with any commands that fix it (shown so they can
     be copied, not as a passing notice). Never with the password of an address it quotes (one
@@ -1235,8 +1243,10 @@ class Engine:
             raise UserError("Host needs a name and address.")
         if data.get("kind") not in ("ssh", "winrm", "rdp"):
             raise UserError("Host kind must be ssh, winrm or rdp.")
-        if data.get("rdp_security", "any") not in ("any", "nla", "nla-ext", "tls", "rdp"):
-            raise UserError("RDP security must be any, nla, nla-ext, tls or rdp.")
+        if data.get("rdp_security") == "nla-ext":
+            raise UserError(f"Host not saved. {_NLA_EXT}")
+        if data.get("rdp_security", "any") not in ("any", "nla", "tls", "rdp"):
+            raise UserError("RDP security must be any, nla, tls or rdp.")
         port = data.get("port")
         try:
             port = int(port) if port not in (None, "", 0) else None
@@ -1797,6 +1807,8 @@ class Engine:
             self._guacd_idle()     # not opened after all: the container we started isn't needed
 
     async def _open_rdp(self, host) -> dict:
+        if host.rdp_security == "nla-ext":     # saved by an earlier version, which offered it
+            raise UserError(f"{host.name} is set to Extended NLA. {_NLA_EXT} Edit the host under Settings → Hosts.")
         sid = self.sessions.unique_id(host.name)
         port = host.port or 3389
         try:

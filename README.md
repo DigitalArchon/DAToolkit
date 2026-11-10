@@ -56,7 +56,8 @@ so that it gets your distribution's security updates:
 
 | Distribution | For the app window | For RDP sessions (optional) |
 |---|---|---|
-| Ubuntu, Mint | `sudo apt install gir1.2-webkit2-4.1` | `sudo apt install guacd` |
+| Ubuntu 24.04, Mint 22 | `sudo apt install gir1.2-webkit2-4.1` | `sudo apt install guacd` |
+| Ubuntu 26.04 | `sudo apt install gir1.2-webkit2-4.1` | not packaged any more: guacd container (below) |
 | Debian | `sudo apt install gir1.2-webkit2-4.1` | not packaged: guacd container (below) |
 | Fedora | `sudo dnf install webkit2gtk4.1` | `sudo dnf install guacd libguac-client-rdp`, then `sudo systemctl enable --now guacd` |
 | Arch, CachyOS | `sudo pacman -S webkit2gtk-4.1` | not in the repositories: guacd container (below) |

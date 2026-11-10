@@ -110,7 +110,8 @@ class Host:
     winrm_cert_validation: bool = True
     winrm_plain_basic: bool = False
     os_hint: str = ""
-    # rdp: guacd's "security" (any | nla | nla-ext | tls | rdp) and keyboard layout on the server
+    # rdp: guacd's "security" (any | nla | tls | rdp) and keyboard layout on the server; "nla-ext"
+    # from an earlier version is refused when opened (engine._NLA_EXT)
     rdp_security: str = "any"
     rdp_layout: str = "en-us-qwerty"
 

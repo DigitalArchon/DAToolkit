@@ -842,7 +842,8 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
     pin itself is the SHA-256.
 - **RDP** opens the remote desktop in a tab, through Apache Guacamole's `guacd` on
   127.0.0.1:4822 (see the install table in the README: `sudo apt install guacd` on Ubuntu
-  and Mint, and upstream's container on Debian, Arch and CachyOS). If guacd isn't there,
+  24.04 and Mint 22, and upstream's container on Ubuntu 26.04, Debian, Arch and CachyOS,
+  which don't package it). If guacd isn't there,
   opening an RDP host shows the commands for your distribution in a dialog you can copy them
   from. DA Toolkit only connects to guacd on this machine, since that link isn't encrypted,
   and does the connection handshake itself, so the password never reaches the page. And only
@@ -850,7 +851,10 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
   (guacd run by hand, or rootless podman's port forwarder) or to a system account (root's, as
   Docker's is, or the guacd package's service user). One another user of the computer started
   is refused, saying whose it is, and is sent nothing. Add RDP
-  hosts under Settings → Hosts with the security mode and keyboard layout.
+  hosts under Settings → Hosts with the security mode and keyboard layout. Extended NLA isn't
+  offered: every guacd available is built on FreeRDP 2, which can't speak it, and Windows
+  accepts plain NLA on the same servers. A host saved with it by an earlier version says so
+  when opened; choose NLA.
   - **The case log records whether the desktop really connected.** guacd takes the connection
     before it tries the remote desktop, so a wrong password or a security mode the server
     refuses is logged as a failed connection with guacd's reason (and shown in the case

@@ -321,12 +321,29 @@ def test_guacd_install_help_per_distribution():
     def which_of(*present):
         return lambda name: f"/usr/bin/{name}" if name in present else None
 
-    def help_for(release, *present):
-        return guac.install_help(release, which_of(*present), installed=False)
+    from types import SimpleNamespace
+
+    def apt(candidate):      # what `apt-cache policy guacd` prints: Ubuntu 24.04's, or 26.04's nothing
+        out = f"guacd:\n  Installed: (none)\n  Candidate: {candidate}\n" if candidate else ""
+        return lambda argv, timeout=30: SimpleNamespace(stdout=out, returncode=0)
+
+    def help_for(release, *present, run=apt("1.3.0-1.3ubuntu1")):
+        return guac.install_help(release, which_of(*present), installed=False, run=run)
     pull = f"podman pull {guac.GUACD_IMAGE}"
     assert "@sha256:" in guac.GUACD_IMAGE                       # pinned
     mint = {"ID": "linuxmint", "ID_LIKE": "ubuntu debian", "NAME": "Linux Mint"}
     assert help_for(mint)[1] == ["sudo apt install guacd"]
+    # Ubuntu 26.04 has no guacd (seen on the lab's 26.04.1, Nov 2026): the container, as on Debian
+    noble_next = {"ID": "ubuntu", "ID_LIKE": "debian", "NAME": "Ubuntu", "PRETTY_NAME": "Ubuntu 26.04.1 LTS"}
+    text, cmds = help_for(noble_next, run=apt(""))
+    assert "Ubuntu 26.04.1 LTS doesn't package it" in text and cmds == ["sudo apt install podman", pull]
+    assert help_for(noble_next, "podman", run=apt("(none)"))[1] == [pull]
+    assert guac.apt_has("guacd", apt("1.3.0")) is True and guac.apt_has("guacd", apt("(none)")) is False
+
+    def no_apt(argv, timeout=30):
+        raise FileNotFoundError(argv[0])
+    assert guac.apt_has("guacd", no_apt) is None
+    assert help_for(mint, run=no_apt)[1] == ["sudo apt install guacd"]     # can't ask: as before
     text, cmds = help_for({"ID": "fedora", "NAME": "Fedora Linux"})
     assert cmds == ["sudo dnf install guacd libguac-client-rdp", "sudo systemctl enable --now guacd"]
     assert "EPEL" not in text
@@ -836,3 +853,18 @@ async def test_an_rdp_host_isnt_opened_through_another_users_guacd(env, tmp_path
     with pytest.raises(UserError, match="127.0.0.1:4822 is user id 1001's|another user of this computer"):
         await engine.open_rdp("dc01")
     assert connected == [] and not engine.sessions.sessions
+
+
+async def test_extended_nla_is_refused_with_the_reason(env):  # noqa: F811
+    """No guacd DA Toolkit can use speaks Extended NLA (all are built on FreeRDP 2), so it is no
+    longer offered; a host saved with it by an earlier version says why when opened, before
+    anything connects."""
+    engine, _, _ = env
+    with pytest.raises(UserError, match="Host not saved. Extended NLA can't connect.*choose NLA"):
+        engine.save_host({"name": "w11", "kind": "rdp", "host": "192.168.1.214", "rdp_security": "nla-ext"})
+    engine.save_host({"name": "w11", "kind": "rdp", "host": "192.168.1.214", "rdp_security": "nla"})
+    engine.cfg.host("w11").rdp_security = "nla-ext"            # as an earlier version saved it
+    engine.new_case("c", "open")
+    with pytest.raises(UserError, match="w11 is set to Extended NLA.*FreeRDP 2.*Settings → Hosts"):
+        await engine._open_rdp(engine.cfg.host("w11"))
+    assert not engine.sessions.sessions
