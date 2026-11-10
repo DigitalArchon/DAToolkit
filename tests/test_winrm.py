@@ -227,3 +227,135 @@ def test_the_console_prints_write_host_and_verbose_output(monkeypatch, capsys):
     psrp_console.run_command(None, "Copy-Things")
     out = capsys.readouterr().out
     assert "copied 3 files" in out and "done" in out and "VERBOSE: checking the share" in out
+
+
+class _RunningPowerShell:
+    """A fake pypsrp pipeline that stays running: each poll delivers the next batch of output
+    lines (as Out-String -Stream sends them), and `during_poll` runs inside a poll, while the
+    exchange with the server would be in flight."""
+
+    instances: list = []
+
+    def __init__(self, pool, batches=(), during_poll=None):
+        from types import SimpleNamespace
+
+        from pypsrp.complex_objects import PSInvocationState
+
+        self.RUNNING, self.STOPPED = PSInvocationState.RUNNING, PSInvocationState.STOPPED
+        self.state = PSInvocationState.NOT_STARTED
+        self.output, self.batches, self.during_poll = [], list(batches), during_poll
+        self.streams = SimpleNamespace(information=[], verbose=[], warning=[], error=[])
+        self.params, self.polls, self.stops = {}, [], 0
+        _RunningPowerShell.instances.append(self)
+
+    def add_script(self, s):
+        return self
+
+    def add_cmdlet(self, c):
+        return self
+
+    def add_parameter(self, k, v=None):
+        self.params[k] = v
+        return self
+
+    def begin_invoke(self):
+        self.state = self.RUNNING
+
+    def poll_invoke(self, timeout=None):
+        self.polls.append(timeout)
+        if self.during_poll:
+            self.during_poll(self)
+        if self.batches:
+            self.output.extend(self.batches.pop(0))
+
+    def stop(self):
+        self.stops += 1
+        self.state = self.STOPPED
+
+
+def test_ctrl_c_stops_the_command_between_polls_and_keeps_its_output(monkeypatch, capsys):
+    """Seen against Windows 11 over plain HTTP with NTLM: a KeyboardInterrupt raised inside a
+    receive left pypsrp unable to talk to the server (every later request, the stop included,
+    got HTTP 400). Ctrl+C now only marks the command; it is stopped between polls."""
+    import os
+    import signal
+
+    import pypsrp.powershell
+
+    from datoolkit.sessions import psrp_console
+
+    def sigint_mid_exchange(ps):
+        if len(ps.polls) == 2:
+            os.kill(os.getpid(), signal.SIGINT)      # delivered while "the receive is in flight"
+
+    monkeypatch.setattr(pypsrp.powershell, "PowerShell", lambda pool: _RunningPowerShell(
+        pool, batches=[["tick 1"], ["tick 2"], ["tick 3"], ["tick 4"]], during_poll=sigint_mid_exchange))
+    old = signal.signal(signal.SIGINT, psrp_console._interrupt)
+    try:
+        psrp_console.run_command(None, "1..9 | % { \"tick $_\"; sleep 2 }")    # no KeyboardInterrupt escapes
+    finally:
+        signal.signal(signal.SIGINT, old)
+    ps = _RunningPowerShell.instances[-1]
+    out = capsys.readouterr().out
+    assert ps.stops == 1 and len(ps.polls) == 2                      # stopped right after the poll it hit
+    assert all(t == psrp_console.POLL_SECONDS for t in ps.polls)      # short polls: Ctrl+C acts within about a second
+    assert "tick 1" in out and "tick 2" in out and "tick 3" not in out    # what came before the stop is kept
+    assert out.index("tick 2") < out.index("(stopped)")
+    assert ps.params.get("Stream") is True and "Width" in ps.params
+    # a Ctrl+C pressed at the prompt, before a command, doesn't stop the next one
+    psrp_console._interrupt.pending = True
+
+    def finish(ps):
+        if len(ps.polls) == 2:
+            ps.state = pypsrp.powershell.PSInvocationState.COMPLETED
+    monkeypatch.setattr(pypsrp.powershell, "PowerShell", lambda pool: _RunningPowerShell(pool, batches=[["only"]], during_poll=finish))
+    psrp_console.run_command(None, "'only'")
+    ps2 = _RunningPowerShell.instances[-1]
+    assert ps2.stops == 0 and "only" in capsys.readouterr().out
+
+
+def test_the_console_prints_output_as_it_arrives(monkeypatch, capsys):
+    """A slow command (or a watch) shows each line when it comes, not all of it at the end;
+    PowerShell's padding blank lines after a table don't pile up."""
+    import pypsrp.powershell
+    from pypsrp.complex_objects import PSInvocationState
+
+    from datoolkit.sessions import psrp_console
+
+    seen_during = []
+
+    def look(ps):
+        seen_during.append(capsys.readouterr().out)
+        if len(ps.polls) == 3:
+            ps.state = PSInvocationState.COMPLETED
+
+    monkeypatch.setattr(pypsrp.powershell, "PowerShell", lambda pool: _RunningPowerShell(
+        pool, batches=[["", "Status  Name", "------  ----"], ["Running WinRM", "", ""], []], during_poll=look))
+    psrp_console.run_command(None, "Get-Service WinRM")
+    rest = capsys.readouterr().out
+    assert seen_during[1] == "\nStatus  Name\n------  ----\n"     # the first lines, while it still ran
+    assert seen_during[2] == "Running WinRM\n" and rest == ""      # trailing blank lines dropped
+
+
+def test_kerberos_without_gssapi_says_what_is_missing():
+    from datoolkit.sessions import psrp_console
+
+    e = ImportError("GSSAPIProxy requires the Python gssapi library: No module named 'gssapi'")
+    msg = psrp_console._connection_problem(e, "kerberos")
+    assert "gssapi" in msg and "krb5" in msg and "NTLM" in msg and "ImportError" not in msg
+    assert psrp_console._connection_problem(OSError("refused"), "ntlm") == "OSError: refused"
+
+
+def test_basic_refused_by_windows_names_its_defaults():
+    """Windows 11 with Basic off (its default), or Basic on but over HTTP without
+    AllowUnencrypted, answers like a wrong password."""
+    from pypsrp.exceptions import AuthenticationError
+
+    from datoolkit.sessions import psrp_console
+
+    e = AuthenticationError("Failed to authenticate the user test with basic")
+    over_http = psrp_console._connection_problem(e, "basic", ssl=False)
+    assert "Failed to authenticate" in over_http and "AllowUnencrypted" in over_http and "off by default" in over_http
+    assert "AllowUnencrypted" not in psrp_console._connection_problem(e, "basic", ssl=True)
+    assert "off by default" not in psrp_console._connection_problem(AuthenticationError("x"), "ntlm")
+

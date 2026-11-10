@@ -3,6 +3,12 @@
 Connection settings arrive as JSON in DATOOLKIT_PSRP (no secrets); the password is fetched
 through the askpass bridge. Limitations: single-line input, no Read-Host/Get-Credential
 prompts, no tab completion.
+
+Ctrl+C never interrupts an exchange with the server. Over plain HTTP, NTLM and Negotiate
+encrypt every message on the authenticated connection, and a request cut off half way
+leaves pypsrp unable to talk to the server again: every later command, and the stop itself,
+got "Bad HTTP response ... 400". So Ctrl+C only sets a flag while a command runs; the
+command is polled in short slices and stopped between them (POLL_SECONDS).
 """
 
 from __future__ import annotations
@@ -15,6 +21,24 @@ import signal
 import sys
 
 RED, YELLOW, DIM, RESET = "\x1b[31m", "\x1b[33m", "\x1b[2m", "\x1b[0m"
+POLL_SECONDS = 1     # longest a Ctrl+C waits for the receive in flight before the stop is sent
+
+
+class _Interrupt:
+    """SIGINT while a command runs or the console talks to the server: noted, not raised."""
+
+    def __init__(self) -> None:
+        self.pending = False
+
+    def __call__(self, signum, frame) -> None:
+        self.pending = True
+
+    def take(self) -> bool:
+        was, self.pending = self.pending, False
+        return was
+
+
+_interrupt = _Interrupt()
 
 
 def _password(cfg: dict) -> str | None:
@@ -23,41 +47,95 @@ def _password(cfg: dict) -> str | None:
     return request(f"Password for {cfg.get('user')}@{cfg['host']} (WinRM):", kind="password")
 
 
+class _Printer:
+    """Prints what a running command has produced so far, each stream from where it left off.
+    Output lines come one at a time (Out-String -Stream); blank lines are held back until
+    something follows them, so the blank lines PowerShell puts after a table don't pile up."""
+
+    def __init__(self, ps) -> None:
+        self.ps = ps
+        self.seen = {"information": 0, "output": 0, "verbose": 0, "warning": 0, "error": 0}
+        self.blank = 0
+
+    def _line(self, text: str) -> None:
+        if not text.strip():
+            self.blank += 1
+            return
+        sys.stdout.write("\n" * self.blank + text + "\n")
+        self.blank = 0
+
+    def _new(self, name: str, items: list) -> list:
+        start, self.seen[name] = self.seen[name], len(items)
+        return items[start:]
+
+    def flush(self) -> None:
+        s = self.ps.streams
+        # Write-Host and Write-Information (PowerShell 5 and later) go to the information
+        # stream, not the output: a script reporting with them would print nothing
+        for record in self._new("information", s.information):
+            text = str(getattr(record, "message_data", record) or "")
+            if text.strip():
+                self._line(text.rstrip("\r\n"))
+        for o in self._new("output", self.ps.output):
+            for line in str(o).replace("\r\n", "\n").split("\n"):
+                self._line(line.rstrip("\r"))
+        for v in self._new("verbose", s.verbose):
+            self._line(f"{DIM}VERBOSE: {getattr(v, 'message', v)}{RESET}")
+        for w in self._new("warning", s.warning):
+            self._line(f"{YELLOW}WARNING: {w}{RESET}")
+        for e in self._new("error", s.error):
+            self._line(f"{RED}{e}{RESET}")
+        sys.stdout.flush()
+
+
 def run_command(pool, line: str) -> None:
     from pypsrp.complex_objects import PSInvocationState
     from pypsrp.powershell import PowerShell
 
     width = max(80, shutil.get_terminal_size((200, 40)).columns - 1)
     ps = PowerShell(pool)
-    ps.add_script(line).add_cmdlet("Out-String").add_parameter("Width", width)
+    # -Stream: each line as soon as it is formatted, so a slow command (or a watch) shows its
+    # output as it goes, and what came before an error that ends the command isn't lost with it
+    ps.add_script(line).add_cmdlet("Out-String").add_parameter("Stream", True).add_parameter("Width", width)
+    printer = _Printer(ps)
+    _interrupt.take()                 # a Ctrl+C from before the command doesn't stop it
     ps.begin_invoke()
-    try:
-        while ps.state == PSInvocationState.RUNNING:
-            ps.poll_invoke()
-    except KeyboardInterrupt:
-        print("^C")
-        try:
-            ps.stop()
-        except Exception as e:  # noqa: BLE001
-            print(f"{DIM}(stop failed: {e}){RESET}")
-        return
-    # Write-Host and Write-Information (PowerShell 5 and later) go to the information stream,
-    # not the output that Out-String formats: a script reporting with them printed nothing
-    for record in ps.streams.information:
-        text = str(getattr(record, "message_data", record) or "")
-        if text.strip():
-            print(text.rstrip("\n"))
-    out = "".join(str(o) for o in ps.output)
-    if out.strip():
-        sys.stdout.write(out.rstrip("\n") + "\n")
-    for v in ps.streams.verbose:
-        print(f"{DIM}VERBOSE: {getattr(v, 'message', v)}{RESET}")
-    for w in ps.streams.warning:
-        print(f"{YELLOW}WARNING: {w}{RESET}")
-    for e in ps.streams.error:
-        print(f"{RED}{e}{RESET}")
+    while ps.state == PSInvocationState.RUNNING:
+        if _interrupt.take():
+            try:
+                ps.stop()
+                print(f"\n{DIM}(stopped){RESET}")
+            except Exception as e:  # noqa: BLE001
+                print(f"\n{DIM}(stop failed: {e}){RESET}")
+            return
+        ps.poll_invoke(timeout=POLL_SECONDS)
+        printer.flush()
+    printer.flush()
     if ps.state == PSInvocationState.FAILED and not ps.streams.error:
         print(f"{RED}Command failed.{RESET}")
+
+
+def _read_line(prompt: str) -> str:
+    """input() with Ctrl+C raising KeyboardInterrupt: nothing is being sent while it waits."""
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        return input(prompt)
+    finally:
+        signal.signal(signal.SIGINT, _interrupt)
+
+
+def _connection_problem(e: Exception, auth: str, ssl: bool = True) -> str:
+    if isinstance(e, ImportError) and "gssapi" in str(e).lower():
+        return (f"{auth.capitalize()} authentication needs the Python gssapi package and the system's Kerberos "
+                "libraries (MIT krb5), which this installation of DA Toolkit doesn't include. Use NTLM or Negotiate "
+                "(which uses NTLM without them).")
+    text = f"{type(e).__name__}: {e}"
+    if auth == "basic" and type(e).__name__ == "AuthenticationError":
+        # Windows turns Basic away without saying why, which reads like a wrong password
+        text += (". Besides a wrong password, this is what Windows answers when it doesn't accept Basic: it is off by "
+                 "default (winrm/config/service/auth Basic)" + ("" if ssl else ", and over HTTP it also needs "
+                 "AllowUnencrypted") + ". NTLM needs neither.")
+    return text
 
 
 def current_location(pool) -> str:
@@ -123,13 +201,15 @@ def main() -> int:
             return 1
         with wsman, RunspacePool(wsman) as pool:
             del password
+            # from here on the server is never cut off mid-request (see the module docstring)
+            signal.signal(signal.SIGINT, _interrupt)
             print("Connected. Type PowerShell commands (single line). 'exit' to disconnect.\n")
             while True:
                 loc = current_location(pool)
                 try:
-                    line = input(f"[{host}]: PS {loc}> ")
+                    line = _read_line(f"[{host}]: PS {loc}> ")
                 except KeyboardInterrupt:
-                    print("^C")
+                    print()
                     continue
                 except EOFError:
                     print()
@@ -140,14 +220,12 @@ def main() -> int:
                     break
                 try:
                     run_command(pool, line)
-                except KeyboardInterrupt:
-                    print("^C")
                 except Exception as e:  # noqa: BLE001
                     print(f"{RED}{type(e).__name__}: {e}{RESET}")
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:          # while connecting
         return 130
     except Exception as e:  # noqa: BLE001
-        print(f"{RED}Connection failed: {type(e).__name__}: {e}{RESET}")
+        print(f"{RED}Connection failed: {_connection_problem(e, cfg.get('auth', 'negotiate'), ssl)}{RESET}")
         return 1
     print("Disconnected.")
     return 0

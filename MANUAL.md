@@ -817,11 +817,16 @@ Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`
   - Password and host-key prompts appear as dialogs. A saved password is supplied once per
     session; if it's rejected, you're asked.
   - Old network gear may need extra options, e.g. `KexAlgorithms=+diffie-hellman-group14-sha1`.
-- **WinRM** opens a PowerShell remoting console (pypsrp) supporting NTLM, Kerberos, Negotiate
-  and Basic, on 5985 or 5986.
+- **WinRM** opens a PowerShell remoting console (pypsrp) supporting NTLM, Negotiate and Basic,
+  on 5985 or 5986. Kerberos needs the Python `gssapi` package and the system's Kerberos
+  libraries (MIT krb5), which DA Toolkit doesn't include; without them a Kerberos host says
+  so when it connects. Negotiate then uses NTLM.
   - Commands are single-line. `Read-Host` and `Get-Credential` prompts and tab completion are
     not supported.
   - Variables persist between commands.
+  - Output appears as the command produces it, so a slow command or a watch shows its
+    progress. **Ctrl+C** stops the running command within about a second and keeps what it
+    printed so far; the session stays connected.
   - **HTTPS, or the local network.** Plain HTTP (5985) is accepted only for this machine and
     its local network (localhost, 10.x, 172.16-31.x, 192.168.x, `.local`), as for model
     providers; a host further away must use HTTPS. Basic authentication over plain HTTP sends
