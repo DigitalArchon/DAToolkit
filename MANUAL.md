@@ -520,6 +520,12 @@ API and the address).
 | Local | `http://localhost:11434/v1` | OpenAI's API | Ollama, LM Studio, vLLM: the Local tier |
 | Other OpenAI- or Anthropic-compatible | yours | either | Anything else that speaks one of the two |
 
+**A redirect is never followed**, since it would send the conversation and the key again to
+wherever it points: the error says where the provider redirected, so you can put its new
+address in Settings → AI providers if it has moved. An address that answers with something
+other than the API (a web page, a network's sign-in page, an address missing its `/v1`) is an
+error naming the status and content type it answered with, never an empty reply.
+
 The **API** is worked out from the address (Anthropic's for `api.anthropic.com`, OpenAI's for
 everything else) unless you choose it. An Anthropic-compatible service gets the plain Messages
 API request (messages, tools, system prompt, temperature) without Anthropic's own extras; if
@@ -627,7 +633,7 @@ did, the habits that tripped them up, and why each nudge and note exists.
 | Tier | Detected from | What the provider can see |
 |---|---|---|
 | **Standard** | anything else | Everything |
-| **TEE** | ids starting `TEE/` or `phala/` | The model runs in an attested enclave, but prompts pass NanoGPT's gateway **in the clear** |
+| **TEE** | ids starting `TEE/` or `phala/` | Attested before anything is sent (for most `TEE/` models, RedPill's gateway, which passes each request on to the machine that runs the model), but prompts pass NanoGPT's gateway **in the clear** |
 | **E2EE** | NanoGPT `private/…` ids, however written (`Private/…` too) | Ciphertext only, plus your account, the model, timing, sizes and usage |
 | **Local** | localhost / private-IP base URL | Nothing leaves your network |
 
@@ -725,7 +731,10 @@ app of the author's that attests TEE models, and tested against a real attestati
    fresh random nonce. Nothing goes to a TEE model (chat, vision helper, write-ups, the
    second-opinion reviewer, compaction or the research agent) until that holds, and it is made
    again before a send once it is 15 minutes old (time the computer spends asleep counts), or
-   once one of the model's replies has failed its check (step 4).
+   once one of the model's replies has failed its check (step 4). Nothing is sent while the
+   model is being attested either (it was just chosen, or chosen again, or you clicked to
+   re-check): a request made then waits for what that attestation finds. One that is refused
+   leaves no earlier attestation in force, so nothing more goes to the model until one holds.
    - The Intel TDX quote's own bytes must bind the enclave's reply-signing key and our nonce
      (never NanoGPT's JSON copy of them), or bind RedPill's attested keys, that key among
      them, and our nonce. For per-instance providers (Chutes), each instance's key, bound
@@ -737,7 +746,8 @@ app of the author's that attests TEE models, and tested against a real attestati
      that keyset has its receipt keys bound by the hardware too. A model whose own evidence
      can't be had for our nonce, but which the gateway answers (`TEE/deepseek-v3.2`, whose
      evidence is relayed for the relay's nonce, and `TEE/qwen3.6-27b`, whose attestation times
-     out), is attested through the gateway instead. A report that doesn't bind our nonce is refused;
+     out), is attested through the gateway instead, and each of its replies is verified only
+     with a receipt that holds (step 4). A report that doesn't bind our nonce is refused;
      where NanoGPT has none (models only Chutes or Tinfoil serves), the model's own evidence
      is taken as before. An attestation the provider took too long for is asked once more
      with a new nonce, and may take up to a minute and a half (Chutes' evidence covers every
@@ -758,7 +768,11 @@ app of the author's that attests TEE models, and tested against a real attestati
    attested keys past their expiry, or anything that fails the checks above. Nothing is sent.
 3. **Partial** when nothing failed but something couldn't be checked, isn't current, or falls
    short: Intel's collateral or NVIDIA's service or keys out of reach, no GPU evidence
-   offered, a TCB status other than UpToDate, the receipt keys not in the quote (where NanoGPT
+   offered, **GPUs not tied to the quote** (NanoGPT's report carries GPU evidence made for our
+   nonce, which NVIDIA vouches for, but the attested machine's quote doesn't commit to it, so
+   the GPUs may be another machine's, the one running the model, say; a Chutes instance's
+   quote does bind its GPUs, so theirs aren't named so), a TCB status other than UpToDate,
+   the receipt keys not in the quote (where NanoGPT
    has no gateway report for the model: its quote binds the key that signs each reply's
    record, and RedPill's receipt keys are only published beside it), and RedPill's gateway,
    which passes each request on to the model's host, so that the model itself runs in an
@@ -768,8 +782,22 @@ app of the author's that attests TEE models, and tested against a real attestati
    K2.6) is partial the same way, its instances attested and the gateway too; where NanoGPT
    couldn't give the gateway's report just then (a rate limit, an outage), it falls short of
    **RedPill's gateway unchecked** instead. The
-   top bar shows **🛡 TEE attested (partial)**, and the tooltip names each shortfall and the
-   keys its replies are checked against. Sending still goes ahead.
+   top bar shows **🛡 TEE gateway attested (partial)** where RedPill's gateway is what was
+   attested, else **🛡 TEE attested (partial)**; the tooltip leads with what was attested and
+   what that leaves to someone's word, then names each shortfall and the keys its replies are
+   checked against. Sending still goes ahead.
+
+   **What is attested** is said in the top bar, its tooltip and the notice after a re-check:
+   - For every model RedPill serves (most of NanoGPT's `TEE/` models), the attested machine is
+     **RedPill's TEE gateway**, and the top bar says "TEE gateway attested". The gateway passes
+     each request on to the machine that runs the model (in November 2026 Phala's, Fortanix's,
+     NEAR AI's, 0G's, Tinfoil's router or Chutes'). That machine isn't attested by DA Toolkit:
+     that it is a verified TEE is the gateway's word, in each reply's signed receipt.
+   - For a model Chutes serves itself, **each instance** Chutes lists, each with its own GPUs.
+     Chutes signs no replies, so nothing shows which machine answered: NanoGPT routes each
+     request, and a model may be served elsewhere when its provider is busy.
+   - Otherwise the one enclave whose key signs the model's replies; whether that machine runs
+     the model itself or passes requests on isn't shown.
 4. **Check each reply,** wherever it comes from: the chat's, an image's description by the
    vision helper, a write-up, a second opinion, a compaction summary, and each of the research
    agent's (its page checks too). After each reply DA Toolkit fetches the record NanoGPT keeps
@@ -784,16 +812,24 @@ app of the author's that attests TEE models, and tested against a real attestati
    the second opinion in the queue, the research card or the compaction summary; a turn or a
    research run takes the mark of its worst reply:
    - **✔ verified**: signed by the attested key, for the exact bytes received, its receipt
-     (where read) holding;
+     (where read) holding. For a model RedPill serves, the receipt says the machine the reply
+     came from was verified: that last part is the gateway's word;
    - **signed, text not compared**: signed by the attested key, but NanoGPT rebuilds this
      model's replies, so the text can't be compared with the record;
    - **⚠ reply not verified**: no record of the reply could be read (the provider keeps none,
-     it was out of reach, or the gateway's keys changed since the attestation);
+     it was out of reach, or the gateway's keys changed since the attestation), or, for a model
+     attested through RedPill's gateway alone, its record came with no receipt that holds: the
+     gateway's signature says only that the reply passed through it, and the receipt is its
+     word that the model's own enclave answered;
    - **✖ check failed**: the reply doesn't match its record: another key signed it, it names
      other bytes, or its receipt doesn't hold;
    - **unsigned**: the provider signs no replies (Chutes); every instance that could answer
-     was attested before sending instead. A reply RedPill's gateway answers in Chutes' place
-     names its receipt, and is checked like any other.
+     was attested before sending instead, but nothing shows which one answered. A reply
+     RedPill's gateway answers in Chutes' place names its receipt, and is checked like any
+     other.
+
+   Each mark's tooltip says what was attested before the reply was sent and what is someone's
+   word, and that the text passed NanoGPT in the clear.
 
    A failed check is also said in a notice, and the model is attested again before anything
    more is sent to it; a request made while a reply of the same model is still being checked
@@ -803,12 +839,34 @@ What this proves: a genuine, current, non-debug Intel TDX machine (and, where ev
 offered, NVIDIA GPUs) holds the keys, live, bound to our nonce, and each reply's record was
 signed by one of them, for the exact text received where NanoGPT passes the stream through. What it
 doesn't prove: which software the enclave runs (its measurements aren't compared with published
-ones), or what was sent (the record hashes the request as NanoGPT forwarded it, which DA
-Toolkit can't reproduce). The prompt also passes NanoGPT's gateway in the clear, so TEE models
+ones), what was sent (the record hashes the request as NanoGPT forwarded it, which DA
+Toolkit can't reproduce), or, for a model RedPill serves, the machine that runs the model,
+which is the gateway's word. The prompt also passes NanoGPT's gateway in the clear, so TEE models
 stay out of Confidential cases; for that, use a `private/` model. Verifying contacts NanoGPT,
 Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`) and NVIDIA
 (`nras.attestation.nvidia.com`). Intel's collateral and NVIDIA's keys are cached for an hour
-(time asleep counts).
+(time asleep counts). With **Name the provider behind each TEE reply** on (below, off by
+default), `api.redpill.ai` too.
+
+**Name the provider behind each TEE reply** (Settings → Model → TEE models, off by default)
+says who ran the model beside a reply's mark: "🛡 TEE · ✔ verified · run by Phala", say. Each
+receipt names the gateway's session with the machine that answered, and RedPill publishes that
+session's record, saying which provider it is (Phala, Fortanix, NEAR AI, 0G, Tinfoil's router
+and others; the same model can be run by different ones from one reply to the next). With the
+option on, DA Toolkit fetches that record after each reply whose receipt holds, and believes it
+only if it is exactly the record the receipt names and the reply was served within the
+session's time. This connects to `api.redpill.ai` directly, not through NanoGPT, so RedPill sees
+your computer's internet address and that one of its models was used around then; only the
+session's id is sent, never your messages or your key. The request is made as every attestation
+fetch is: https only, no redirect followed, and through a proxy if your environment sets one. A
+session's record is read once while DA Toolkit runs (a session serves a provider for about an
+hour), at most a megabyte. It is never fetched for a model Chutes serves: each Chutes instance
+has a session of its own, about 3.4 MB for `TEE/deepseek-v3.2`, and replies are spread across
+them, so it would be megabytes nearly every message. What the record says is RedPill's word:
+DA Toolkit doesn't check the machine it names, and the tooltip says so. A record that can't be
+read or believed names nobody and says why; the reply's mark never changes. A turn, a research
+run or a write-up names a provider only when all its replies name the same one. Each record
+fetched is in the case's audit log and timeline: the host, the session's id and what came back.
 
 ## SSH, WinRM, RDP and windows
 
