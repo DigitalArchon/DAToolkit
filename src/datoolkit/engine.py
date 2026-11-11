@@ -363,6 +363,9 @@ class Engine:
         self._tee_doubted: set[tuple[str, str]] = set()
         # checks of TEE models' replies still running, which their next request waits for (_tee_guard)
         self._tee_checking: dict[tuple[str, str], set[asyncio.Task]] = {}
+        # attestations of TEE models under way, each the future of its result (None if it was
+        # cancelled): a request to the model meanwhile waits for what it finds (_tee_guard)
+        self._tee_attesting: dict[tuple[str, str], asyncio.Future] = {}
         self._background: set[asyncio.Task] = set()     # reply-signature checks and automatic reviews still running
         # (kind, name) -> whether the keyring holds it. Each lookup is a synchronous Secret
         # Service call (and may raise the unlock dialog), and a snapshot asks about every
@@ -1004,11 +1007,31 @@ class Engine:
             task.cancel()
         self._set_attestation(slot, {"status": "checking", "model": model,
                                      **({} if is_private_mode(model) else {"kind": "tee"})})   # as its result will be
-        task = asyncio.create_task(self._attest(prov, model, slot))
+        under_way = None
+        if not is_private_mode(model):
+            # under way from now, before the task has begun: a request to the model meanwhile waits
+            key = (prov.name, model)
+            under_way = self._tee_attestation_begins(key)
+        task = asyncio.create_task(self._attest(prov, model, slot, under_way))
+        if under_way is not None:
+            # cancelled before it began (another model chosen at once): it ends all the same
+            task.add_done_callback(lambda _t, key=key, fut=under_way: self._tee_attestation_ends(key, fut, None))
         if slot == "chat":
             self._attest_task = task
         else:
             self._helper_attest_task = task
+
+    def _tee_attestation_begins(self, key: tuple[str, str]) -> asyncio.Future:
+        """A TEE model's attestation, under way: what _tee_guard waits for."""
+        under_way = asyncio.get_running_loop().create_future()
+        self._tee_attesting[key] = under_way
+        return under_way
+
+    def _tee_attestation_ends(self, key: tuple[str, str], under_way: asyncio.Future, result: dict | None) -> None:
+        if self._tee_attesting.get(key) is under_way:
+            del self._tee_attesting[key]
+        if not under_way.done():
+            under_way.set_result(result)
 
     def _set_attestation(self, slot: str, value: dict | None) -> None:
         if slot == "chat":
@@ -1016,26 +1039,36 @@ class Engine:
         else:
             self.helper_attestation = value
 
-    async def _attest(self, prov: Provider, model: str, slot: str = "chat") -> dict:
+    async def _attest(self, prov: Provider, model: str, slot: str = "chat",
+                      under_way: asyncio.Future | None = None) -> dict:
         """Attest the enclave a model runs in: Private Mode (Tinfoil's verifier) or TEE (Intel
         TDX + NVIDIA, llm/tee.py). The chat model's and vision helper's results are shown;
-        every result is logged."""
+        every result is logged. A TEE model's attestation is under way (`under_way`, made here
+        when not given) until it ends: a request to the model meanwhile waits for it (_tee_guard)."""
         tee = not is_private_mode(model)
+        key = (prov.name, model)
+        if tee and under_way is None:
+            under_way = self._tee_attestation_begins(key)
+        result = None
         try:
-            if tee:
-                result = {"status": "verified", "kind": "tee", "model": model,
-                          **(await self._attest_tee(prov, model)).to_dict()}
-            else:
-                att = await self._client(prov, model).attest(model)   # a retired model is not attested
-                result = {"status": "verified", "model": model, **att.to_dict()}
-            self.log("enclave_attested", role=slot, **result)
-        except ModelRetired as e:
-            result = self._retired(e)
-            self.log("private_model_retired", role=slot, model=model, offered=e.offered)
-        except Exception as e:  # noqa: BLE001
-            said = netguard.scrubbed(str(e))
-            result = {"status": "failed", "model": model, "error": said, **({"kind": "tee"} if tee else {})}
-            self.log("enclave_attestation_failed", role=slot, model=model, error=said)
+            try:
+                if tee:
+                    result = {"status": "verified", "kind": "tee", "model": model,
+                              **(await self._attest_tee(prov, model)).to_dict()}
+                else:
+                    att = await self._client(prov, model).attest(model)   # a retired model is not attested
+                    result = {"status": "verified", "model": model, **att.to_dict()}
+                self.log("enclave_attested", role=slot, **result)
+            except ModelRetired as e:
+                result = self._retired(e)
+                self.log("private_model_retired", role=slot, model=model, offered=e.offered)
+            except Exception as e:  # noqa: BLE001
+                said = netguard.scrubbed(str(e))
+                result = {"status": "failed", "model": model, "error": said, **({"kind": "tee"} if tee else {})}
+                self.log("enclave_attestation_failed", role=slot, model=model, error=said)
+        finally:
+            if under_way is not None:
+                self._tee_attestation_ends(key, under_way, result)
         if slot in ("chat", "helper"):
             self._set_attestation(slot, result)
             self._changed()
@@ -1049,15 +1082,19 @@ class Engine:
 
     async def _attest_tee(self, prov: Provider, model: str) -> tee_mod.Attestation:
         """A TEE model's enclave, checked now with a fresh nonce. Raises TeeRefused when it
-        doesn't hold; then nothing may be sent to it."""
+        doesn't hold; then nothing may be sent to it, under this attestation or the one before:
+        that is dropped, so a refused Re-check, or a model chosen again and refused, isn't
+        followed by requests sent under the attestation it just refused (_tee_guard)."""
         self._secure(prov)
         key = self._provider_key(prov) or ""
         make = self._tee_factory or tee_mod.TeeClient
         client = make(prov.base_url, key, model)
         try:
             att = await asyncio.to_thread(client.attest)
-        except BaseException:
+        except BaseException as e:
             client.close()
+            if not isinstance(e, asyncio.CancelledError):       # cancelled is no refusal
+                self._tee.pop((prov.name, model), None)
             raise
         self._tee[(prov.name, model)] = (client, since_boot(), att.to_dict())
         self._tee_doubted.discard((prov.name, model))
@@ -1068,26 +1105,33 @@ class Engine:
         attestation older than TEE_REATTEST_SECONDS, or one a reply of failed its check under, is
         made again first; a check of its replies still running is waited for, since what it finds
         decides that. Returns the attested client and its attestation, for checking the replies
-        (_reply_checks); None for a model that isn't TEE."""
+        (_reply_checks); None for a model that isn't TEE.
+
+        Every request to a model takes this guard (chat, vision helper, write-ups, second
+        opinions, compaction, research and its page checks), and nothing is sent while the
+        model is being attested, or after its attestation was refused: an attestation under way
+        (the model chosen, or chosen again, or Re-check) is waited for, and what it finds decides,
+        not the one before it; a refused one leaves none in force (_attest_tee). Until Nov 2026 a
+        request made within 15 minutes of an attestation that held went out under it all the
+        same (SealedLore 0721878 closed the like in its archive, rebuild and merge paths)."""
         if detect_tier(model, prov.base_url, prov.tier_overrides) != "tee":
             return None
         key = (prov.name, model)
         checking = [t for t in self._tee_checking.get(key, ()) if not t.done()]
         if checking:
             await asyncio.wait(checking)
-        hit = self._tee.get(key)
         doubted = key in self._tee_doubted
-        if hit and not doubted and since_boot() - hit[1] < TEE_REATTEST_SECONDS:
-            return hit[0], hit[2]
-        task = {"chat": self._attest_task, "helper": self._helper_attest_task}.get(slot)
-        shown = {"chat": self.attestation, "helper": self.helper_attestation}.get(slot) or {}
-        if not doubted and task and not task.done() and shown.get("model") == model:
-            result = await asyncio.shield(task)       # a check already under way for this model
-        else:
+        under_way = None if doubted else self._tee_attesting.get(key)
+        result = await asyncio.shield(under_way) if under_way is not None else None
+        if result is None:          # none under way, or cancelled (another model chosen meanwhile)
+            hit = self._tee.get(key)
+            if hit and key not in self._tee_doubted and since_boot() - hit[1] < TEE_REATTEST_SECONDS:
+                return hit[0], hit[2]
             result = await self._attest(prov, model, slot)
-        if result["status"] != "verified":
-            raise UserError(f"{model}'s TEE attestation didn't hold, so nothing was sent to it: {result['error']}")
-        hit = self._tee[key]
+        hit = self._tee.get(key)
+        if result["status"] != "verified" or hit is None:
+            raise UserError(f"{model}'s TEE attestation didn't hold, so nothing was sent to it: "
+                            f"{result.get('error') or 'refused since'}")
         return hit[0], hit[2]
 
     @staticmethod

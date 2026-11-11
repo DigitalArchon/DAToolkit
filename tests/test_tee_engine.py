@@ -639,3 +639,132 @@ def test_one_reply_unnamed_or_two_providers_leave_a_turn_unnamed():
     assert Engine._tee_upstream_of([("verified", phala), ("verified", unread)])["note"] == unread.note
     assert Engine._tee_upstream_of([("verified", phala), ("unchecked", None)]) is None
     assert Engine._tee_upstream_of([("verified", None)]) is None           # not looked up: nothing said
+
+
+# ---------------------------------------------------------------- the guard: refused, or being attested
+
+def switchable(calls: list | None = None):
+    """tee_factory's makers whose nano-gpt binds our nonce while `state["ok"]`, and whose attestation
+    waits for `state["gate"]` (a threading.Event) when one is set."""
+    state = {"ok": True, "gate": None}
+    plain = tee_factory(calls, server=lambda **_: tee_server(nonce_bound=state["ok"]))
+
+    def make(base, key, model):
+        client = plain(base, key, model)
+        attest, gate = client.attest, state["gate"]
+        client.attest = lambda: (gate.wait(5) if gate else True) and attest()
+        return client
+    return make, state
+
+
+async def test_a_refused_recheck_leaves_no_attestation_in_force(env):  # noqa: F811
+    """Re-check refused ("⚠ TEE attestation refused: nothing is sent to it until attestation
+    succeeds"), yet a write-up, a turn or a second opinion went out within the quarter hour under
+    the attestation before it."""
+    engine, fake, _ = env
+    engine._tee_factory, state = switchable()
+    engine.new_case("r", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    assert (await settled(engine))["status"] == "verified"
+    state["ok"] = False
+    assert (await engine.attest_now())["status"] == "failed"
+    engine.conv = [{"role": "user", "content": "VPN down"}, {"role": "assistant", "content": "Restarted it."}]
+    sent = len(fake.requests)
+    with pytest.raises(UserError, match="nothing was sent"):
+        await engine.ticket_summary()
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    assert "nothing was sent" in engine._last_turn_error
+    engine.cfg.settings.review_model = "Fake|TEE/glm-5.3"
+    num = engine.queue.add("call_1", [{"session_id": "s1", "command": "uptime", "purpose": "load"}],
+                           fallback_session="s1")[0].num
+    with pytest.raises(UserError, match="nothing was sent"):
+        await engine.review_command(num)
+    assert len(fake.requests) == sent
+    # attested again, and holding: sent again
+    state["ok"] = True
+    fake.responses.append(sse(({"role": "assistant", "content": "Ticket."}, "stop")))
+    assert (await engine.ticket_summary())["text"] == "Ticket."
+
+
+async def test_a_model_chosen_again_and_refused_gets_nothing_under_its_earlier_attestation(env):  # noqa: F811
+    engine, fake, _ = env
+    engine._tee_factory, state = switchable()
+    engine.new_case("a", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    state["ok"] = False
+    engine.select_model("Fake", "TEE/glm-5.3")                 # within the quarter hour, refused this time
+    engine.conv = [{"role": "user", "content": "VPN down"}, {"role": "assistant", "content": "Restarted it."}]
+    sent = len(fake.requests)
+    with pytest.raises(UserError, match="nothing was sent"):  # asked at once: waits for the attestation
+        await engine.client_update()
+    assert engine.attestation["status"] == "failed" and len(fake.requests) == sent
+
+
+async def test_a_request_made_while_its_model_is_attested_again_waits_for_what_that_finds(env):  # noqa: F811
+    engine, fake, _ = env
+    calls: list = []
+    engine._tee_factory, state = switchable(calls)
+    engine.new_case("w", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    engine.conv = [{"role": "user", "content": "VPN down"}, {"role": "assistant", "content": "Restarted it."}]
+    for holds in (False, True):
+        gate = state["gate"] = threading.Event()
+        state["ok"] = holds
+        recheck = asyncio.create_task(engine.attest_now())
+        await asyncio.sleep(0.05)
+        sent = len(fake.requests)
+        fake.responses.append(sse(({"role": "assistant", "content": "Ticket."}, "stop")))
+        task = asyncio.create_task(engine.ticket_summary())
+        await asyncio.sleep(0.1)
+        assert not task.done() and len(fake.requests) == sent, "held while the model is being attested"
+        gate.set()
+        assert (await recheck)["status"] == ("verified" if holds else "failed")
+        if holds:
+            assert (await task)["text"] == "Ticket." and len(fake.requests) == sent + 1
+        else:
+            with pytest.raises(UserError, match="nothing was sent"):
+                await task
+            assert len(fake.requests) == sent
+            fake.responses.clear()
+        state["gate"] = None
+
+
+async def test_an_attestation_cancelled_by_another_model_chosen_leaves_nothing_waiting_on_it(env):  # noqa: F811
+    """Choosing another TEE model cancels the attestation under way, begun or not: a request waiting
+    for it then attests the model itself, and one cancelled before it began ends all the same, or
+    the next request to that model would wait for ever."""
+    engine, fake, _ = env
+    calls: list = []
+    engine._tee_factory, state = switchable(calls)
+    engine.new_case("c", "open")
+    engine.cfg.settings.review_model = "Fake|TEE/glm-5.3"
+    num = engine.queue.add("call_1", [{"session_id": "s1", "command": "uptime", "purpose": "load"}],
+                           fallback_session="s1")[0].num
+    verdict = sse(({"role": "assistant", "content": "SUMMARY: load\nDATA: none\nVERDICT: proceed"}, "stop"))
+    # begun, and waited for, then cancelled
+    state["gate"] = threading.Event()
+    engine.select_model("Fake", "TEE/glm-5.3")
+    fake.responses.append(verdict)
+    review = asyncio.create_task(engine.review_command(num))
+    await asyncio.sleep(0.05)
+    assert calls == ["TEE/glm-5.3"] and not review.done() and not fake.requests
+    gate, state["gate"] = state["gate"], None
+    engine.select_model("Fake", "TEE/kimi-k3")               # cancels TEE/glm-5.3's attestation
+    gate.set()
+    assert (await asyncio.wait_for(review, 5))["verdict"] == "proceed"
+    assert calls.count("TEE/glm-5.3") == 2, "attested where it was asked for"
+    await settled(engine)
+    # cancelled before it began
+    engine._tee.clear()
+    engine.select_model("Fake", "TEE/glm-5.3")
+    engine.select_model("Fake", "TEE/kimi-k3")
+    fake.responses.append(verdict)
+    review = asyncio.create_task(engine.review_command(num))      # asked at once, before the task could begin
+    assert (await asyncio.wait_for(review, 5))["verdict"] == "proceed"
+    assert calls.count("TEE/glm-5.3") == 3
+    await settled(engine)
+    assert not engine._tee_attesting, "nothing left under way"
