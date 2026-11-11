@@ -23,8 +23,15 @@ Anything that breaks one of DA Toolkit's promises, for example:
   approval, or a command the local rules rate lower than what it does;
 - flaws in TEE attestation (a model's own evidence, or RedPill's gateway's report it may be
   attested through), reply-signature checks (a TEE model's reply going unchecked anywhere: the
-  chat, an image's description, a write-up, a second opinion, compaction or research; or checked
-  against a key no attested quote binds) or the end-to-end encrypted Private Mode path;
+  chat, an image's description, a write-up, a second opinion, compaction or research; checked
+  against a key no attested quote binds; or verified, through RedPill's gateway alone, without a
+  receipt that holds) or the end-to-end encrypted Private Mode path;
+- anything reaching a TEE model while its attestation is under way or after it was refused, or
+  a mark or the top bar claiming more than was attested (RedPill's gateway is not the machine
+  that runs the model);
+- the optional TEE provider lookup (Settings → Model) sending api.redpill.ai anything but a
+  session's id, sending it anything at all while the setting is off, or naming a provider for a
+  record the reply's signed receipt doesn't name;
 - bypassing the local server's tokens (or the one-time code a browser is opened with), the
   companion reaching more than it should, or a way around its pairing (the certificate check
   before a phone pairs, and the computer's approval of each phone);
