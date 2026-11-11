@@ -680,8 +680,12 @@ edit. Sovereign cases do neither.
 **How E2EE works** (`src/datoolkit/llm/private_mode.py`, following SealedLore's implementation):
 
 1. **Attest.** Before anything is sent (even NanoGPT's billing check), the enclave is attested
-   with Tinfoil's own verifier, pinned as `tinfoil==0.15.0`. Its own fetches follow no redirect
-   off https, nor one from the internet into this computer or its network.
+   with Tinfoil's own verifier, pinned as `tinfoil==0.15.0`. Its fetches, and those of the
+   Sigstore library it checks the release with (Sigstore's trust root among them), follow a
+   redirect only to https, never from the internet into this computer or its network, and for
+   the trust root five at most. One they may not follow fails the attestation, and nothing is
+   sent; a version of that software DA Toolkit can't hold to this is refused, saying why, rather
+   than used without it.
    - The hardware report (AMD SEV-SNP or Intel TDX) must match the router release Tinfoil
      published, as recorded by Sigstore.
    - The report must bind the key that requests are sealed to.

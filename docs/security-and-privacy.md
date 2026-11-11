@@ -80,8 +80,12 @@ Checking that a model's enclave is genuine contacts, with nothing of your case i
   and its Sigstore bundle), of AMD's and Intel's certificate services (`kds-proxy.tinfoil.sh`,
   `tdx-proxy.tinfoil.sh`), and Sigstore's public trust root (`tuf-repo-cdn.sigstore.dev`, which
   the Sigstore library keeps under `~/.local/share/sigstore-python` and
-  `~/.cache/sigstore-python`). The SDK's own fetches follow no redirect off https, nor one from
-  the internet into this computer or its network.
+  `~/.cache/sigstore-python`). DA Toolkit holds every one of these fetches, the Sigstore
+  library's included, to its rule for redirects: one is followed only to https, never from the
+  internet into this computer or its network (for Sigstore's trust root, five at most). One it
+  may not follow fails the attestation, and nothing is sent; should a version of that software
+  not let DA Toolkit hold its fetches to that, the attestation is refused, saying why, rather
+  than made without it.
 
 ### RedPill, only if you ask (`api.redpill.ai`)
 
@@ -135,8 +139,9 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   after you have verified it, as RDP certificates are.
 - **Redirects.** A model provider's redirect is never followed, since it would send the
   conversation and the key again to wherever it points; the error says where it pointed. The
-  attestation clients follow no redirect off https, nor one from the internet into this
-  computer or its network (an attestation endpoint must not reach your router's admin page).
+  attestation clients, a private model's (Tinfoil's and Sigstore's) included, follow no redirect
+  off https, nor one from the internet into this computer or its network (an attestation
+  endpoint must not reach your router's admin page).
 - **An answer that isn't the API** (a web page, a network's sign-in page, an address without its
   `/v1`) is an error naming what came back, never taken for an empty reply.
 - **Proxies.** DA Toolkit has no proxy or Tor setting of its own. Its connections go through
