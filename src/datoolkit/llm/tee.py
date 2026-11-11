@@ -356,6 +356,10 @@ class TeeClient:
         self.signers: frozenset[str] = frozenset()
         # Attested by its instances (Chutes), whose replies carry no record.
         self.instances = False
+        # Attested through RedPill's gateway alone (`_attest_gateway_alone`): a reply is verified
+        # only with a receipt that holds under the attested keys, the gateway's word that the
+        # model's own enclave answered it (SealedLore's rule, dd39efc, Nov 11 2026).
+        self.receipt_required = False
         # The receipt keys, when tied to the attested quote (`_take_keyset`).
         self.keyset: dict[str, Any] | None = None
         self.keyset_digest: str | None = None
@@ -462,6 +466,7 @@ class TeeClient:
         self.signers = frozenset()
         self.keyset = self.keyset_digest = None
         self.instances = False
+        self.receipt_required = False
         gateway, unheard = self._attest_gateway()
         try:
             body, nonce = self._fetch_attestation()
@@ -626,7 +631,10 @@ class TeeClient:
         TEE/qwen3.6-27b, a 504). Its replies are signed by the gateway's bound keys and carry its
         receipts; the model's own enclave and GPUs are then the gateway's word
         in each receipt (`upstream.verified`), not checked here: so it falls
-        short, of GPU evidence and of the model's own enclave."""
+        short, of GPU evidence and of the model's own enclave. And a reply is
+        verified only with a receipt that holds (`receipt_required`, `check_reply`):
+        without one, the gateway's signature says only that the reply passed
+        through it."""
         check = _Checks(f"{why}: the gateway that answers it is attested instead")
         check.merge(gateway.check)
         check.fall_short("no GPU evidence")
@@ -636,6 +644,7 @@ class TeeClient:
             "gateway's word that its upstream was verified"
         )
         self.signers = gateway.signers
+        self.receipt_required = True
         self._take_keyset(gateway.keyset, "the quote binds its receipt keys", check)
         return check.attestation(signers=self.signers)
 
@@ -957,7 +966,12 @@ class TeeClient:
           stream (`REBUILT_STREAMS`) or a reply wasn't streamed;
         - the receipt, signed (Ed25519) by a key of the attested keyset
           (`_take_keyset`), naming the same two hashes, and that its upstream
-          was verified, as nano-gpt now requires.
+          was verified, as nano-gpt now requires. For a model attested through
+          RedPill's gateway alone (`receipt_required`), a record with no
+          receipt read under the attested keys (none came, or the keys weren't
+          kept) raises: the reply is "unchecked", never verified on the
+          gateway's signature alone. A model attested itself needs none: its
+          own key signed the record.
 
         A stream's receipt is complete just after it ends: a lookup that
         finds none yet is tried again for a while."""
@@ -981,9 +995,17 @@ class TeeClient:
         if compared and f"sha256:{response_hash.lower()}" != body_hash:
             return "failed"
         receipt = body.get("receipt")
-        if isinstance(receipt, dict) and self.keyset is not None:
-            if not self._receipt_holds(receipt, request_hash, response_hash):
-                return "failed"
+        checked = isinstance(receipt, dict) and self.keyset is not None
+        if checked and not self._receipt_holds(receipt, request_hash, response_hash):
+            return "failed"
+        if self.receipt_required and not checked:
+            # Attested through the gateway alone, the gateway's signature says
+            # only that the reply passed through it: the receipt is its word
+            # that the model's own enclave answered, and without one that holds
+            # under the attested keys, that much wasn't checked.
+            raise ProviderError(
+                "the reply came with no receipt to say the model's enclave answered"
+            )
         return "verified" if compared else "signed"
 
     def signs(self, receipt_id: str | None = None) -> bool:
@@ -993,7 +1015,13 @@ class TeeClient:
         answers "TEE signature is not available for this model", and every
         instance that could answer was attested before sending instead. Only a
         reply RedPill's gateway answered names a receipt (nano-gpt, Nov 10
-        2026): one checked against the gateway's keys, where it was attested."""
+        2026): one checked against the gateway's keys, where it was attested.
+
+        A model attested through the gateway alone signs, whatever its reply
+        named: the gateway signs every record. Its reply with no receipt that
+        holds is then "unchecked" (`check_reply` raises), never "unsigned":
+        that mark says every instance that could answer was attested before
+        sending, and here none of the model's own was."""
         return bool(self.signers) and not (self.instances and receipt_id is None)
 
     def _signature(self, lookup: str, route: str | None, *, wait: bool) -> dict[str, Any]:

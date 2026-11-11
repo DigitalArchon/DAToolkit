@@ -218,6 +218,25 @@ async def test_a_model_attested_through_the_gateway_alone_has_its_replies_checke
     assert await signature_of(engine.chat[-1]) == "unchecked"
 
 
+async def test_through_the_gateway_alone_a_reply_whose_record_has_no_receipt_is_not_verified(env):  # noqa: F811
+    """Its own enclave is the gateway's word in each receipt: a record without one showed the
+    reply verified on the gateway's signature alone. It is unchecked ("⚠ reply not verified"),
+    never unsigned, which would say every instance that could answer was attested."""
+    engine, fake, _ = env
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    engine._tee_factory = tee_factory(server=receipt_server, stream=reply.encode(), with_receipt=False,
+                                      aci="bound", plain=lambda nonce: (200, RELAYED))
+    engine.new_case("g", "open")
+    engine.select_model("Fake", "TEE/deepseek-v3.2")
+    assert (await settled(engine))["status"] == "verified"
+    for headers in ({"X-Receipt-Id": "rcpt-1"}, {}):
+        fake.stream_headers = headers
+        fake.responses.append(reply)
+        engine.send("VPN is down")
+        await wait_turn(engine)
+        assert await signature_of(engine.chat[-1]) == "unchecked", headers
+
+
 async def test_a_chutes_model_shows_its_own_replies_unsigned_and_checks_those_redpill_answers(env):  # noqa: F811
     """Chutes answers first and signs nothing; a reply RedPill's gateway answers instead names its
     receipt (nano-gpt, Nov 10 2026), and is checked against the gateway's attested keys."""
