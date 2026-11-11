@@ -14,7 +14,8 @@ DA Toolkit is in beta. Only the latest release (or `master`) gets fixes.
 
 ## What's in scope
 
-Anything that breaks one of DA Toolkit's promises, for example:
+Anything that breaks one of DA Toolkit's promises, which
+[docs/security-and-privacy.md](docs/security-and-privacy.md) sets out in full, for example:
 
 - the AI (or text in command output) getting a command executed without a technician's click;
 - data from a Confidential or Sovereign case reaching a model or service its tier forbids;

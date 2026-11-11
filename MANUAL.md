@@ -16,6 +16,8 @@ This is the full reference. For what DA Toolkit is and how to install it, see th
 - [SSH, WinRM, RDP and windows](#ssh-winrm-rdp-and-windows)
 - [Where things are stored](#where-things-are-stored)
 - [Untrusted output](#untrusted-output)
+- [Security and privacy](docs/security-and-privacy.md), a document of its own: what leaves this
+  computer, every service DA Toolkit contacts, and its limits
 
 ## First run
 
@@ -630,6 +632,9 @@ did, the habits that tripped them up, and why each nudge and note exists.
 
 ## Model tiers and end-to-end encryption
 
+What each tier lets a provider see, and everything else DA Toolkit sends and keeps, is also set
+out in [Security and privacy](docs/security-and-privacy.md).
+
 | Tier | Detected from | What the provider can see |
 |---|---|---|
 | **Standard** | anything else | Everything |
@@ -1022,6 +1027,9 @@ script live in `$XDG_RUNTIME_DIR/datoolkit-<pid>` (every desktop session sets th
 it they fall back to `/tmp/datoolkit-<pid>`, where on a machine shared with other users
 someone who creates that name first stops DA Toolkit from starting, so keep
 `XDG_RUNTIME_DIR` set there.
+
+What is kept only in memory, and what never reaches a file or a log, is in
+[Security and privacy](docs/security-and-privacy.md#what-is-stored-on-this-computer).
 
 Inside a case directory: `case.json` (name, sensitivity, notes, client, whether its history is
 used), `events.jsonl` (audit log),

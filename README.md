@@ -31,7 +31,8 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
 - **Privacy tiers per case.** Open, Confidential and Sovereign cases limit which models may
   see the data: anything, end-to-end encrypted or local, or local only. End-to-end encrypted
   and TEE models are attested before anything is sent. Providers are reached over https, or
-  plain http only on this machine and its local network: nothing else is sent to.
+  plain http only on this machine and its local network: nothing else is sent to. See
+  [security and privacy](docs/security-and-privacy.md).
 - **An explicit investigation**: a hypothesis board the AI keeps up to date, recipes for
   common checks, baselines and diffs, dry runs, rollbacks and second opinions from a
   reviewer model before risky changes.
@@ -120,8 +121,11 @@ is handled.
 
 ## Contributing and security
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Please report vulnerabilities privately as described
-in [SECURITY.md](SECURITY.md), not in public issues.
+See [CONTRIBUTING.md](CONTRIBUTING.md). How DA Toolkit handles your security and privacy (what
+leaves this computer and what never does, every service it contacts, where keys are kept, what
+each kind of model can see, and its limits) is set out in
+[docs/security-and-privacy.md](docs/security-and-privacy.md). Please report vulnerabilities
+privately as described in [SECURITY.md](SECURITY.md), not in public issues.
 
 ## Licence
 
