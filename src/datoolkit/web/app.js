@@ -529,7 +529,9 @@ function renderTop() {
 
 // Attestation state of a model, as short text and a CSS class (chat model and vision helper).
 // TEE models: Intel TDX + NVIDIA attestation (llm/tee.py); "partial" names what couldn't be checked.
-const TEE_CLEAR = "A TEE model runs in an attested enclave, but prompts still pass NanoGPT's gateway in the clear; only private/ models are end-to-end encrypted.";
+// What was attested leads (att.what, llm/tee.py what_was_attested): for most TEE models it is
+// RedPill's gateway, which passes each request on, and the machine that runs the model is its word.
+const TEE_CLEAR = "The text passes NanoGPT's servers in the clear. A private/ model is end-to-end encrypted instead.";
 // The keys a TEE model's replies are checked against (llm/tee.py signers): its attested signing key,
 // or every key RedPill's gateway's quote binds; for a model attested by its instances (Chutes, which
 // signs no replies), those of the gateway, for a reply it answers in their place.
@@ -549,26 +551,31 @@ function attestLabel(att) {
   if (att.status === "retired") return { text: "⚠ no longer offered", cls: "bad", title: `${att.error}.\nNothing is sent to it.${att.offered?.length ? `\nStill offered: ${att.offered.join(", ")}` : ""}` };
   if (tee) {
     const partial = att.level === "partial";
-    return { text: partial ? "🛡 TEE attested (partial)" : "🛡 TEE attested", cls: partial ? "warn" : "ok",
-      title: `${att.summary}.\n${att.detail}.${teeSigners(att)}\n${TEE_CLEAR}` };
+    // "TEE gateway attested" where RedPill's gateway is what was attested, not the model's machine
+    return { text: `🛡 ${att.headline || "TEE attested"}${partial ? " (partial)" : ""}`, cls: partial ? "warn" : "ok",
+      title: `${att.what ? `${att.what}\n\n` : ""}${att.summary}.\n${att.detail}.${teeSigners(att)}${att.what ? "" : `\n${TEE_CLEAR}`}` };
   }
   return { text: att.latest_release ? "🔐 attested (older release)" : "🔐 attested", cls: "ok",
     title: `End-to-end encrypted to an attested enclave.\n${att.summary}\nKey sha256: ${(att.hpke_key_sha256 || "").slice(0, 16)}…` };
 }
 
 // A TEE reply: attested before it was sent; was it that enclave's, as received (llm/tee.py
-// check_reply)? Anything short of verified says so in the mark itself, as SealedLore's do.
+// check_reply)? Anything short of verified says so in the mark itself, as SealedLore's do, and
+// each tooltip says what is someone's word (SealedLore's TEE_MARK_TIPS, 9af15c1).
 const TEE_SIGNATURE = {
   checking: ["checking reply…", "", "Asking NanoGPT for this reply's signed record…"],
-  verified: ["✔ verified", "ok", "The attested enclave's key signed this reply's record, and the record is for the exact bytes this app received. Where the gateway keeps a signed receipt it was read too, saying the model the reply came from was verified; that part is only as strong as the receipt's key, which the attestation names when the hardware's quote doesn't bind it."],
-  signed: ["signed, text not compared", "", "The attested enclave's key signed this reply's record, but the reply's text can't be compared with it (NanoGPT rebuilds this model's replies), so a change on the way here wouldn't show."],
+  verified: ["✔ verified", "ok", "The attested enclave's key signed this reply's record, and the record is for the exact bytes this app received. For a model RedPill serves, that enclave is RedPill's gateway, which passed the request on to the machine running the model: the gateway's signed receipt, read too, says that machine was verified, which is the gateway's word, not checked by DA Toolkit (the top bar says what was attested). The receipt is only as strong as its key, which the attestation names when the hardware's quote doesn't bind it."],
+  signed: ["signed, text not compared", "", "The attested enclave's key signed this reply's record, but the reply's text can't be compared with it (NanoGPT rebuilds this model's replies), so a change on the way here wouldn't show. As for a verified reply, the machine running the model is the gateway's word."],
   failed: ["✖ check failed", "bad", "This reply doesn't match its record: not signed by the attested enclave's key, not the bytes that were signed, or its receipt doesn't hold (another key, another reply, or a model that wasn't verified). Treat it with suspicion. The enclave is attested again before anything more is sent to it."],
-  unsigned: ["unsigned", "", "This model's provider (Chutes) signs no replies; every instance that could answer was attested before sending instead. A reply RedPill's gateway answers in its place names a receipt, and is checked against the gateway's attested keys."],
-  unchecked: ["⚠ reply not verified", "warn", "No signed record of this reply could be read (the provider kept none, it was out of reach, or the gateway's keys changed since it was attested), so nothing shows it came from the enclave that was attested. That is not a failed check."],
+  unsigned: ["unsigned", "", "This model's provider (Chutes) signs no replies, so nothing shows which machine answered: every instance that could answer was attested before sending, but NanoGPT routes each request, and a model may be served elsewhere when its provider is busy. A reply RedPill's gateway answers in its place names a receipt, and is checked against the gateway's attested keys."],
+  unchecked: ["⚠ reply not verified", "warn", "No signed record of this reply could be read (the provider kept none, it was out of reach, the gateway's keys changed since it was attested, or, for a model attested through RedPill's gateway alone, its record came with no receipt), so nothing shows it came from the enclave that was attested. NanoGPT routes each request, and a model may be served elsewhere when its provider is busy. That is not a failed check."],
 };
 function teeBadge(e) {
   const [text, cls, why] = TEE_SIGNATURE[e.tee_signature] || ["", "", ""];
-  return h("span", { class: `tee-badge ${cls}`, title: `Attested before sending: ${e.tee_attested}.${why ? `\n\nReply: ${why}` : ""}\n\n${TEE_CLEAR}` },
+  // "TEE gateway attested before sending" for RedPill's gateway; an entry saved before Nov 11 2026
+  // has no headline: "Attested before sending", as then
+  const before = e.tee_headline ? `${e.tee_headline} before sending` : "Attested before sending";
+  return h("span", { class: `tee-badge ${cls}`, title: `${before}: ${e.tee_attested}.${why ? `\n\nReply: ${why}` : ""}\n\n${TEE_CLEAR}` },
     "🛡 TEE", text ? ` · ${text}` : "");
 }
 // The same mark on whatever else a TEE model wrote, each checked as a turn's replies are: an
@@ -3453,7 +3460,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, "For a model whose tier, image support or context window DA Toolkit gets wrong, or that the provider doesn't report (local models, mostly). Leave a column on Auto to keep what is detected (shown in brackets once the model list is loaded)."),
       table,
       h("div", { class: "row" }, h("button", { type: "button", class: "small", onclick: () => addRow().focus() }, "Add a model"), loadBtn),
-      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = runs in an enclave, attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict) and each reply's signature checked, but the prompt passes the provider's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models only, attested with Tinfoil's verifier; never set by hand); LOCAL = your own hardware (localhost/private IP URLs). Marking a cloud model Local lets Confidential and Sovereign cases use it: only do so for a model that really runs on your own hardware."),
+      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict; for most TEE models what is attested is RedPill's gateway, which passes each request on to the machine that runs the model) and each reply's signed record checked where its provider signs one (Chutes signs none), but the prompt passes NanoGPT's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models only, attested with Tinfoil's verifier; never set by hand); LOCAL = your own hardware (localhost/private IP URLs). Marking a cloud model Local lets Confidential and Sovereign cases use it: only do so for a model that really runs on your own hardware."),
       status,
       h("div", { class: "row" },
         h("button", { onclick: () => guarded(() => reshow("providers")) }, "Back"),
@@ -3622,7 +3629,7 @@ function openSettings(tab = "providers") {
       h("b", {}, `Vision helper ${v.helper}: ${lab.text}`), h("div", { class: "muted small pre" }, lab.title),
       att.status === "verified" || att.status === "failed" ? h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
         const r = await api("POST", "/api/attest", { slot: "helper" });
-        toast(r.status === "verified" ? `Vision helper attested: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
+        toast(r.status === "verified" ? `Vision helper ${r.kind === "tee" ? `(${r.headline || "TEE attested"})` : "attested"}: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
         show("model");
       }) }, "Re-check") : null);
   }
@@ -4142,7 +4149,7 @@ function init() {
   });
   $("#attest-btn").addEventListener("click", () => guarded(async () => {
     const r = await api("POST", "/api/attest");
-    toast(r.status === "verified" ? `${r.kind === "tee" ? "TEE" : "Enclave"} attested: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
+    toast(r.status === "verified" ? `${r.kind === "tee" ? r.headline || "TEE attested" : "Enclave attested"}: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
   }));
   $("#settings-btn").addEventListener("click", () => openSettings());
   $("#phone-btn").addEventListener("click", () => guarded(openPhone));

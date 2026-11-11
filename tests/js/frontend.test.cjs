@@ -338,6 +338,48 @@ test("a TEE model's tooltip names every key its replies are checked against", as
   assert.doesNotMatch(title({ signers: [], instances: 12 }), /Reply-signing|checked against/);
 });
 
+test("the top bar says what was attested, RedPill's gateway by name, and leads its tooltip with what is its word", async () => {
+  const app = await page("a");
+  const label = (att) => app.call("attestLabel", { status: "verified", kind: "tee", level: "partial",
+    summary: "partially verified: GPUs not tied to the quote", detail: "d", ...att });
+  const what = "Attested: RedPill's TEE gateway, which NanoGPT sends this model's requests through. That machine isn't attested by DA Toolkit: it is the gateway's word.";
+  const gateway = label({ attested: "gateway", headline: "TEE gateway attested", what });
+  assert.equal(gateway.text, "🛡 TEE gateway attested (partial)");
+  assert.ok(gateway.title.startsWith(`${what}\n\npartially verified: GPUs not tied to the quote.`), gateway.title);
+  assert.equal(label({ attested: "enclave", headline: "TEE attested", what: "Attested: the enclave.", level: "full" }).text,
+    "🛡 TEE attested");
+  // an attestation shown by an older server says what it always did, and that the text is in the clear
+  const older = label({});
+  assert.equal(older.text, "🛡 TEE attested (partial)");
+  assert.match(older.title, /passes NanoGPT's servers in the clear/);
+  assert.doesNotMatch(older.title + gateway.title, /runs in an attested enclave/);
+  // Re-check says it too
+  const app2 = await page("a", (s) => {
+    s.config.active_model = "TEE/glm-5.3-flash";
+    s.attestation = { status: "verified", kind: "tee", model: "TEE/glm-5.3-flash", level: "partial", summary: "partially verified: x",
+      detail: "d", attested: "gateway", headline: "TEE gateway attested", what };
+  }, { "POST /api/attest": () => ({ status: "verified", kind: "tee", headline: "TEE gateway attested", summary: "partially verified: x" }) });
+  assert.equal(app2.$("#attest-btn").textContent, "🛡 TEE gateway attested (partial)");
+  app2.$("#attest-btn").click();
+  await app2.clock.tick(0);
+  assert.ok(app2.toasts().includes("TEE gateway attested: partially verified: x"), app2.toasts().join("\n"));
+});
+
+test("a TEE reply's tooltip says what was attested before it was sent, and what is someone's word", async () => {
+  const app = await page("a");
+  const title = (e) => app.call("teeBadge", { tee_attested: "partially verified: GPUs not tied to the quote", ...e }).getAttribute("title");
+  assert.ok(title({ tee_headline: "TEE gateway attested", tee_signature: "verified" })
+    .startsWith("TEE gateway attested before sending: partially verified: GPUs not tied to the quote."));
+  assert.ok(title({ tee_signature: "verified" }).startsWith("Attested before sending: "), "a reply kept from before");
+  assert.match(title({ tee_signature: "verified" }), /the gateway's word, not checked by DA Toolkit/);
+  assert.match(title({ tee_signature: "signed" }), /the machine running the model is the gateway's word/);
+  assert.match(title({ tee_signature: "unsigned" }), /nothing shows which machine answered/);
+  assert.match(title({ tee_signature: "unchecked" }), /attested through RedPill's gateway alone, its record came with no receipt/);
+  for (const result of ["verified", "signed", "failed", "unchecked", "unsigned"]) {
+    assert.match(title({ tee_signature: result }), /passes NanoGPT's servers in the clear\. A private\/ model is end-to-end encrypted instead\.$/);
+  }
+});
+
 test("plain http to anywhere but this computer, its network or an onion is a link that isn't secure", async () => {
   const app = await page("a");
   const insecure = (url) => app.call("insecureLink", url);

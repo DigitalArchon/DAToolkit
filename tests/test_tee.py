@@ -27,12 +27,14 @@ from datoolkit.llm.client import LLMClient
 from datoolkit.llm.secure_http import ProviderError
 from datoolkit.llm.tee import (
     GATEWAY_UNCHECKED,
+    GPUS_LOOSE,
     NRAS_URL,
     OWN_ENCLAVE_UNCHECKED,
     RECEIPT_KEYS_LOOSE,
     TeeClient,
     TeeRefused,
     is_tee,
+    what_was_attested,
 )
 
 KEY = 0xB25C7DB31FEED9122727BF0939DC769A96564B2DE4C4726D035B36ECF1E5B364
@@ -168,8 +170,9 @@ def client_for(*, intel=UP_TO_DATE, nvidia=8, **server) -> TeeClient:
 
 
 def besides_receipts(result) -> list[str]:
-    """The shortfalls other than the receipt keys, which nano-gpt's form always has."""
-    return [what for what in result.shortfalls if what != RECEIPT_KEYS_LOOSE]
+    """The shortfalls other than the two nano-gpt's form always has: the receipt keys, and GPUs its
+    quote doesn't commit to."""
+    return [what for what in result.shortfalls if what not in (RECEIPT_KEYS_LOOSE, GPUS_LOOSE)]
 
 
 def test_a_bound_quote_intel_and_nvidia_vouch_for_is_attested_its_receipt_keys_named():
@@ -177,11 +180,18 @@ def test_a_bound_quote_intel_and_nvidia_vouch_for_is_attested_its_receipt_keys_n
     # receipts' keys aren't in it, said in the attestation's shortfalls.
     client = client_for()
     result = client.attest()
-    assert result.verified and result.shortfalls == [RECEIPT_KEYS_LOOSE]
+    # Its GPUs too: NVIDIA vouches for them, for our nonce, but the quote's report data is the
+    # signing key and the nonce, nothing of the GPUs' (SealedLore 9af15c1).
+    assert result.verified and result.shortfalls == [RECEIPT_KEYS_LOOSE, GPUS_LOOSE]
     assert (result.gpus, result.tcb_status, result.gpu_ok) == (8, "UpToDate", True)
     assert result.signing_address == address_of(KEY).lower()
     assert "binds the signing key to our nonce" in result.detail
     assert "vouches for 8 GPUs" in result.detail
+    assert "the GPUs may be another machine's" in result.detail
+    # No gateway report, nor a report that says it is RedPill's: the machine whose key signs, not
+    # known to be a gateway.
+    assert result.attested == "enclave" and result.headline == "TEE attested"
+    assert "Whether that machine runs the model itself" in what_was_attested(result)
     assert client.verify_reply("req_1") is True
 
 
@@ -435,10 +445,11 @@ def _real_client(real, monkeypatch, *, nvidia_now: float | None = None, **server
     )
 
 
-def test_the_whole_real_attestation_holds_with_only_its_receipt_keys_short(real, monkeypatch):
+def test_the_whole_real_attestation_holds_with_only_its_receipt_keys_and_gpus_short(real, monkeypatch):
     result = _real_client(real, monkeypatch).attest()
-    # Sept 2026's capture has no keyset: no receipts, so nothing binds them either.
-    assert result.verified and result.shortfalls == [RECEIPT_KEYS_LOOSE]
+    # Sept 2026's capture has no keyset: no receipts, so nothing binds them either; and its quote
+    # binds the signing key and our nonce, not its GPUs.
+    assert result.verified and result.shortfalls == [RECEIPT_KEYS_LOOSE, GPUS_LOOSE]
     assert (result.gpus, result.tcb_status) == (8, "UpToDate")
     assert result.signing_address == real["signing_address"]
 
@@ -455,6 +466,9 @@ def test_redpills_gateway_is_attested_only_in_part_and_its_expired_keys_are_refu
     assert result.level == "partial"
     assert besides_receipts(result) == ["the model's own enclave unchecked (RedPill's gateway)"]
     assert "this is RedPill's gateway" in result.detail
+    # what is attested is the gateway, said so wherever it is shown (SealedLore 9af15c1)
+    assert result.attested == "gateway" and result.headline == "TEE gateway attested"
+    assert what_was_attested(result).startswith("Attested: RedPill's TEE gateway")
     assert result.gpus == 8 and result.tcb_status == "UpToDate"
     for shape in ({"api_version": "aci/1"}, {"service_capabilities": {"serving": "aggregator"}}):
         assert _real_client(real, monkeypatch, extra=shape).attest().level == "partial"
@@ -597,8 +611,13 @@ def test_every_instance_bound_and_signed_is_fully_attested(instances):
     seen: dict = {}
     client = shaped(lambda nonce: (200, instances.body(nonce)), seen=seen)
     result = client.attest()
+    # Each instance's quote binds its GPU evidence's nonce: its GPUs are its own.
     assert result.level == "full" and result.instances == 2 and result.gpus == 16
     assert "signs no replies" in result.detail
+    assert result.attested == "instances" and result.headline == "TEE attested"
+    assert "each of the 2 instances" in what_was_attested(result)
+    assert "nothing shows which machine answered" in what_was_attested(result)
+    assert "RedPill's gateway answers in their place" not in what_was_attested(result)
     # NVIDIA's verdict is sought for the nonce each quote binds, as measured live.
     assert seen["nras_nonces"] == seen["verified_nonces"] == [instances.gpu_nonce] * 2
     with pytest.raises(ProviderError, match="signs no replies"):
@@ -1244,7 +1263,11 @@ def test_a_receipt_under_keys_renewed_since_is_unchecked_not_failed():
 def test_a_keyset_the_quote_binds_itself_is_taken_and_one_tied_neither_way_is_not():
     bound = receipt_client(tied="statement")
     assert bound.keyset is not None
-    assert bound.attest().level == "full", "RedPill's own form binds the receipt keys"
+    result = bound.attest()
+    # RedPill's own form binds the receipt keys; its quote is RedPill's gateway's, short of the
+    # model's own enclave as any the gateway answers, and of GPUs it doesn't commit to
+    assert result.shortfalls == [OWN_ENCLAVE_UNCHECKED, GPUS_LOOSE]
+    assert result.attested == "gateway"
     loose = receipt_client(tied="none")
     assert loose.keyset is None
     # Still signed by the attested key, for these bytes: the receipt goes unread.
@@ -1351,8 +1374,12 @@ def test_the_gateways_report_binds_the_receipt_keys_and_only_the_models_own_encl
     seen: list = []
     client = receipt_client(aci="bound", seen=seen)
     result = client.attest()
-    assert result.level == "partial" and result.shortfalls == [OWN_ENCLAVE_UNCHECKED]
+    assert result.level == "partial" and result.shortfalls == [OWN_ENCLAVE_UNCHECKED, GPUS_LOOSE]
     assert "binds its receipt keys" in result.detail and "gateway's Intel TDX quote" in result.detail
+    # The signing key is one of the gateway's: what was attested is the gateway.
+    assert result.attested == "gateway"
+    assert "RedPill's TEE gateway" in what_was_attested(result)
+    assert "the gateway's word, in each reply's signed receipt" in what_was_attested(result)
     assert client.keyset is not None and result.signers == [address_of(KEY).lower()]
     assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
     asked = [r for r in seen if "/tee/attestation" in str(r.url)]
@@ -1416,6 +1443,7 @@ def test_the_gateway_stands_in_for_a_model_whose_own_evidence_was_relayed():
     result = client.attest()
     assert result.level == "partial" and result.shortfalls == ["no GPU evidence", OWN_ENCLAVE_UNCHECKED]
     assert "the gateway that answers it is attested instead" in result.detail
+    assert result.attested == "gateway" and result.headline == "TEE gateway attested"
     assert result.signing_address is None and result.signers == [address_of(KEY).lower()]
     assert client.signs() and client.signs("rcpt-1")
     assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
@@ -1516,6 +1544,9 @@ def test_a_chutes_model_with_the_gateway_checks_the_replies_redpill_answers(inst
     assert result.level == "partial" and result.instances == 2
     assert result.shortfalls == [OWN_ENCLAVE_UNCHECKED]
     assert "RedPill's gateway answers instead is checked against its attested keys" in result.detail
+    # attested as its instances, the gateway behind them for a reply it answers
+    assert result.attested == "instances" and result.headline == "TEE attested"
+    assert "RedPill's gateway answers in their place" in what_was_attested(result)
     assert client.signs("rcpt-1") and not client.signs(None)
     assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
     with pytest.raises(ProviderError, match="signs no replies"):

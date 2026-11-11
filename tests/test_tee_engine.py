@@ -17,6 +17,7 @@ from test_engine import env, sse, wait_turn  # noqa: F401
 from test_models import _png
 from test_research import DOC, FakeWeb, agent_turns, nano, research_call, say
 from test_tee import (
+    GPUS_LOOSE,
     OWN_ENCLAVE_UNCHECKED,
     RECEIPT_KEYS_LOOSE,
     RELAYED,
@@ -63,8 +64,13 @@ async def test_a_tee_model_is_attested_and_its_replies_checked_to_their_bytes(en
     engine.select_model("Fake", "TEE/glm-5.3")
     assert engine.attestation == {"status": "checking", "model": "TEE/glm-5.3", "kind": "tee"}   # "TEE attesting…"
     att = await settled(engine)
-    assert (att["status"], att["kind"], att["level"], att["gpus"]) == ("verified", "tee", "full", 8)
-    assert att["summary"].startswith("Intel TDX quote verified") and att["signing_address"]
+    # RedPill's own form, which binds its receipt keys: what is attested is RedPill's gateway, said
+    # so, and what that leaves to its word (SealedLore 9af15c1)
+    assert (att["status"], att["kind"], att["level"], att["gpus"]) == ("verified", "tee", "partial", 8)
+    assert att["shortfalls"] == [OWN_ENCLAVE_UNCHECKED, GPUS_LOOSE] and att["signing_address"]
+    assert att["summary"].startswith("partially verified: the model's own enclave unchecked")
+    assert (att["attested"], att["headline"]) == ("gateway", "TEE gateway attested")
+    assert att["what"].startswith("Attested: RedPill's TEE gateway") and "gateway's word" in att["what"]
     assert "the quote binds its receipt keys" in att["detail"]
     fake.stream_headers = {"X-Receipt-Id": "rcpt-1", "X-TEE-Verification-Route": "r1"}
     fake.responses.append(reply)
@@ -72,7 +78,7 @@ async def test_a_tee_model_is_attested_and_its_replies_checked_to_their_bytes(en
     await wait_turn(engine)
     entry = engine.chat[-1]
     assert fake.requests[-1]["model"] == "TEE/glm-5.3"
-    assert entry["tee_attested"] == att["summary"]
+    assert entry["tee_attested"] == att["summary"] and entry["tee_headline"] == "TEE gateway attested"
     assert await signature_of(entry) == "verified"
     lookup = [r for r in seen if "/tee/signature/" in str(r.url)][-1]
     assert "/tee/signature/rcpt-1" in str(lookup.url) and lookup.headers["X-TEE-Verification-Route"] == "r1"
@@ -84,7 +90,8 @@ async def test_a_reply_other_than_the_one_signed_fails_and_one_not_comparable_is
     engine.new_case("b", "open")
     engine.select_model("Fake", "TEE/glm-5.3")
     att = await settled(engine)
-    assert att["level"] == "partial" and att["shortfalls"] == [RECEIPT_KEYS_LOOSE]
+    assert att["level"] == "partial" and att["shortfalls"] == [RECEIPT_KEYS_LOOSE, GPUS_LOOSE]
+    assert (att["attested"], att["headline"]) == ("enclave", "TEE attested")
     fake.responses.append(sse(({"role": "assistant", "content": "Let's look."}, "stop")))
     engine.send("VPN is down")
     await wait_turn(engine)
@@ -283,6 +290,7 @@ async def test_a_tee_vision_helper_is_attested_before_an_image_goes_to_it_and_it
     assert asked["stream"] is True                       # so its bytes can be compared with the signed record
     note = engine.chat[-2]["image_notes"]["img-1.png"]
     assert note["model"] == "TEE/kimi-k3" and note["tee_attested"].startswith("partially verified: receipt keys")
+    assert note["tee_headline"] == "TEE attested"
     assert note["text"] == "A console menu." and note["tee_signature"] == "verified"
     kept = json.loads((engine.case.dir / "image-descriptions.json").read_text(encoding="utf-8"))
     assert kept["img-1.png"]["tee_signature"] == "verified"
@@ -347,6 +355,7 @@ async def test_a_tee_write_up_is_streamed_checked_to_its_bytes_and_marked(env): 
     assert fake.requests[-1]["model"] == "TEE/glm-5.3" and fake.requests[-1]["stream"] is True
     assert out["text"] == "Ticket: VPN restored."
     assert out["tee_attested"] == att["summary"] and out["tee_signature"] == "verified"
+    assert out["tee_headline"] == "TEE gateway attested"
     lookup = [r for r in seen if "/tee/signature/" in str(r.url)][-1]
     assert "/tee/signature/rcpt-w" in str(lookup.url) and lookup.headers["X-TEE-Verification-Route"] == "r2"
     logged = _checks_logged(engine)[-1]

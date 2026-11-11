@@ -1142,7 +1142,7 @@ class Engine:
         A failure is said. Nothing for a model that isn't TEE."""
         if not tee:
             return {}
-        marks = {"tee_attested": tee[1]["summary"]}
+        marks = self._tee_sent_under(tee)
         if checks:
             await asyncio.wait(checks)          # waited for, never cancelled: a failed one is acted on
             outcomes = ["unchecked" if t.cancelled() else t.result() for t in checks]
@@ -1152,6 +1152,15 @@ class Engine:
             if result == "failed":
                 self._tee_failed(model, what)
         return marks
+
+    @staticmethod
+    def _tee_sent_under(tee: tuple) -> dict:
+        """What a TEE reply keeps of the attestation it was sent under (`tee`: what _tee_guard
+        returned): its summary, and what was attested ("TEE gateway attested" for RedPill's
+        gateway, which isn't the machine that runs the model: llm/tee.py what_was_attested), which
+        its mark's tooltip leads with."""
+        shown = tee[1]
+        return {"tee_attested": shown["summary"], "tee_headline": shown.get("headline") or "TEE attested"}
 
     def _tee_failed(self, model: str, what: str) -> None:
         self.emit("toast", level="error", text=(
@@ -3643,7 +3652,7 @@ class Engine:
                 entry["sealed"] = att.summary
             tee = await self._tee_guard(prov, model, "chat")
             if tee:
-                entry["tee_attested"] = tee[1]["summary"]
+                entry.update(self._tee_sent_under(tee))
             # a TEE model's replies this turn: (completion id, receipt id, sha256 of the stream's
             # bytes, route), for their signed records (llm/tee.py check_reply)
             replies: list[tuple] = []
