@@ -8,14 +8,16 @@ import ipaddress
 import json
 import re
 import uuid
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
-from openai import APIError, AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import APIError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 from openai.types.chat import ChatCompletionChunk
 
 from . import netguard
+from .secure_http import ProviderError
 
 # standard: plaintext to a cloud provider. tee: runs in an enclave, but the prompt passes the
 # provider's gateway in the clear. e2ee: sealed on this machine to an attested enclave's key
@@ -101,6 +103,43 @@ def openai_messages(messages: list[dict]) -> list[dict]:
     return out + [{"role": "tool", "tool_call_id": i, "content": NO_RESULT} for i in pending]
 
 
+def redirected(err: Exception) -> ProviderError | None:
+    """A redirect an endpoint answered a chat request with (a 308 from www to the bare host, say),
+    as the error to raise, or None for any other error. The clients follow none (a redirect
+    re-sends the prompt, and the key, to wherever it points), so it is said, and where to, for the
+    address to be put right in Settings if the endpoint has moved. The SDKs said "Error code: 308"
+    and no more. For either SDK's APIStatusError. (SealedLore e947938, Nov 11 2026.)"""
+    response = getattr(err, "response", None)
+    status = getattr(response, "status_code", None)
+    if not (isinstance(status, int) and 300 <= status < 400):
+        return None
+    location = response.headers.get("location")
+    target = location
+    if location:
+        try:
+            target = str(response.request.url.join(location))
+        except Exception:  # noqa: BLE001 - an address that can't be read is named as it came
+            pass
+    where = f" to {netguard.shown(target)[:200]}" if target else ""
+    return ProviderError(
+        f"{netguard.shown(str(response.request.url))} redirected (HTTP {status}){where}. Nothing was sent "
+        "there: if the endpoint has moved, put its new address in Settings → AI providers.", status_code=status)
+
+
+def no_reply(response, what: str = "stream") -> ProviderError:
+    """An answer that carried no reply at all (a web page where the API was expected, a sign-in
+    page on a local network, a JSON body with no choices), as the error to raise: an empty reply
+    would say nothing of why, and a turn ended with nothing shown at all. A body with SSE `data:`
+    lines is a stream whatever its content type says; only one with none comes here.
+    (SealedLore e947938, Nov 11 2026.)"""
+    kind = response.headers.get("content-type", "").split(";")[0].strip() or "no content type"
+    return ProviderError(
+        f"{netguard.shown(str(response.request.url))} answered HTTP {response.status_code} ({kind[:80]}) with "
+        f"no reply in it, not the {what} a chat endpoint sends. Check the provider's address in Settings → AI "
+        "providers: a web page answers like this where the API was expected (an address without its /v1, say).",
+        status_code=response.status_code)
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -163,8 +202,12 @@ class LLMClient:
     ) -> AsyncIterator[tuple[str, object]]:
         """Yield ("text"|"reasoning", str) deltas and ("tool", name) as each tool call starts,
         then ("done", TurnResult). `receipts`: a TEE model's reply, whose signed record names the
-        hash of the exact bytes its stream carried (llm/tee.py check_reply): every byte is hashed,
-        to the end, and the receipt's headers kept on the TurnResult."""
+        hash of the exact bytes its stream carried (llm/tee.py check_reply): the hash of every byte,
+        to the end, and the receipt's headers are kept on the TurnResult.
+
+        A redirect, or an answer with not one SSE data line in it (a web page), raises, saying
+        where the endpoint redirected or what it answered (`redirected`, `no_reply`): a web page
+        ended the turn with nothing shown at all, and a redirect said only "Error code: 308"."""
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
         kwargs: dict = {"model": model, "messages": openai_messages(messages), "stream": True,
@@ -174,56 +217,77 @@ class LLMClient:
             kwargs["tool_choice"] = "auto"
         kwargs.update(_split_params(params))
         acc = StreamAccumulator()
-        if receipts:
-            async for event in self._stream_as_received(kwargs, acc):
+        # closed with this one: stopped or cancelled, the connection is dropped at once
+        async with aclosing(self._stream_as_received(kwargs, acc, receipts)) as events:
+            async for event in events:
                 yield event
-            yield "done", acc.finish()
-            return
-        stream = await self._client.chat.completions.create(**kwargs)
-        try:
-            async for chunk in stream:
-                for event in acc.feed(chunk):
-                    yield event
-        finally:
-            await stream.close()     # stopped or cancelled: drop the connection, so the provider stops generating
         yield "done", acc.finish()
 
-    async def _stream_as_received(self, kwargs: dict, acc: StreamAccumulator) -> AsyncIterator[tuple[str, str]]:
+    async def _stream_as_received(self, kwargs: dict, acc: StreamAccumulator,
+                                  receipts: bool = True) -> AsyncIterator[tuple[str, str]]:
         """The stream read line by line as it came, every byte (decoded of any transfer encoding)
-        hashed to the end, `[DONE]` and after: the SDK's own reader stops at `[DONE]`. Chunks are
-        built as the SDK builds them, and an error the stream carries raises as the SDK raises it.
-        From SealedLore's providers/openai_compat.py (Nov 2026)."""
-        async with self._client.chat.completions.with_streaming_response.create(**kwargs) as response:
-            body = hashlib.sha256()
-            acc.result.receipt_id = response.headers.get("x-receipt-id") or response.headers.get("x-tee-signature-id")
-            acc.result.tee_route = response.headers.get("x-tee-verification-route")
-            done = False
-            async for line in _lines(response, body):
-                if done or not line.startswith("data:"):
-                    continue
-                data = line[len("data:"):].strip()
-                if data == "[DONE]":
-                    done = True      # read on (nothing after it is taken), so the hash covers every byte
-                    continue
-                chunk = json.loads(data)
-                if not isinstance(chunk, dict):
-                    continue
-                if chunk.get("error"):
-                    error = chunk["error"]
-                    message = error.get("message") if isinstance(error, dict) else None
-                    raise APIError(message=message if isinstance(message, str) and message
-                                   else "An error occurred during streaming",
-                                   request=response.http_response.request, body=error)
-                for event in acc.feed(ChatCompletionChunk.construct(**chunk)):
-                    yield event
-            acc.result.body_hash = "sha256:" + body.hexdigest()
+        hashed to the end, `[DONE]` and after: the SDK's own reader stops at `[DONE]`, and can't
+        tell a stream that said nothing from a body that wasn't a stream at all. Chunks are built
+        as the SDK builds them, and an error the stream carries raises as the SDK raises it. Every
+        stream is read so; `receipts` keeps the receipt's headers and the hash on the TurnResult.
+        Stopped or cancelled, the connection is dropped, so the provider stops generating. From
+        SealedLore's providers/openai_compat.py (Nov 2026)."""
+        try:
+            async with self._client.chat.completions.with_streaming_response.create(**kwargs) as response:
+                body = hashlib.sha256()
+                if receipts:
+                    acc.result.receipt_id = (response.headers.get("x-receipt-id")
+                                             or response.headers.get("x-tee-signature-id"))
+                    acc.result.tee_route = response.headers.get("x-tee-verification-route")
+                done = saw_data = False
+                async for line in _lines(response, body):
+                    if done or not line.startswith("data:"):
+                        continue
+                    saw_data = True
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        done = True      # read on (nothing after it is taken), so the hash covers every byte
+                        continue
+                    chunk = json.loads(data)
+                    if not isinstance(chunk, dict):
+                        continue
+                    if chunk.get("error"):
+                        error = chunk["error"]
+                        message = error.get("message") if isinstance(error, dict) else None
+                        raise APIError(message=message if isinstance(message, str) and message
+                                       else "An error occurred during streaming",
+                                       request=response.http_response.request, body=error)
+                    for event in acc.feed(ChatCompletionChunk.construct(**chunk)):
+                        yield event
+                if not saw_data:
+                    # not one event: whatever came wasn't a reply, and an empty one would say nothing of why
+                    raise no_reply(response.http_response)
+                if receipts:
+                    acc.result.body_hash = "sha256:" + body.hexdigest()
+        except APIStatusError as e:              # only the request's own answer raises it
+            redirect = redirected(e)
+            if redirect is None:
+                raise
+            raise redirect from e
 
     async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
-        resp = await self._client.chat.completions.create(model=model, messages=openai_messages(messages),
-                                                          **_split_params(params))
-        return resp.choices[0].message.content or ""
+        try:
+            raw = await self._client.chat.completions.with_raw_response.create(
+                model=model, messages=openai_messages(messages), **_split_params(params))
+        except APIStatusError as e:
+            redirect = redirected(e)
+            if redirect is None:
+                raise
+            raise redirect from e
+        resp = raw.parse()
+        # a body that isn't a chat completion (a web page, which the SDK hands back as text) said
+        # "'str' object has no attribute 'choices'"
+        choices = None if isinstance(resp, str) else getattr(resp, "choices", None)
+        if not choices or getattr(choices[0], "message", None) is None:
+            raise no_reply(raw.http_response, "reply")
+        return choices[0].message.content or ""
 
 
 async def _lines(response, body) -> AsyncIterator[str]:

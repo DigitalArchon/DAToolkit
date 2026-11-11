@@ -7,6 +7,7 @@ for this machine and its local network, which is how a model server of one's own
 """
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -17,6 +18,9 @@ from datoolkit.engine import Engine, UserError
 from datoolkit.llm import netguard
 from datoolkit.llm.anthropic_api import AnthropicClient
 from datoolkit.llm.client import LLMClient
+from datoolkit.llm.secure_http import ProviderError
+
+from test_engine import env  # noqa: F401
 
 
 def test_https_is_accepted_anywhere():
@@ -166,6 +170,135 @@ async def test_a_model_endpoint_redirecting_elsewhere_is_not_followed(make):
     with pytest.raises(Exception, match="307"):
         await client.complete("m", [{"role": "user", "content": "the case"}])
     assert seen and all(url.startswith("https://") for url in seen)
+
+
+# --- a redirect, or an answer with no stream in it (SealedLore e947938, Nov 11 2026) ---------------
+# The SDKs said "Error code: 308" of a redirect; a web page answering 200 where the API was expected
+# ended a turn with nothing at all (the OpenAI SDK read it as a stream with no events), an Anthropic
+# turn with an empty AssertionError, and a write-up with "'str' object has no attribute 'choices'".
+
+CLIENTS = [lambda base: LLMClient(base, "sk-x"), lambda base: AnthropicClient(base, "sk-x")]
+
+
+def answering(make, handler, base="https://llm.example/v1"):
+    """`make`'s client with its own default HTTP client (which follows no redirect), answered by
+    `handler`."""
+    httpx2 = pytest.importorskip("httpx2")
+    client = make(base)
+    client._client._client._transport = httpx2.MockTransport(handler)
+    client._client._client._mounts = {}
+    return client
+
+
+async def streamed_by(client) -> list:
+    return [e async for e in client.stream("m", [{"role": "user", "content": "the case"}])]
+
+
+@pytest.mark.parametrize("make", CLIENTS)
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+async def test_a_redirect_is_said_with_where_to_and_never_taken_for_an_empty_reply(make, status):
+    httpx2 = pytest.importorskip("httpx2")
+    seen: list = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx2.Response(status, headers={"location": "https://apex.example/v1/chat/x"})
+
+    for call in (streamed_by, lambda c: c.complete("m", [{"role": "user", "content": "the case"}])):
+        seen.clear()
+        with pytest.raises(ProviderError) as info:
+            await call(answering(make, handler))
+        said = str(info.value)
+        assert f"redirected (HTTP {status}) to https://apex.example/v1/chat/x" in said
+        assert "Nothing was sent there" in said and "Settings → AI providers" in said
+        assert info.value.status_code == status
+        assert len(seen) == 1, "nothing was followed, nor retried"
+
+
+@pytest.mark.parametrize("make", CLIENTS)
+async def test_a_relative_redirect_names_the_whole_address_without_a_password(make):
+    httpx2 = pytest.importorskip("httpx2")
+    client = answering(make, lambda r: httpx2.Response(308, headers={"location": "/v2/chat"}),
+                       base="https://bob:hunter2@llm.example/v1")
+    with pytest.raises(ProviderError) as info:
+        await streamed_by(client)
+    assert "redirected (HTTP 308) to https://…@llm.example/v2/chat" in str(info.value)
+    assert "hunter2" not in str(info.value) and "bob" not in str(info.value)
+
+
+@pytest.mark.parametrize("make", CLIENTS)
+@pytest.mark.parametrize(("body", "kind"), [
+    (b"<html><body>Sign in to the Wi-Fi</body></html>", "text/html"),
+    (b"", "text/event-stream"),
+    (b'{"id": "x", "choices": []}', "application/json"),
+])
+async def test_an_answer_with_no_stream_in_it_is_said_never_an_empty_reply(make, body, kind):
+    httpx2 = pytest.importorskip("httpx2")
+    client = answering(make, lambda r: httpx2.Response(200, content=body, headers={"content-type": kind}))
+    with pytest.raises(ProviderError) as info:
+        await streamed_by(client)
+    said = str(info.value)
+    assert f"answered HTTP 200 ({kind}) with no reply in it" in said and "Settings → AI providers" in said
+
+
+@pytest.mark.parametrize(("body", "kind"), [
+    (b"<html><body>Sign in to the Wi-Fi</body></html>", "text/html"),
+    (b'{"id": "x", "choices": []}', "application/json"),
+    (b'{"error": "upstream unavailable"}', "application/json"),
+])
+async def test_a_completion_with_no_reply_in_it_is_said(body, kind):
+    """A write-up, a second opinion or an image's description, asked for without a stream."""
+    httpx2 = pytest.importorskip("httpx2")
+    client = answering(CLIENTS[0], lambda r: httpx2.Response(200, content=body, headers={"content-type": kind}))
+    with pytest.raises(ProviderError, match=rf"answered HTTP 200 \({kind}\) with no reply in it, not the reply"):
+        await client.complete("m", [{"role": "user", "content": "the case"}])
+    done = {"id": "c", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "fine"}}]}
+    ok = answering(CLIENTS[0], lambda r: httpx2.Response(200, json=done))
+    assert await ok.complete("m", [{"role": "user", "content": "the case"}]) == "fine"
+
+
+async def test_a_stream_is_read_whatever_its_content_type_says():
+    """Real servers label their streams every way (llama.cpp, proxies): a body with `data:` lines is
+    the reply. One that says nothing but [DONE] is an empty reply, as the endpoint sent it."""
+    httpx2 = pytest.importorskip("httpx2")
+    chunk = {"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": "m",
+             "choices": [{"index": 0, "delta": {"content": "fine"}, "finish_reason": "stop"}]}
+    stream = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+    for kind in ("text/html", "application/json", "text/plain", None):
+        client = answering(CLIENTS[0], lambda r, kind=kind: httpx2.Response(
+            200, content=stream, headers={"content-type": kind} if kind else {}))
+        events = await streamed_by(client)
+        assert "".join(v for k, v in events if k == "text") == "fine", kind
+        assert events[-1][1].finish_reason == "stop" and events[-1][1].body_hash is None, "no hash unless asked"
+    done = answering(CLIENTS[0], lambda r: httpx2.Response(200, content=b"data: [DONE]\n\n",
+                                                          headers={"content-type": "text/event-stream"}))
+    events = await streamed_by(done)
+    assert events[-1][0] == "done" and events[-1][1].content == ""
+
+
+async def test_a_turn_answered_by_a_web_page_says_so(env):  # noqa: F811
+    """It ended with the technician's message and nothing after it: no reply, no error, no Retry."""
+    engine, fake, _ = env
+
+    def page(request):
+        if request.url.path.endswith("/models"):
+            return fake.handler(request)
+        return httpx.Response(200, text="<html><body>Sign in</body></html>", headers={"content-type": "text/html"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(page))
+    engine._client = lambda prov, model="": LLMClient(prov.base_url, "sk-test", http)
+    engine.new_case("p", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    engine.send("VPN is down")
+    for _ in range(200):
+        if not engine.busy:
+            break
+        await asyncio.sleep(0.01)
+    note = engine.chat[-1]
+    assert note["kind"] == "note" and note.get("retry") and engine.can_retry
+    assert "answered HTTP 200 (text/html) with no reply in it" in note["text"]
+    assert "https://fake.example/api/v1/chat/completions" in note["text"]
 
 
 # --- the attestation client's redirects (llm/secure_http.py) ---------------------------------

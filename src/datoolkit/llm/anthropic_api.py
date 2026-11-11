@@ -35,12 +35,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import aclosing
 from typing import AsyncIterator
 
 import anthropic
 
 from .capabilities import EFFORTS
-from .client import NO_RESULT, ToolCall, TurnResult, is_private_mode
+from .client import NO_RESULT, ToolCall, TurnResult, is_private_mode, no_reply, redirected
 from .params import nearest_effort
 from .providers import is_official_anthropic
 
@@ -451,7 +452,24 @@ class AnthropicClient:
     async def stream(self, model: str, messages: list[dict], tools: list[dict] | None = None,
                      params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
         """Yield ("text"|"reasoning", str), ("tool", name) as a tool call starts, ("search", record)
-        as Anthropic's own search runs and returns, then ("done", TurnResult)."""
+        as Anthropic's own search runs and returns, then ("done", TurnResult).
+
+        A redirect, or an answer with no Messages event in it (a web page), raises, saying where
+        the endpoint redirected or what it answered (llm/client.py redirected, no_reply): the SDK
+        said "Error code: 308", and of a web page nothing at all (an empty AssertionError)."""
+        try:
+            # closed with this one: stopped or cancelled, the connection is dropped at once
+            async with aclosing(self._stream(model, messages, tools, params)) as events:
+                async for event in events:
+                    yield event
+        except anthropic.APIStatusError as e:      # only the request's own answer raises it
+            redirect = redirected(e)
+            if redirect is None:
+                raise
+            raise redirect from e
+
+    async def _stream(self, model: str, messages: list[dict], tools: list[dict] | None = None,
+                      params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
         kwargs, extra, info = self.request(model, messages, tools, params)
@@ -466,7 +484,9 @@ class AnthropicClient:
         searched = False
         for _ in range(MAX_CONTINUATIONS + 1):
             async with self._client.messages.stream(**kwargs, **extra) as s:
+                saw_event = False
                 async for ev in s:
+                    saw_event = True
                     if ev.type == "content_block_start":
                         b = ev.content_block
                         if b.type in ("tool_use", "server_tool_use"):
@@ -503,6 +523,9 @@ class AnthropicClient:
                             rec.update(results=found, status="failed" if error else "done",
                                        **({"error": error} if error else {}))
                             yield "search", dict(rec)
+                if not saw_event:
+                    # not one event of a Messages stream: whatever came wasn't a reply
+                    raise no_reply(s.response)
                 msg = await s.get_final_message()
             blocks = [_dump(b) for b in msg.content]
             blocks_all += blocks
