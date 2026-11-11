@@ -532,6 +532,9 @@ function renderTop() {
 // What was attested leads (att.what, llm/tee.py what_was_attested): for most TEE models it is
 // RedPill's gateway, which passes each request on, and the machine that runs the model is its word.
 const TEE_CLEAR = "The text passes NanoGPT's servers in the clear. A private/ model is end-to-end encrypted instead.";
+// Settings → Model, under "Name the provider behind each TEE reply" (off by default): what it does,
+// and whom it tells (SealedLore's TEE_UPSTREAMS_NOTE, 44e145d).
+const TEE_UPSTREAMS_NOTE = "Most TEE models are attested as RedPill's gateway, which passes each request on to the provider that runs the model. With this on, after a TEE reply checks out DA Toolkit asks RedPill which provider that was (Phala, Fortanix, NEAR AI, 0G, Tinfoil…) and shows it beside the reply's mark. This connects to api.redpill.ai directly, not through NanoGPT, so RedPill sees this computer's internet address and that one of its models was used around then. Only the session's id is sent, never your messages or your key. It is one small download per model about an hour, and never for models Chutes serves, whose records are megabytes each. What it names is RedPill's word, matched to the receipt the attested gateway signed.";
 // The keys a TEE model's replies are checked against (llm/tee.py signers): its attested signing key,
 // or every key RedPill's gateway's quote binds; for a model attested by its instances (Chutes, which
 // signs no replies), those of the gateway, for a reply it answers in their place.
@@ -570,13 +573,21 @@ const TEE_SIGNATURE = {
   unsigned: ["unsigned", "", "This model's provider (Chutes) signs no replies, so nothing shows which machine answered: every instance that could answer was attested before sending, but NanoGPT routes each request, and a model may be served elsewhere when its provider is busy. A reply RedPill's gateway answers in its place names a receipt, and is checked against the gateway's attested keys."],
   unchecked: ["⚠ reply not verified", "warn", "No signed record of this reply could be read (the provider kept none, it was out of reach, the gateway's keys changed since it was attested, or, for a model attested through RedPill's gateway alone, its record came with no receipt), so nothing shows it came from the enclave that was attested. NanoGPT routes each request, and a model may be served elsewhere when its provider is busy. That is not a failed check."],
 };
+// Who ran a TEE reply's model, by RedPill's record of it (Settings → Model, "Name the provider behind
+// each TEE reply"; llm/tee.py served_by): shown only beside a mark whose receipt the name rests on, and
+// its tooltip says it is RedPill's word.
+function teeRunBy(e) {
+  const named = ["verified", "signed"].includes(e.tee_signature) ? e.tee_upstream : null;
+  return { text: named?.name ? ` · run by ${named.label || named.name}` : "", why: named?.words ? `\n\n${named.words}` : "" };
+}
 function teeBadge(e) {
   const [text, cls, why] = TEE_SIGNATURE[e.tee_signature] || ["", "", ""];
   // "TEE gateway attested before sending" for RedPill's gateway; an entry saved before Nov 11 2026
   // has no headline: "Attested before sending", as then
   const before = e.tee_headline ? `${e.tee_headline} before sending` : "Attested before sending";
-  return h("span", { class: `tee-badge ${cls}`, title: `${before}: ${e.tee_attested}.${why ? `\n\nReply: ${why}` : ""}\n\n${TEE_CLEAR}` },
-    "🛡 TEE", text ? ` · ${text}` : "");
+  const ran = teeRunBy(e);
+  return h("span", { class: `tee-badge ${cls}`, title: `${before}: ${e.tee_attested}.${why ? `\n\nReply: ${why}` : ""}${ran.why}\n\n${TEE_CLEAR}` },
+    "🛡 TEE", text ? ` · ${text}` : "", ran.text);
 }
 // The same mark on whatever else a TEE model wrote, each checked as a turn's replies are: an
 // image's description, a write-up, a second opinion, a research report, a compaction summary.
@@ -3662,6 +3673,9 @@ function openSettings(tab = "providers") {
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { auto_review: e.target.value }); toast("Saved.", "ok", 2000); }) },
       [["off", "Off"], ["disruptive", "Disruptive commands"], ["flagged", "Everything flagged (modifying, disruptive or sensitive)"]]
         .map(([val, l]) => h("option", { value: val, selected: val === (S.state.config.settings.auto_review || "off") }, l)));
+    // off by default: the one lookup that goes to api.redpill.ai directly (llm/tee.py served_by)
+    const teeNames = h("input", { type: "checkbox", class: "tee-upstreams", checked: S.state.config.settings.tee_name_upstreams === true,
+      onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { tee_name_upstreams: e.target.checked }); toast("Saved.", "ok", 2000); }) });
     const save = async () => {
       const generation = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
       await api("POST", "/api/settings", { generation });
@@ -3701,6 +3715,9 @@ function openSettings(tab = "providers") {
         S.state.config.settings.review_model
           ? "Asked in the background as each command is queued; the verdict shows on the item. It only adds warnings: it never lowers a risk level or clears a flag. Each review is one request to the reviewer model."
           : "Choose a reviewer model first: automatic reviews never fall back to the chat model."),
+      h("h3", {}, "TEE models"),
+      h("label", { class: "check" }, teeNames, "Name the provider behind each TEE reply"),
+      h("div", { class: "muted small tee-upstreams-note" }, TEE_UPSTREAMS_NOTE),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(save) }, "Save generation settings")));
   }
 

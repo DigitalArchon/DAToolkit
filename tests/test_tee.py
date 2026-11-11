@@ -1055,6 +1055,11 @@ def receipt_server(
     record_key: int = KEY,
     more_keys: tuple[int, ...] = (),
     with_receipt: bool = True,
+    session: dict | None = None,
+    session_body: bytes | None = None,
+    session_status: int = 200,
+    session_length: str | None = None,
+    session_redirect: str | None = None,
 ):
     """nano-gpt as live (Nov 4 2026): the attestation's quote binds the signing
     key; the keyset beside it lists that key as its e2ee key ("e2ee"), or the
@@ -1069,7 +1074,11 @@ def receipt_server(
     `plain(nonce) -> (status, body)` stands in for the plain report (None: the
     server's own, as without it). The record is signed by `record_key` (the
     signing key by default), and the keyset lists `more_keys` as secp256k1
-    e2ee keys too. `with_receipt` False: the record comes with no receipt."""
+    e2ee keys too. `with_receipt` False: the record comes with no receipt.
+
+    `session`: RedPill's record of the gateway's session, which the receipt names by its sha256 and
+    api.redpill.ai serves (as `session_body`, with `session_status` or a `session_length` header, or a
+    redirect to `session_redirect`, when given)."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from datoolkit.llm import tee
@@ -1105,6 +1114,7 @@ def receipt_server(
     request_hash = hashlib.sha256(b"the request forwarded").hexdigest()
     response_hash = (body_hash or "sha256:" + hashlib.sha256(stream).hexdigest())[7:]
     pending = [not_ready]
+    session_id = hashlib.sha256(tee._canonical(session)).hexdigest() if session else "s"
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -1114,6 +1124,12 @@ def receipt_server(
             return httpx.Response(
                 200, json=[["JWT", jwt({"x-nvidia-overall-att-result": True})], {}]
             )
+        if url.startswith(tee.SESSION_RECORDS):
+            if session_redirect:
+                return httpx.Response(302, headers={"location": session_redirect})
+            body = session_body if session_body is not None else json.dumps(session).encode()
+            headers = {"content-length": session_length} if session_length else {}
+            return httpx.Response(session_status, content=body, headers=headers)
         if "/tee/attestation" in url:
             nonce = request.url.params["nonce"]
             if request.url.params.get("report") == "aci" and aci != "none":
@@ -1187,7 +1203,7 @@ def receipt_server(
                         "type": "upstream.verified",
                         "result": upstream,
                         "required": True,
-                        "session_id": "s",
+                        "session_id": session_id,
                         "model_id": "m",
                     },
                     {"type": "response.returned", "body_hash": f"sha256:{reply_hash}"},
@@ -1567,3 +1583,156 @@ def test_a_chutes_model_with_the_gateway_checks_the_replies_redpill_answers(inst
     result = unheard.attest()
     assert result.level == "partial" and result.shortfalls == [GATEWAY_UNCHECKED]
     assert "HTTP 429" in result.detail and not unheard.signs("rcpt-1")
+
+
+# --- who ran the model: RedPill's session records (Settings → Model, off by default) ------------
+# From SealedLore's tests of the same lookup (44e145d).
+
+TINFOIL = {
+    "api_version": "aci/1",
+    "upstream_name": "tinfoil",
+    "verifier_id": "private-ai-verifier/tinfoil/v1",
+    "claims": {
+        "extra": {"evidence_scope": "router"},
+        "gpu_attested": {"status": "unknown"},
+    },
+    "established_at": 1_799_999_000,
+    "expires_at": 1_800_002_600,
+}
+
+
+@pytest.fixture
+def no_records_kept(monkeypatch):
+    """Each test reads RedPill's records afresh: they are kept for the process."""
+    from datoolkit.llm import tee
+
+    monkeypatch.setattr(tee, "_records", {})
+
+
+def redpill_asked(seen) -> list:
+    from datoolkit.llm import tee
+
+    return [r for r in seen if str(r.url).startswith(tee.SESSION_RECORDS)]
+
+
+def test_a_reply_names_its_provider_by_redpills_record_read_once_a_session(no_records_kept):
+    """The receipt the attested gateway signed names the session by the record's sha256, so the
+    record is believed only as the receipt names it; it is fetched with no key, once a session."""
+    from datoolkit.llm.tee import upstream_label, upstream_words
+
+    seen: list = []
+    client = receipt_client(aci="bound", session=TINFOIL, seen=seen)
+    found = client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True)
+    assert found.mark == "verified"
+    upstream = found.upstream
+    assert (upstream.name, upstream.scope, upstream.gpus, upstream.model) == ("tinfoil", "router", "unknown", "m")
+    assert upstream.asked and len(upstream.session) == 64
+    assert upstream_label(upstream) == "Tinfoil"
+    words = upstream_words(upstream)
+    assert "its router" in words and "no GPU attestation" in words
+    assert "RedPill's word, fetched from api.redpill.ai" in words
+    assert upstream.to_dict()["label"] == "Tinfoil" and upstream.to_dict()["words"] == words
+    asked = redpill_asked(seen)
+    assert len(asked) == 1 and asked[0].method == "GET" and asked[0].url.host == "api.redpill.ai"
+    assert str(asked[0].url) == "https://api.redpill.ai/v1/aci/sessions/" + upstream.session, "the session's id alone"
+    assert "authorization" not in {k.lower() for k in asked[0].headers}, "no key goes to RedPill"
+    # The next reply in the same session reads no record again; one not asked to name its provider
+    # asks nothing of RedPill at all.
+    again = client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True)
+    assert again.upstream.name == "tinfoil" and not again.upstream.asked
+    assert client.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed()) == "verified"
+    assert client.check("req_9", receipt_id="rcpt-1", body_hash=streamed()).upstream is None
+    assert len(redpill_asked(seen)) == 1
+
+
+def test_a_provider_label_is_redpills_name_without_its_number():
+    from datoolkit.llm.tee import TeeUpstream, upstream_label
+
+    assert upstream_label(TeeUpstream(name="phala-244")) == "Phala"
+    assert upstream_label(TeeUpstream(name="near-ai")) == "NEAR AI"
+    assert upstream_label(TeeUpstream(name="0g-private-computer")) == "0G"
+    assert upstream_label(TeeUpstream(name="somebody-new")) == "somebody-new"
+
+
+@pytest.mark.parametrize(
+    "server, note",
+    [
+        ({"session_body": b'{"upstream_name": "chutes"}'}, "isn't the one the receipt names"),
+        ({"session_length": "3424330"}, "3,424 KB, more than is read"),
+        ({"session_body": b'{"pad": "' + b"x" * 1_000_100 + b'"}'}, "more than is read for one reply"),
+        ({"session_status": 503}, "answered HTTP 503"),
+        ({"session_body": b"not json"}, "couldn't be read"),
+        ({"session_redirect": "https://elsewhere.example/record"}, "answered HTTP 302"),
+    ],
+)
+def test_a_record_that_cant_be_read_or_believed_names_nobody(no_records_kept, server, note):
+    """Never a failed reply: the mark is the gateway's check, and stands. A redirect isn't followed."""
+    seen: list = []
+    client = receipt_client(aci="bound", session=TINFOIL, seen=seen, **server)
+    found = client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True)
+    assert found.mark == "verified"
+    assert found.upstream.name == "" and note in found.upstream.note and found.upstream.asked
+    assert not [r for r in seen if "elsewhere.example" in str(r.url)]
+
+
+def test_a_redirect_off_https_or_into_this_network_is_refused_as_every_attestation_fetch_is(no_records_kept):
+    """The lookup goes through the TEE client's own guard (llm/secure_http.py), as its other fetches do."""
+    from datoolkit.llm.secure_http import refuse_insecure_redirect
+
+    for target, why in (("http://api.redpill.ai/v1/aci/sessions/x", "insecure connection"),
+                        ("https://192.168.1.1/admin", "local network")):
+        client = receipt_client(aci="bound", session=TINFOIL, session_redirect=target)
+        client._client.event_hooks = {"response": [refuse_insecure_redirect]}
+        found = client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True)
+        assert found.mark == "verified" and found.upstream.name == "" and why in found.upstream.note, target
+
+
+def test_anything_else_that_goes_wrong_in_the_lookup_leaves_the_mark(no_records_kept, monkeypatch):
+    from datoolkit.llm import tee
+
+    client = receipt_client(aci="bound", session=TINFOIL)
+    monkeypatch.setattr(tee, "_session_record", lambda *a: 1 / 0)
+    found = client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True)
+    assert found.mark == "verified" and found.upstream.name == ""
+    assert "ZeroDivisionError" in found.upstream.note
+
+
+def test_a_reply_served_outside_the_session_its_receipt_names_names_nobody(no_records_kept):
+    stale = {**TINFOIL, "expires_at": 1_799_999_500}
+    client = receipt_client(aci="bound", session=stale)
+    found = client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True)
+    assert found.mark == "verified" and "outside the session" in found.upstream.note
+
+
+def test_a_model_chutes_serves_is_never_looked_up(no_records_kept):
+    """A Chutes instance has a session of its own, 3.4 MB for deepseek-v3.2, and replies spread over
+    the instances: megabytes nearly every message."""
+    seen: list = []
+    client = receipt_client(aci="bound", session=TINFOIL, seen=seen)
+    client.instances = True
+    receipt = {
+        "served_at": 1_800_000_000,
+        "event_log": [{"type": "upstream.verified", "session_id": "ab" * 32, "model_id": "m"}],
+    }
+    upstream = client.served_by(receipt)
+    assert upstream.name == "" and "Chutes serves" in upstream.note and not upstream.asked
+    assert redpill_asked(seen) == []
+
+
+def test_a_session_named_by_a_receipt_not_read_is_never_looked_up(no_records_kept):
+    seen: list = []
+    client = receipt_client(tied="none", session=TINFOIL, seen=seen)
+    found = client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True)
+    assert found.mark == "verified" and "wasn't read under the attested keys" in found.upstream.note
+    assert redpill_asked(seen) == []
+
+
+def test_at_most_so_many_records_are_kept(no_records_kept, monkeypatch):
+    from datoolkit.llm import tee
+
+    monkeypatch.setattr(tee, "SESSION_RECORDS_KEPT", 2)
+    for n in range(3):
+        record = {**TINFOIL, "upstream_name": f"phala-{n}"}
+        client = receipt_client(aci="bound", session=record)
+        assert client.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True).upstream.name == f"phala-{n}"
+    assert len(tee._records) == 2

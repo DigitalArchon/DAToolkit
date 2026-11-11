@@ -21,9 +21,11 @@ from test_tee import (
     OWN_ENCLAVE_UNCHECKED,
     RECEIPT_KEYS_LOOSE,
     RELAYED,
+    TINFOIL,
     UP_TO_DATE,
     InstanceEvidence,
     receipt_server,
+    redpill_asked,
     tee_server,
 )
 
@@ -519,3 +521,121 @@ async def test_a_tee_page_check_is_checked_and_the_page_marked(env):  # noqa: F8
     text = await engine._run_page(rec, DOC, prov, "TEE/glm-5.3", "tee")
     assert "found nothing aimed at an AI" in text
     assert rec["status"] == "done" and rec["tee_signature"] == "verified" and rec["tee_attested"]
+
+
+# ---------------------------------------------------------------- who ran a reply (Settings → Model)
+
+def _logged(engine, event) -> list[dict]:
+    path = engine.case.dir / "events.jsonl"
+    return [e for e in map(json.loads, path.read_text(encoding="utf-8").splitlines()) if e["event"] == event]
+
+
+@pytest.fixture
+def no_records_kept(monkeypatch):
+    from datoolkit.llm import tee
+
+    monkeypatch.setattr(tee, "_records", {})
+
+
+async def test_a_tee_replys_provider_is_named_only_when_settings_ask(env, no_records_kept):  # noqa: F811
+    """Off by default: asking RedPill goes to api.redpill.ai directly, so nothing asks it unless the
+    technician chose to (SealedLore 44e145d). What went there is in the case's log and timeline."""
+    engine, fake, _ = env
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    seen: list = []
+    engine._tee_factory = tee_factory(server=receipt_server, aci="bound", session=TINFOIL, stream=reply.encode(),
+                                      seen=seen)
+    engine.new_case("n", "open")
+    engine.select_model("Fake", "TEE/gpt-oss-120b")
+    await settled(engine)
+    assert engine.cfg.settings.tee_name_upstreams is False
+    fake.stream_headers = {"X-Receipt-Id": "rcpt-1"}
+    fake.responses.append(reply)
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "verified"
+    assert "tee_upstream" not in engine.chat[-1] and redpill_asked(seen) == []
+
+    engine.save_settings({"tee_name_upstreams": "true"})        # only a real yes turns it on
+    assert engine.cfg.settings.tee_name_upstreams is False
+    engine.save_settings({"tee_name_upstreams": True})
+    assert engine.snapshot()["config"]["settings"]["tee_name_upstreams"] is True
+    fake.responses.append(reply)
+    engine.send("and now?")
+    await wait_turn(engine)
+    entry = engine.chat[-1]
+    assert await signature_of(entry) == "verified"
+    upstream = entry["tee_upstream"]
+    assert (upstream["name"], upstream["label"], upstream["scope"]) == ("tinfoil", "Tinfoil", "router")
+    assert "RedPill's word, fetched from api.redpill.ai" in upstream["words"]
+    asked = redpill_asked(seen)
+    assert len(asked) == 1 and "authorization" not in {k.lower() for k in asked[0].headers}
+    logged = _logged(engine, "redpill_session_record")
+    assert [(e["host"], e["session"], e["model"], e["provider"]) for e in logged] == [
+        ("api.redpill.ai", upstream["session"], "TEE/gpt-oss-120b", "tinfoil")]
+    assert _logged(engine, "tee_reply_signature")[-1]["provider"] == "tinfoil"
+    assert any(t["kind"] == "redpill_session_record" and "Asked api.redpill.ai who ran a TEE/gpt-oss-120b reply" in t["text"]
+               and t["text"].endswith(": tinfoil") for t in engine.timeline()["events"])
+    # The same session's next reply: named again, nothing more asked of RedPill or logged as sent.
+    fake.responses.append(reply)
+    engine.send("more")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "verified" and engine.chat[-1]["tee_upstream"]["name"] == "tinfoil"
+    assert len(redpill_asked(seen)) == 1 and len(_logged(engine, "redpill_session_record")) == 1
+
+
+async def test_a_tee_write_up_names_its_provider_too_and_a_failed_one_names_nobody(env, no_records_kept):  # noqa: F811
+    engine, fake, _ = env
+    reply = sse(({"role": "assistant", "content": "Ticket: VPN restored."}, "stop"))
+    engine._tee_factory = tee_factory(server=receipt_server, aci="bound", session=TINFOIL, stream=reply.encode())
+    engine.new_case("w", "open")
+    engine.select_model("Fake", "TEE/gpt-oss-120b")
+    await settled(engine)
+    engine.save_settings({"tee_name_upstreams": True})
+    engine.conv = [{"role": "user", "content": "VPN down"}, {"role": "assistant", "content": "Restarted it."}]
+    fake.stream_headers = {"X-Receipt-Id": "rcpt-w"}
+    fake.responses.append(reply)
+    out = await engine.ticket_summary()
+    assert out["tee_signature"] == "verified" and out["tee_upstream"]["label"] == "Tinfoil"
+    # a reply that doesn't match its record names nobody: the name would rest on nothing
+    engine._tee_factory = tee_factory(server=receipt_server, aci="bound", session=TINFOIL, stream=b"other bytes")
+    engine.select_model("Fake", "TEE/gpt-oss-120b")
+    await settled(engine)
+    fake.responses.append(reply)
+    out = await engine.client_update()
+    assert out["tee_signature"] == "failed" and "tee_upstream" not in out
+
+
+async def test_a_model_chutes_serves_has_no_provider_looked_up(env, no_records_kept):  # noqa: F811
+    """Each Chutes instance has a session record of its own, megabytes each: never fetched."""
+    engine, fake, _ = env
+    evidence = InstanceEvidence(1)
+    reply = sse(({"role": "assistant", "content": "Hi"}, "stop"))
+    seen: list = []
+    engine._tee_factory = tee_factory(server=receipt_server, aci="bound", session=TINFOIL, stream=reply.encode(),
+                                      seen=seen, plain=lambda nonce: (200, evidence.body(nonce)))
+    engine.new_case("k", "open")
+    engine.select_model("Fake", "TEE/kimi-k2.6")
+    await settled(engine)
+    engine.save_settings({"tee_name_upstreams": True})
+    fake.stream_headers = {"X-Receipt-Id": "rcpt-1"}                 # RedPill answered in Chutes' place
+    fake.responses.append(reply)
+    engine.send("x")
+    await wait_turn(engine)
+    entry = engine.chat[-1]
+    assert await signature_of(entry) == "verified"
+    assert entry["tee_upstream"]["name"] == "" and "Chutes serves" in entry["tee_upstream"]["note"]
+    assert redpill_asked(seen) == [] and _logged(engine, "redpill_session_record") == []
+
+
+def test_one_reply_unnamed_or_two_providers_leave_a_turn_unnamed():
+    from datoolkit.engine import Engine
+    from datoolkit.llm.tee import TeeUpstream
+
+    phala, tinfoil = TeeUpstream(name="phala-244"), TeeUpstream(name="tinfoil")
+    unread = TeeUpstream(note="api.redpill.ai answered HTTP 503")
+    assert Engine._tee_upstream_of([("verified", phala), ("signed", phala)])["label"] == "Phala"
+    assert "different providers" in Engine._tee_upstream_of([("verified", phala), ("verified", tinfoil)])["note"]
+    assert Engine._tee_upstream_of([("verified", phala), ("verified", unread)])["note"] == unread.note
+    assert Engine._tee_upstream_of([("verified", phala), ("unchecked", None)]) is None
+    assert Engine._tee_upstream_of([("verified", None)]) is None           # not looked up: nothing said

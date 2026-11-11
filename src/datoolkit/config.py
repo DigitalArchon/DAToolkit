@@ -154,6 +154,11 @@ class Settings:
     generation_version: int = 2
     # "provider|model" that describes images for a chat model without vision; empty = none
     vision_model: str = ""
+    # After a TEE reply whose receipt holds, name the provider that ran its model, from RedPill's
+    # public record of its gateway's session (llm/tee.py served_by). Off by default: it connects to
+    # api.redpill.ai directly, not through NanoGPT, so RedPill sees this computer's address (the
+    # author, Nov 11 2026: port it off by default, with a warning of what it does)
+    tee_name_upstreams: bool = False
     # extra system-prompt instructions for particular chat models: [{"match": "glm", "text": "..."}],
     # matched as a piece of the model id; built-in notes (llm/model_prompts.py) unless turned off
     model_prompts: list = field(default_factory=list)

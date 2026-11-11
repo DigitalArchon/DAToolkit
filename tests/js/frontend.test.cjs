@@ -380,6 +380,53 @@ test("a TEE reply's tooltip says what was attested before it was sent, and what 
   }
 });
 
+test("a TEE reply names who ran its model beside its mark, as RedPill's word, only where its receipt held", async () => {
+  const app = await page("a");
+  const upstream = { name: "phala-244", label: "Phala", scope: "model_instance", note: "",
+    words: "Run by Phala: RedPill's record of its gateway's session says … That is RedPill's word, fetched from api.redpill.ai and matched to the receipt the attested gateway signed; DA Toolkit doesn't check that machine." };
+  const badge = (e) => app.call("teeBadge", { tee_attested: "partially verified: x", tee_headline: "TEE gateway attested", ...e });
+  const verified = badge({ tee_signature: "verified", tee_upstream: upstream });
+  assert.equal(verified.textContent, "🛡 TEE · ✔ verified · run by Phala");
+  assert.match(verified.getAttribute("title"), /\n\nRun by Phala: .*That is RedPill's word, fetched from api\.redpill\.ai/s);
+  assert.equal(badge({ tee_signature: "signed", tee_upstream: upstream }).textContent, "🛡 TEE · signed, text not compared · run by Phala");
+  // beside a check that failed, or none, the name would rest on nothing: not shown
+  for (const result of ["failed", "unchecked", "unsigned", "checking"]) {
+    const el = badge({ tee_signature: result, tee_upstream: upstream });
+    assert.doesNotMatch(el.textContent + el.getAttribute("title"), /run by|Run by/i, result);
+  }
+  // looked up and named nobody: why, in the tooltip, and nothing beside the mark
+  const unnamed = badge({ tee_signature: "verified", tee_upstream: { name: "", label: "", note: "api.redpill.ai answered HTTP 503",
+    words: "The provider that ran it wasn't named: api.redpill.ai answered HTTP 503." } });
+  assert.equal(unnamed.textContent, "🛡 TEE · ✔ verified");
+  assert.match(unnamed.getAttribute("title"), /wasn't named: api\.redpill\.ai answered HTTP 503/);
+});
+
+test("Settings: naming the provider behind each TEE reply is off by default and says where it connects", async () => {
+  const app = await page("a");
+  app.call("openSettings", "model");
+  await app.clock.tick(0);
+  const box = app.$(".modal input.tee-upstreams");
+  assert.ok(box, "the switch is on the Model tab");
+  assert.equal(box.checked, false);
+  assert.equal(box.parentElement.textContent, "Name the provider behind each TEE reply");
+  const note = app.$(".modal .tee-upstreams-note").textContent;
+  for (const said of ["connects to api.redpill.ai directly, not through NanoGPT", "RedPill sees this computer's internet address",
+    "that one of its models was used around then", "Only the session's id is sent, never your messages or your key",
+    "one small download per model about an hour", "never for models Chutes serves, whose records are megabytes each",
+    "RedPill's word, matched to the receipt the attested gateway signed"]) {
+    assert.ok(note.includes(said), said);
+  }
+  box.checked = true;
+  box.dispatchEvent(new Event("change"));
+  await app.clock.tick(0);
+  assert.deepEqual(plain(app.posts("/api/settings").map((c) => c.body)), [{ tee_name_upstreams: true }]);
+  // shown on when it is on
+  const on = await page("a", (s) => { s.config.settings.tee_name_upstreams = true; });
+  on.call("openSettings", "model");
+  await on.clock.tick(0);
+  assert.equal(on.$(".modal input.tee-upstreams").checked, true);
+});
+
 test("plain http to anywhere but this computer, its network or an onion is a link that isn't secure", async () => {
   const app = await page("a");
   const insecure = (url) => app.call("insecureLink", url);

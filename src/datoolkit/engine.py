@@ -1096,24 +1096,61 @@ class Engine:
         receipt its headers named, the sha256 of every byte its stream carried, nano-gpt's route."""
         return result.id, result.receipt_id, result.body_hash, result.tee_route
 
-    async def _reply_outcome(self, key: tuple[str, str], client: tee_mod.TeeClient, record: tuple) -> str:
+    async def _reply_outcome(self, key: tuple[str, str], client: tee_mod.TeeClient,
+                             record: tuple) -> tuple[str, tee_mod.TeeUpstream | None]:
         """Was this reply the attested enclave's, as received? Checked off the event loop (it waits
         for a receipt): "verified": its record was signed by the enclave's key, for the exact bytes
         this app got, its receipt (where read) holding; "signed": signed, the bytes not comparable;
         "failed"; "unchecked": no record could be read; "unsigned": the provider signs none (Chutes,
         unless RedPill's gateway answered instead and named its receipt: llm/tee.py signs). A
-        failed one has its model, `key`, attested again before its next request (_tee_guard)."""
+        failed one has its model, `key`, attested again before its next request (_tee_guard).
+
+        With it, who ran the reply's model, by RedPill's record of it (llm/tee.py served_by), when
+        Settings → Model asks ("Name the provider behind each TEE reply", off by default: that
+        lookup goes to api.redpill.ai directly); else None. It never changes the mark."""
         rid, receipt_id, body_hash, route = record
+        upstream = None
         try:
-            outcome = await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
-                                              body_hash=body_hash, route=route)
+            if self.cfg.settings.tee_name_upstreams:
+                found = await asyncio.to_thread(client.check, rid, receipt_id=receipt_id, body_hash=body_hash,
+                                                route=route, name_upstream=True)
+                outcome, upstream = found.mark, found.upstream
+            else:
+                outcome = await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
+                                                  body_hash=body_hash, route=route)
         except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
             # signed by the keys a model attested through RedPill's gateway alone, too, which has
             # no signing address of its own
             outcome = "unchecked" if client.signs(receipt_id) else "unsigned"
         if outcome == "failed":
             self._tee_doubted.add(key)
-        return outcome
+        return outcome, upstream
+
+    @staticmethod
+    def _tee_upstream_of(found: list[tuple[str, tee_mod.TeeUpstream | None]]) -> dict | None:
+        """Who ran the replies of a turn, a research run or a write-up (each check's (mark,
+        upstream): _reply_outcome), as their mark shows it: named only when every reply checked out
+        with one and the same provider named, else why not (one reply named none, or they were run
+        by different providers); None when nothing was looked up, or a reply didn't check out (the
+        mark then says so, and a name would rest on nothing)."""
+        if not found or any(upstream is None or mark not in ("verified", "signed") for mark, upstream in found):
+            return None
+        ups = [upstream for _, upstream in found]
+        unnamed = next((u for u in ups if not u.name), None)
+        if unnamed is not None:
+            return unnamed.to_dict()
+        if len({u.name for u in ups}) > 1:
+            return tee_mod.TeeUpstream(note="its replies were run by different providers").to_dict()
+        return ups[-1].to_dict()
+
+    @staticmethod
+    def _log_redpill(log: Callable, model: str, found: list[tuple[str, tee_mod.TeeUpstream | None]]) -> None:
+        """What went to api.redpill.ai for these replies, in the case's log: a session's id, nothing
+        more, and what came back (llm/tee.py served_by)."""
+        for _, upstream in found:
+            if upstream is not None and upstream.asked:
+                log("redpill_session_record", host="api.redpill.ai", session=upstream.session, model=model,
+                    provider=upstream.name, note=upstream.note)
 
     def _tee_pending(self, key: tuple[str, str], task: asyncio.Task) -> asyncio.Task:
         """A check of a TEE model's replies, kept until it ends: the model's next request waits
@@ -1145,10 +1182,15 @@ class Engine:
         marks = self._tee_sent_under(tee)
         if checks:
             await asyncio.wait(checks)          # waited for, never cancelled: a failed one is acted on
-            outcomes = ["unchecked" if t.cancelled() else t.result() for t in checks]
-            result = marks["tee_signature"] = next(o for o in TEE_OUTCOMES if o in outcomes)
+            found = [("unchecked", None) if t.cancelled() else t.result() for t in checks]
+            result = marks["tee_signature"] = next(o for o in TEE_OUTCOMES if o in {m for m, _ in found})
             log = case.log if case else self.log
-            log("tee_reply_signature", purpose=what, model=model, result=result, replies=len(outcomes))
+            self._log_redpill(log, model, found)
+            upstream = self._tee_upstream_of(found)
+            if upstream:
+                marks["tee_upstream"] = upstream
+            log("tee_reply_signature", purpose=what, model=model, result=result, replies=len(found),
+                **({"provider": upstream["name"] or upstream["note"]} if upstream else {}))
             if result == "failed":
                 self._tee_failed(model, what)
         return marks
@@ -1174,27 +1216,34 @@ class Engine:
         turn takes the worst of its replies, and a failure is said. `case` and `chat` are the
         turn's: the check takes seconds (a receipt is waited for), and another case may be open
         by then. `key`: the turn's (provider, model)."""
-        outcomes = [await self._reply_outcome(key, client, record) for record in replies]
-        result = entry["tee_signature"] = next(o for o in TEE_OUTCOMES if o in outcomes)
+        found = [await self._reply_outcome(key, client, record) for record in replies]
+        result = entry["tee_signature"] = next(o for o in TEE_OUTCOMES if o in {m for m, _ in found})
+        # who ran them, where Settings asks: on the entry, as its mark shows it (_tee_upstream_of)
+        upstream = self._tee_upstream_of(found)
+        named = {"tee_upstream": upstream} if upstream else {}
+        entry.update(named)
+        said = {"provider": upstream["name"] or upstream["note"]} if upstream else {}
         if result == "failed":
             self._tee_failed(entry.get("model") or key[1], "reply")
         if self.case is case:
-            self.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(replies))
+            self._log_redpill(self.log, entry.get("model") or key[1], found)
+            self.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(replies), **said)
             self._changed()
             self._persist()
             return
         # Closed (or closed and opened again) meanwhile: the result goes on the entry as saved,
         # found by its place in the chat, which only ever grows.
         try:
-            case.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(replies))
+            self._log_redpill(case.log, entry.get("model") or key[1], found)
+            case.log("tee_reply_signature", model=entry.get("model"), result=result, replies=len(replies), **said)
             index = next(i for i, e in enumerate(chat) if e is entry)
             if self.case and self.case.id == case.id:
                 if index < len(self.chat) and self.chat[index].get("tee_signature") == "checking":
-                    self.chat[index]["tee_signature"] = result
+                    self.chat[index].update(tee_signature=result, **named)
                     self._changed()
                     self._persist()
             else:
-                case.patch_chat_entry(index, {"tee_signature": "checking"}, tee_signature=result)
+                case.patch_chat_entry(index, {"tee_signature": "checking"}, tee_signature=result, **named)
         except (OSError, ValueError, StopIteration):     # deleted meanwhile, or no longer readable
             pass
 
@@ -1389,6 +1438,10 @@ class Engine:
                 raise UserError(str(e)) from e
         if "builtin_model_prompts" in data:
             s.builtin_model_prompts = bool(data["builtin_model_prompts"])
+        if "tee_name_upstreams" in data:
+            # on only when asked for in so many words: it is the one lookup that goes to api.redpill.ai
+            # directly, not through NanoGPT, and a "false" written as text must not turn it on
+            s.tee_name_upstreams = data["tee_name_upstreams"] is True
         if "vision_model" in data:
             want = str(data["vision_model"] or "").strip()
             if want and ("|" not in want or not self.cfg.provider(want.split("|", 1)[0])):
@@ -2810,6 +2863,10 @@ class Engine:
                     "proposal_skipped": lambda: f"Skipped #{e.get('num')}: {e.get('command')}" + (f" ({e.get('note')})" if e.get("note") else ""),
                     "retry": lambda: f"Retried the last message with {e.get('model')}",
                     "image_described": lambda: f"Vision helper {e.get('model')} described {e.get('file')}",
+                    # what went to api.redpill.ai (Settings → Model: name the provider behind each TEE reply)
+                    "redpill_session_record": lambda: (f"Asked {e.get('host')} who ran a {e.get('model')} reply "
+                                                       f"(session {str(e.get('session'))[:12]}…): "
+                                                       f"{e.get('provider') or e.get('note')}"),
                     "proposal_withdrawn": lambda: f"AI withdrew #{e.get('num')}: {e.get('reason', '')}",
                     "web_search": lambda: f"Web search ({e.get('provider')}): {e.get('query')} → {e.get('results')} result(s)",
                     "web_search_declined": lambda: f"Web search {'timed out' if e.get('timed_out') else 'declined'}: {e.get('query')}",
