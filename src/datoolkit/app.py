@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import secrets
 import shlex
@@ -29,6 +30,40 @@ def browser_opener(port: int, launches: Launches):
         import webbrowser
         webbrowser.open(f"http://127.0.0.1:{port}/#c={launches.new()}")
     return open_in_browser
+
+
+# held for as long as this process runs: see other_instance
+_instance_lock = None
+
+
+def other_instance(directory: Path | None = None) -> str | None:
+    """What to tell the technician when another DA Toolkit is already running with the same
+    settings, or None when this is the only one. Each instance takes an advisory lock on a file in
+    the config directory and keeps it until it ends (a crash lets go of it by itself); the one that
+    finds it taken is the second. Two may run side by side, a case each: what keeps them from
+    undoing each other's work is that neither saves settings over the other's newer ones
+    (config.Config.save), a case is open in one of them at a time (case.Case), and the remote
+    desktop service is stopped only by the last to use it (sessions/guac.py). This says so up
+    front, so a refused save is no surprise."""
+    global _instance_lock
+    directory = config.private_dir(directory or config.config_dir())
+    f = open(directory / "instance.lock", "a+")        # noqa: SIM115 - kept open: the lock is the open file
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.seek(0)
+        pid = f.read().strip()
+        f.close()
+        return ("Another DA Toolkit is already running with these settings"
+                + (f" (process {pid})" if pid.isdigit() else "") + ". Both work, a case each, but settings "
+                "changed in one are refused in the other until it is restarted, and a case opens in only one "
+                "of them at a time.")
+    f.seek(0)
+    f.truncate()
+    f.write(str(os.getpid()))
+    f.flush()
+    _instance_lock = f
+    return None
 
 
 def _free_port() -> int:
@@ -223,12 +258,19 @@ def main(argv: list[str] | None = None) -> None:
                     help="with the browser: only print the URL (for opening it yourself)")
     ap.add_argument("--port", type=int, default=0, help="port to listen on (default: random)")
     args = ap.parse_args(argv)
+    if args.window and args.no_open:
+        # --no-open prints the address for a browser; until Nov 2026 it won over --window without a word
+        ap.error("--no-open goes with the browser (it prints the address to open): leave out --window")
 
     token = secrets.token_urlsafe(32)
     port = args.port or _free_port()
     cfg, notice = config.load_or_set_aside()
     if notice:
         print(notice, file=sys.stderr)
+    second = other_instance()
+    if second:
+        notice = f"{notice} {second}".strip()
+        print(second, file=sys.stderr)
     use_browser = args.browser or args.no_open or (cfg.settings.ui_mode == "browser" and not args.window)
     if not use_browser:
         problem = window_problem()
