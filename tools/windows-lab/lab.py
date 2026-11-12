@@ -19,7 +19,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-REPO = Path("/home/user/Documents/DAToolkit")
+# the checkout this file is in (tools/windows-lab/lab.py): the instance is started from its root
+REPO = Path(__file__).resolve().parents[2]
 # the Python that runs the instance: the repo's venv, or another (a venv with the kerberos extra)
 PY = os.environ.get("WINLAB_PYTHON") or str(REPO / ".venv/bin/python")
 # instances, screenshots, browser profiles and reports: outside the repo
@@ -63,8 +64,12 @@ class App:
         self.extra_env = extra_env or {}
 
     def env(self) -> dict:
-        return {**os.environ, "XDG_CONFIG_HOME": str(self.root / "config"), "XDG_DATA_HOME": str(self.root / "data"),
-                "XDG_STATE_HOME": str(self.root / "state"), "XDG_CACHE_HOME": str(self.root / "cache"), **self.extra_env}
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.root / "config"), "XDG_DATA_HOME": str(self.root / "data"),
+               "XDG_STATE_HOME": str(self.root / "state"), "XDG_CACHE_HOME": str(self.root / "cache"), **self.extra_env}
+        # This checkout's source first, whichever checkout the Python's venv was made for (a git
+        # worktree has none of its own). An AppImage's Python (WINLAB_APP) starts -I and ignores it.
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (str(REPO / "src"), env.get("PYTHONPATH", "")) if p)
+        return env
 
     def start(self, fresh: bool = True) -> None:
         if fresh and self.root.exists():
@@ -74,7 +79,11 @@ class App:
         self.log = open(self.root / "app.log", "a")
         # WINLAB_APP: an AppImage's AppRun (extracted), run as a technician would, instead of a Python
         app = [os.environ["WINLAB_APP"]] if os.environ.get("WINLAB_APP") else [PY, "-m", "datoolkit"]
-        self.proc = subprocess.Popen(app + ["--no-open", "--port", str(self.port)], cwd=REPO if REPO.is_dir() else Path.home(),
+        if not Path(app[0]).is_file():
+            raise SystemExit(f"{app[0]} is not there to run the instance with: make the checkout's venv "
+                             "(CONTRIBUTING.md), or name a Python that has DA Toolkit's packages (WINLAB_PYTHON) "
+                             "or an extracted AppImage's AppRun (WINLAB_APP).")
+        self.proc = subprocess.Popen(app + ["--no-open", "--port", str(self.port)], cwd=REPO,
                                      env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in self.proc.stdout:
             self.log.write(line)

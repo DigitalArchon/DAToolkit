@@ -2,7 +2,8 @@
 
 Live tests of DA Toolkit's Windows paths against the lab's Windows 11 VM (`win11` on p330-2,
 192.168.1.214; see `~/.local/share/testlab/LAB.md` for its WinRM, RDP and SSH setup). Each
-script starts a throwaway DA Toolkit from this checkout (own XDG dirs, ports 4859x–4860x, no AI
+script starts a throwaway DA Toolkit from the checkout it is in (that checkout's `src/` first on
+the instance's path; own XDG dirs, ports 4859x–4861x, no AI
 providers, host names `LabW11-*` that match nothing in the real keyring) and drives it the way
 the page does: prompts answered over `/ws/events`, terminals over `/ws/term` (bracketed paste,
 then Enter), RDP through the real page in headless Firefox (WebDriver BiDi).
@@ -17,17 +18,18 @@ then Enter), RDP through the real page in headless Firefox (WebDriver BiDi).
 | `basic_test.py` | Basic over HTTPS and HTTP (**turns Basic and AllowUnencrypted on, then off**) |
 | `kerberos_test.py` | Kerberos and Negotiate against the lab's Samba AD domain (`LAB.TEST` on dc1, win11 joined: LAB.md); what can't work refused when saved; Negotiate's NTLM fallback |
 
-Run each under a memory cap, one at a time on the VM's RDP session:
+Run each from this folder under a memory cap, one at a time on the VM's RDP session:
 
     systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 ../../.venv/bin/python rdp_test.py
 
 Needs: the VM running with WinRM, RDP and SSH as LAB.md describes; `~/.config/testlab/vm-credentials`;
 the `p330-2-win11` ssh alias (for checks on the Windows side); guacd on 127.0.0.1:4822; Firefox.
 Output (instances, screenshots, reports) goes to `~/.cache/datoolkit-winlab` (`WINLAB_WORK`).
-`WINLAB_PYTHON` runs the instance with another Python (one with the `kerberos` extra), `WINLAB_APP`
-with an extracted AppImage's `AppRun`, and `WINLAB_CREDS` reads the lab's secrets from a copy (on
-a VM). Kerberos needs this computer to resolve `win11test.lab.test` and find the KDC: run it on a
-lab VM pointed at the DC's DNS (LAB.md), with the AppImage.
+The instance runs with the checkout's `.venv/bin/python`; `WINLAB_PYTHON` names another Python
+(one with the `kerberos` extra; a git worktree, which has no venv of its own, needs it too),
+`WINLAB_APP` an extracted AppImage's `AppRun` instead, and `WINLAB_CREDS` reads the lab's secrets
+from a copy (on a VM). Kerberos needs this computer to resolve `win11test.lab.test` and find the
+KDC: run it on a lab VM pointed at the DC's DNS (LAB.md), with the AppImage.
 
 After an RDP test the VM's `test` session is no longer on the console: give it back with `tscon`
 (LAB.md), and close the PowerShell windows the test opened there.

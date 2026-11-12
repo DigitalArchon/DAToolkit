@@ -1,7 +1,12 @@
-"""The developer tools under tools/: that what the Windows lab scripts expect of the app is what
-the app does. The lab scripts themselves need the lab's Windows VM and are not run here."""
+"""The developer tools under tools/: that they run from wherever the repository is checked out,
+and that what the Windows lab scripts expect of the app is what the app does. The lab scripts
+themselves need the lab's Windows VM and are not run here; their harness is loaded with a
+stand-in for the lab's credentials file, and starts nothing."""
 
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from datoolkit.config import Host
@@ -9,6 +14,37 @@ from datoolkit.sessions import winrm
 
 ROOT = Path(__file__).resolve().parents[1]
 LAB = ROOT / "tools" / "windows-lab"
+
+
+def test_no_tool_names_the_folder_it_was_written_in():
+    """lab.py started the instance from /home/<its author>/Documents/DAToolkit, and the model
+    evaluation's brief sent the host agent there."""
+    for folder in ("tools", "packaging"):
+        for path in sorted((ROOT / folder).rglob("*")):
+            if path.is_file() and path.suffix in (".py", ".sh", ".md", ".toml", ".in", ""):
+                found = re.search(r"/home/\w+|/Users/\w+", path.read_text(errors="replace"))
+                assert not found, f"{path.relative_to(ROOT)}: {found.group(0)}"
+    assert "repository root" in (ROOT / "tools" / "model-eval" / "HOST_BRIEF.md").read_text()
+
+
+def test_the_lab_harness_runs_the_checkout_it_is_in(tmp_path):
+    (tmp_path / "creds").mkdir()
+    (tmp_path / "creds" / "vm-credentials").write_text("VM_USER=test\nVM_PASS='a stand-in'\n")
+    script = ("import os, lab\n"
+              "app = lab.App('paths')\n"
+              "print(lab.REPO)\nprint(app.env()['PYTHONPATH'])\nprint(app.root)\n"
+              "os.environ['WINLAB_APP'] = '/nonexistent/AppRun'\n"
+              "app.start()\n")
+    done = subprocess.run([sys.executable, "-c", script], cwd=LAB, capture_output=True, text=True, timeout=60,
+                          env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "PYTHONPATH": "/elsewhere",
+                               "WINLAB_CREDS": str(tmp_path / "creds"), "WINLAB_WORK": str(tmp_path / "work")})
+    repo, path, root = done.stdout.splitlines()
+    assert repo == str(ROOT)
+    assert path == f"{ROOT / 'src'}{os.pathsep}/elsewhere"         # this checkout's source, before any other
+    assert root == str(tmp_path / "work" / "inst" / "paths")
+    # no Python or AppRun to start the instance with is said, not a FileNotFoundError's traceback
+    assert done.returncode == 1 and "Traceback" not in done.stderr
+    assert "/nonexistent/AppRun is not there" in done.stderr and "WINLAB_PYTHON" in done.stderr
 
 
 def test_the_winrm_lab_script_expects_what_the_app_says_of_kerberos_to_an_address():

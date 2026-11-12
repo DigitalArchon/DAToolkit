@@ -5,7 +5,8 @@ proposes commands; you are **the technician at the keyboard and the machines the
 Nothing really runs: you invent the output, consistent with the scenario's hidden facts.
 
 ## Tools you use
-Only the harness, from `/home/user/Documents/DAToolkit`:
+Only the harness, run from the repository root (the folder with `pyproject.toml` and `tools/`
+in it; the paths below are relative to it):
 
     .venv/bin/python tools/model-eval/harness.py start --model MODEL --scenario SCENARIO --run-id RUN_ID
     .venv/bin/python tools/model-eval/harness.py reply --run-id RUN_ID --file tools/model-eval/runs/RUN_ID/reply-N.json
