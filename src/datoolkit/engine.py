@@ -2412,7 +2412,11 @@ class Engine:
                 sess.used_stored_password = True
                 self.log("credential_supplied", session_id=sid, source="keyring")
                 return stored
-        answer = await self.ask_user(sid, prompt, secret=secret, can_save=bool(host and is_password and not other_host))
+        try:
+            answer = await self.ask_user(sid, prompt, secret=secret, can_save=bool(host and is_password and not other_host))
+        except asyncio.CancelledError:       # the program that asked has gone (the bridge saw its helper end)
+            self.log("credential_prompt", session_id=sid, prompt=prompt, answered=False, withdrawn=True)
+            raise
         self.log("credential_prompt", session_id=sid, prompt=prompt, answered=answer is not None)
         return answer
 

@@ -88,8 +88,8 @@ class AskpassBridge:
             if not hmac.compare_digest(str(req.get("token", "")), self.token):
                 reply = {"ok": False}
             else:
-                answer = await self.handler(str(req.get("session", "")), str(req.get("prompt", "")),
-                                            str(req.get("kind", "askpass")))
+                answer = await self._answer_while_asked(reader, self.handler(
+                    str(req.get("session", "")), str(req.get("prompt", "")), str(req.get("kind", "askpass"))))
                 reply = {"ok": answer is not None, "answer": answer or ""}
             writer.write((json.dumps(reply) + "\n").encode())
             await writer.drain()
@@ -98,6 +98,30 @@ class AskpassBridge:
         finally:
             self._clients.discard(task)
             writer.close()
+
+    @staticmethod
+    async def _answer_while_asked(reader: asyncio.StreamReader, answering) -> str | None:
+        """The handler's answer, for as long as the helper that asked is still there. The helper
+        sends one line and waits; its end of the socket closing means the program that ran it
+        has gone (ssh gave up or was closed with its session). The handler is cancelled then,
+        which takes its question to the technician off the screen at once: until Nov 2026 a
+        password dialog for a session already closed stayed up for its full five minutes, and
+        what was typed into it went nowhere."""
+        async def gone() -> None:
+            while await reader.read(4096):
+                pass
+
+        answer, left = asyncio.ensure_future(answering), asyncio.ensure_future(gone())
+        try:
+            await asyncio.wait({answer, left}, return_when=asyncio.FIRST_COMPLETED)
+            if not answer.done():
+                raise ConnectionError("the helper that asked has gone")
+            return answer.result()
+        finally:
+            for pending in (answer, left):
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(answer, left, return_exceptions=True)
 
 
 def request(prompt: str, kind: str = "askpass") -> str | None:

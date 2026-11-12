@@ -106,6 +106,48 @@ async def test_the_askpass_bridge_stops_with_a_prompt_still_up(tmp_path):
         helper.stdout.close()
 
 
+async def test_a_prompt_is_withdrawn_when_the_program_that_asked_has_gone(tmp_path):
+    """ssh gives up, or its session is closed, with the password dialog up: the dialog stayed
+    for its full five minutes, and what was typed into it went nowhere."""
+    from datoolkit.config import Config, Host
+    from datoolkit.engine import Engine
+
+    events = []
+    engine = Engine(Config(hosts=[Host("web01", "ssh", "web01.lan", user="bob", auth="password")]), events.append,
+                    tmp_path / "rt", save_config=lambda c: None)
+    await engine.start()
+    helper = None
+    try:
+        engine.new_case("gone", "open")
+        engine.sessions.spawn("web01", ["/bin/cat"], {}, name="web01", kind="ssh", host_name="web01")
+        env = {k: v for k, v in os.environ.items() if k != "SSH_ASKPASS_PROMPT"} | engine.bridge.env_for("web01")
+        # the helper as ssh runs it: `exec`, so the process killed below is the helper itself
+        helper = subprocess.Popen([str(engine.bridge.script_path), "bob@web01.lan's password: "], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        assert await _until(lambda: engine._prompts, 10)
+        (pid,) = engine._prompts
+        helper.kill()
+        assert await _until(lambda: not engine._prompts, 2), "the prompt is still up, with nobody to answer to"
+        assert {"type": "prompt_done", "id": pid} in events
+        assert not engine.bridge._clients
+        assert '"withdrawn": true' in (engine.case.dir / "events.jsonl").read_text()
+        # an answer that comes all the same goes nowhere, and one in time still arrives
+        engine.answer_prompt(pid, "too late", save=True)
+        helper.wait()
+        helper.stdout.close()
+        helper = subprocess.Popen([str(engine.bridge.script_path), "bob@web01.lan's password: "], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        assert await _until(lambda: engine._prompts, 10)
+        engine.answer_prompt(next(iter(engine._prompts)), "in time")
+        assert await asyncio.to_thread(helper.stdout.read) == b"in time\n"
+    finally:
+        if helper:
+            helper.kill()
+            helper.wait()
+            helper.stdout.close()
+        await engine.stop()
+
+
 def test_sessions_to_a_host_with_a_long_name_keep_their_own_transcripts(tmp_path):
     from datoolkit.case import Case
     case = Case.create("t", "open", root=tmp_path)
