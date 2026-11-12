@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
+import fcntl
 import os
 import re
 import pwd
 import shutil
 import subprocess
+import tempfile
 import uuid as uuid_mod
 from pathlib import Path
 
@@ -34,6 +37,10 @@ GUACD_IMAGE = ("docker.io/guacamole/guacd:1.6.0"
                "@sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfba1edea39eed75524e78ef4b08f4f")
 CONTAINER = "datoolkit-guacd"     # the container DA Toolkit runs while an RDP session is open
 CONTAINER_START_WAIT = 20         # seconds for guacd to answer once the container runs
+# Two lock files beside the instances' runtime directories, for the DA Toolkits one user has
+# running (GuacdContainer): every one with remote desktops through the container holds the first
+# shared, and starting, taking over and removing the container happen one at a time under the second
+USERS_LOCK, TURN_LOCK = "datoolkit-guacd.lock", "datoolkit-guacd.turn.lock"
 GUACD_BINARIES = ("/usr/sbin/guacd", "/usr/bin/guacd", "/usr/local/sbin/guacd")
 # The kernel's tables of TCP sockets, each with its owner's uid: who guacd's port belongs to
 PROC_TABLES = ("/proc/net/tcp", "/proc/net/tcp6")
@@ -82,61 +89,141 @@ def image_present(runtime: str, run=_run) -> bool:
         return False
 
 
+def lock_dir() -> Path:
+    """Where the locks are kept: the user's runtime directory, which every DA Toolkit of theirs sees."""
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+
+
 class GuacdContainer:
     """guacd in upstream's container, where the distribution doesn't package it. DA Toolkit
     runs it only while an RDP session is open: start() when one opens and guacd isn't
     answering, stop() when the last one closes and when the app quits. It is published on
     loopback only, since guacd's link is unencrypted. Never pulls: the technician downloads
-    the pinned image once (install_help says how)."""
+    the pinned image once (install_help says how), and the run itself says --pull=never.
 
-    def __init__(self, which=_which, run=_run):
+    guacd reads what RDP servers send, hostile ones included, so the container gets nothing it
+    has no use for: every capability dropped and no way to gain privileges (upstream's image
+    runs guacd as an ordinary user on an unprivileged port).
+
+    There is one container, of one name, for every DA Toolkit the user has running (a technician
+    with two tickets has a reason to start two). Until Nov 2026 the second took over the first
+    one's container and removed it when its own last RDP session closed, with the first one's
+    desktops still on it. Now each instance holds a lock, shared, for as long as it uses the
+    container, and removes the container only when it can have that lock to itself, that is,
+    when no other instance is using it. The kernel drops a lock with the process that held it,
+    so an instance that crashed holds nothing, and its container is still found and taken over
+    by the next. Where no lock file can be had, an instance acts as if it were the only one."""
+
+    def __init__(self, which=_which, run=_run, lock_dir: Path | None = None):
         self._which, self._run = which, run
-        self.runtime: str | None = None      # set while a container we run is up
+        self._lock_dir = lock_dir
+        self.runtime: str | None = None      # set while a container we run, or share, is up
+        self._using: int | None = None       # the shared lock, held while `runtime` is set
 
     def usable(self) -> str | None:
         """The runtime that can start it now (installed, image present), or None."""
         runtime = container_runtime(self._which)
         return runtime if runtime and image_present(runtime, self._run) else None
 
+    def _lock_file(self, name: str) -> int | None:
+        """A descriptor of our own on a lock file, or None when there is none to be had."""
+        try:
+            fd = os.open((self._lock_dir or lock_dir()) / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except OSError:
+            return None
+        if os.fstat(fd).st_uid != os.getuid():     # someone else's file, in a shared /tmp
+            os.close(fd)
+            return None
+        return fd
+
+    @contextlib.contextmanager
+    def _turn(self):
+        """One instance at a time looks at the container and starts, takes over or removes it."""
+        fd = self._lock_file(TURN_LOCK)
+        try:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def _use(self, runtime: str) -> None:
+        """The container is ours to use from here on (within _turn)."""
+        if self._using is None:
+            self._using = self._lock_file(USERS_LOCK)
+            if self._using is not None:
+                fcntl.flock(self._using, fcntl.LOCK_SH)
+        self.runtime = runtime
+
+    def _last_user(self) -> bool:
+        """Stop using the container (within _turn). True when no other instance is using it."""
+        fd, self._using = self._using, None
+        if fd is None:
+            return True
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+    def _running(self, runtime: str) -> bool:
+        try:
+            r = self._run([runtime, "container", "inspect", "--format", "{{.State.Running}}", CONTAINER], 15)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return r.returncode == 0 and r.stdout.strip() == "true"
+
     def adopt(self) -> None:
-        """guacd is already answering: if it's our container, left by a run that didn't end
-        cleanly, take it over so it's stopped like one we started."""
+        """guacd is already answering: if it's our container, another instance's or one left by
+        a run that didn't end cleanly, share it, so it's stopped like one we started once
+        nobody uses it."""
         if self.runtime:
             return
         runtime = container_runtime(self._which)
         if not runtime:
             return
-        try:
-            r = self._run([runtime, "container", "inspect", "--format", "{{.State.Running}}", CONTAINER], 15)
-        except (OSError, subprocess.SubprocessError):
-            return
-        if r.returncode == 0 and r.stdout.strip() == "true":
-            self.runtime = runtime
+        with self._turn():
+            if self._running(runtime):
+                self._use(runtime)
 
     def start(self) -> None:
         """Run the container (removing a stopped leftover first). Raises GuacError."""
         runtime = self.usable()
         if not runtime:
             raise GuacError("no container runtime with the guacd image")
-        try:
-            self._run([runtime, "rm", "-f", CONTAINER], 30)
-            r = self._run([runtime, "run", "-d", "--rm", "--name", CONTAINER,
-                           "-p", f"{GUACD[0]}:{GUACD[1]}:4822", GUACD_IMAGE], 60)
-        except (OSError, subprocess.SubprocessError) as e:
-            raise GuacError(str(e)) from e
-        if r.returncode != 0:
-            lines = (r.stderr or r.stdout).strip().splitlines()
-            raise GuacError(lines[-1] if lines else f"{runtime} run failed")
-        self.runtime = runtime
+        with self._turn():
+            if self._running(runtime):       # another instance started it since we looked: shared
+                self._use(runtime)
+                return
+            try:
+                self._run([runtime, "rm", "-f", CONTAINER], 30)
+                r = self._run([runtime, "run", "-d", "--rm", "--pull=never", "--cap-drop=ALL",
+                               "--security-opt", "no-new-privileges", "--name", CONTAINER,
+                               "-p", f"{GUACD[0]}:{GUACD[1]}:4822", GUACD_IMAGE], 60)
+            except (OSError, subprocess.SubprocessError) as e:
+                raise GuacError(str(e)) from e
+            if r.returncode != 0:
+                lines = (r.stderr or r.stdout).strip().splitlines()
+                raise GuacError(lines[-1] if lines else f"{runtime} run failed")
+            self._use(runtime)
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        """We need the container no longer. It is removed, and True returned, unless another
+        instance is using it: then it is left to that one."""
         if not self.runtime:
-            return
+            return False
         runtime, self.runtime = self.runtime, None
-        try:   # guacd keeps no state: kill it straight away (--rm removes it)
-            self._run([runtime, "rm", "-f"] + (["-t", "0"] if runtime == "podman" else []) + [CONTAINER], 30)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        with self._turn():
+            if not self._last_user():
+                return False
+            try:   # guacd keeps no state: kill it straight away (--rm removes it)
+                self._run([runtime, "rm", "-f"] + (["-t", "0"] if runtime == "podman" else []) + [CONTAINER], 30)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return True
 
 
 async def probe(timeout: float = 3) -> bool:

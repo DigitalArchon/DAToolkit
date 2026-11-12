@@ -2027,7 +2027,10 @@ class Engine:
                 await self._guacd_stopping       # a container on its way out isn't one to adopt
             if await self._guacd_reachable():
                 await asyncio.to_thread(self.guacd.adopt)
-                return True
+                # Ours now, or the system's guacd. Neither when it was another DA Toolkit's
+                # container on its way out (adopt waited for that): then ours is started below.
+                if self.guacd.runtime or await self._guacd_reachable():
+                    return True
             if not await asyncio.to_thread(self.guacd.usable):
                 return False
             self.emit("toast", level="info", text="Starting guacd's container for RDP…")
@@ -2051,8 +2054,13 @@ class Engine:
         if not self.guacd.runtime or self._rdp_opening or any(isinstance(s, RdpSession) and not s.exited
                                                               for s in self.sessions.sessions.values()):
             return
-        self.log("guacd_container", action="stop", runtime=self.guacd.runtime)
-        task = self._guacd_stopping = asyncio.get_running_loop().create_task(asyncio.to_thread(self.guacd.stop))
+        runtime = self.guacd.runtime
+
+        async def stop() -> None:
+            removed = await asyncio.to_thread(self.guacd.stop)
+            # "left": another DA Toolkit that is running has remote desktops through it
+            self.log("guacd_container", action="stop" if removed else "left", runtime=runtime)
+        task = self._guacd_stopping = asyncio.get_running_loop().create_task(stop())
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 

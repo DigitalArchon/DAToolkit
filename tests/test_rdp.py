@@ -491,6 +491,14 @@ def test_guacd_install_help_per_distribution():
     assert guac.install_help(cachy, which_of(), installed=True)[1] == ["sudo systemctl enable --now guacd"]
 
 
+@pytest.fixture(autouse=True)
+def own_lock_dir(tmp_path, monkeypatch):
+    """The guacd container's locks in the test's own folder: never the real runtime directory,
+    where a DA Toolkit that is running holds them."""
+    (tmp_path / "run").mkdir()
+    monkeypatch.setattr(guac, "lock_dir", lambda: tmp_path / "run")
+
+
 class FakeRuntime:
     """podman as GuacdContainer sees it: records commands, answers like the real one."""
 
@@ -525,9 +533,11 @@ def test_guacd_container_runs_pinned_on_loopback_and_stops():
     c.start()
     assert c.runtime == "podman"
     assert rt.calls[-2] == ["podman", "rm", "-f", guac.CONTAINER]          # a stopped leftover goes first
-    assert rt.calls[-1] == ["podman", "run", "-d", "--rm", "--name", guac.CONTAINER,
+    # never downloaded by the app, and given nothing: it reads what hostile servers send
+    assert rt.calls[-1] == ["podman", "run", "-d", "--rm", "--pull=never", "--cap-drop=ALL",
+                            "--security-opt", "no-new-privileges", "--name", guac.CONTAINER,
                             "-p", "127.0.0.1:4822:4822", guac.GUACD_IMAGE]
-    c.stop()
+    assert c.stop() is True
     assert rt.calls[-1] == ["podman", "rm", "-f", "-t", "0", guac.CONTAINER] and c.runtime is None
     n = len(rt.calls)
     c.stop()                                                               # not ours any more: nothing to do
@@ -540,6 +550,74 @@ def test_guacd_container_runs_pinned_on_loopback_and_stops():
     bad = FakeRuntime(run_error="port 4822 already in use")
     with pytest.raises(guac.GuacError, match="already in use"):
         guac.GuacdContainer(bad.which, bad.run).start()
+
+
+def _removals(rt) -> int:
+    return len([c for c in rt.calls if c[1] == "rm" and "-t" in c])
+
+
+def test_one_da_toolkit_doesnt_remove_the_guacd_another_is_using(tmp_path):
+    """Two running DA Toolkits (two tickets), one container: the second took over the first
+    one's and removed it when its own last RDP session closed, the first one's desktops with it."""
+    rt = FakeRuntime()                                    # the one podman both instances talk to
+    a, b = guac.GuacdContainer(rt.which, rt.run), guac.GuacdContainer(rt.which, rt.run)
+    a.start()
+    b.adopt()                                             # guacd answers: B's first RDP session shares it
+    assert a.runtime == b.runtime == "podman" and len([c for c in rt.calls if c[1] == "run"]) == 1
+    assert b.stop() is False and rt.running and b.runtime is None      # B's last session closed: A's stay up
+    b.start()                                             # B opens another: no second container, no removal
+    assert rt.running and b.runtime == "podman" and len([c for c in rt.calls if c[1] == "run"]) == 1
+    assert a.stop() is False and rt.running               # and the other way round
+    assert b.stop() is True and not rt.running and _removals(rt) == 1   # the last one out removes it
+    assert a._using is None and b._using is None
+
+
+def test_a_da_toolkit_that_crashed_doesnt_keep_the_guacd_container_alive(tmp_path):
+    import os
+
+    rt = FakeRuntime()
+    a, b = guac.GuacdContainer(rt.which, rt.run), guac.GuacdContainer(rt.which, rt.run)
+    a.start()
+    b.adopt()
+    os.close(a._using)                                    # A is killed: the kernel drops its lock with it
+    assert b.stop() is True and not rt.running
+    # and its container, left running, is taken over by the next instance and removed after use
+    rt.running = True
+    c = guac.GuacdContainer(rt.which, rt.run)
+    c.adopt()
+    assert c.runtime == "podman" and c.stop() is True and not rt.running
+
+
+def test_without_a_lock_file_an_instance_acts_as_the_only_one(tmp_path):
+    rt = FakeRuntime()
+    c = guac.GuacdContainer(rt.which, rt.run, lock_dir=tmp_path / "no such folder")
+    c.start()
+    assert rt.running and c._using is None
+    assert c.stop() is True and not rt.running
+
+
+async def test_closing_the_last_rdp_session_leaves_the_container_to_another_da_toolkit(container_env):
+    engine, _, rt = container_env
+    other = guac.GuacdContainer(rt.which, rt.run)         # a second DA Toolkit, with a desktop of its own open
+    server, port = await fake_rdp_server("legacy")
+    engine.cfg.hosts.append(Host("old", "rdp", "127.0.0.1", port=port, user="bob", auth="password"))
+    creds.set_secret("host", "old", "pw")
+    async with server:
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["yes"])
+        a = await opener
+        other.adopt()
+        engine.close_session(a["id"])
+        await _settle(engine)
+        assert rt.running and engine.guacd.runtime is None and _removals(rt) == 0
+        log = (engine.case.dir / "events.jsonl").read_text()
+        assert '"action": "left"' in log and '"action": "stop"' not in log
+        # the other one closes its own: gone; and this one starts it again when it needs it
+        assert other.stop() is True and not rt.running
+        opener = asyncio.create_task(engine.open_rdp("old"))
+        await answer_prompts(engine, ["yes"])
+        await opener
+        assert rt.running and engine.guacd.runtime == "podman"
 
 
 @pytest.fixture
