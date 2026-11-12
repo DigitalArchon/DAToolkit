@@ -206,15 +206,45 @@ class TurnResult:
     text_after_search: str | None = None
 
 
+def only_what_it_was_given(sdk_client) -> None:
+    """An SDK's client (OpenAI's or Anthropic's), made to send only what this app gave it.
+
+    Both SDKs read their vendor's environment variables whenever a client is built, whatever
+    address it is for: OPENAI_ORG_ID and OPENAI_PROJECT_ID become headers of every request, and
+    OPENAI_CUSTOM_HEADERS and ANTHROPIC_CUSTOM_HEADERS add any header at all, an Authorization
+    among them. Those were set for OpenAI's or Anthropic's own service, by another tool or in the
+    technician's shell. A provider here is an address and a key from Settings, so none of it goes
+    with a request to NanoGPT, a local server or an Anthropic-compatible endpoint, nor to
+    Anthropic itself. (The key and the address are always passed, so the variables for those
+    were never read.) The SDKs take no argument that says so: what they read is cleared from the
+    client as it is built, by a subclass, so that a copy the SDK makes of the client
+    (`with_options`), which is built the same way, is cleared too. No default header is passed
+    by this app, so none is lost. tests/test_llm_clients.py reads the headers a request then has."""
+    for name in ("organization", "project"):
+        if hasattr(sdk_client, name):
+            setattr(sdk_client, name, None)
+    sdk_client._custom_headers = {}
+    if hasattr(sdk_client, "_ambient_authorizations"):      # the Authorization values OPENAI_CUSTOM_HEADERS held
+        sdk_client._ambient_authorizations = frozenset()
+
+
+class _OpenAI(AsyncOpenAI):
+    """OpenAI's client, sending only what it was given here (only_what_it_was_given)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        only_what_it_was_given(self)
+
+
 class LLMClient:
     def __init__(self, base_url: str, api_key: str | None, http_client=None):
         # Local servers often need no key, but the SDK insists on a value. The SDK's own HTTP
         # client follows redirects, which would send the request again to wherever a reply
         # points, plain http and other hosts included: netguard checked only the base URL.
         # And a local server is reached directly, whatever proxy the environment names.
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1, timeout=300,
-                                   http_client=http_client or DefaultAsyncHttpxClient(
-                                       follow_redirects=False, **local_http_options(base_url)))
+        self._client = _OpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1, timeout=300,
+                               http_client=http_client or DefaultAsyncHttpxClient(
+                                   follow_redirects=False, **local_http_options(base_url)))
 
     async def list_models(self) -> list[str]:
         page = await self._client.models.list()

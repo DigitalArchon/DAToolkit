@@ -151,3 +151,66 @@ def test_a_local_https_server_is_still_checked_against_the_environments_certific
     context = local_http_options("https://models.office.lan/v1")["verify"]
     assert len(context.get_ca_certs()) == 1                              # the one certificate of that file
     assert context.verify_mode.name == "CERT_REQUIRED" and context.check_hostname
+
+
+# ---------------------------------------------------------------- the SDKs' own environment variables
+
+def mocked(make, handler):
+    """`make(http_client)`'s client, answered by `handler` (an httpx2.MockTransport)."""
+    import httpx2
+    from openai import DefaultAsyncHttpxClient
+
+    client = make(DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler), follow_redirects=False))
+    client._client = client._client.with_options(max_retries=0)
+    return client
+
+
+async def test_the_sdks_environment_adds_no_header_to_a_provider(monkeypatch):
+    """OPENAI_ORG_ID, OPENAI_PROJECT_ID, OPENAI_CUSTOM_HEADERS and ANTHROPIC_CUSTOM_HEADERS are for
+    OpenAI's and Anthropic's own services: whatever another tool or the shell set there went, as
+    headers, to every provider of that API. A provider is sent its own key and nothing else."""
+    import httpx2
+
+    for name, value in {"OPENAI_ORG_ID": "org-ENV", "OPENAI_PROJECT_ID": "proj-ENV", "OPENAI_API_KEY": "ENV-OPENAI-KEY",
+                        "OPENAI_ADMIN_KEY": "ENV-ADMIN-KEY", "OPENAI_BASE_URL": "https://env-base.invalid/v1",
+                        "OPENAI_CUSTOM_HEADERS": "X-Env: 1\nAuthorization: Bearer ENV-HEADER-KEY\nOpenAI-Beta: env",
+                        "ANTHROPIC_CUSTOM_HEADERS": "X-Env: 1\nx-api-key: ENV-HEADER-KEY\nanthropic-beta: env-beta",
+                        "ANTHROPIC_API_KEY": "ENV-ANTHROPIC-KEY", "ANTHROPIC_AUTH_TOKEN": "ENV-OAUTH-TOKEN",
+                        "ANTHROPIC_BASE_URL": "https://env-base.invalid"}.items():
+        monkeypatch.setenv(name, value)
+    got: list[tuple[str, dict]] = []
+
+    def handler(request):
+        got.append((str(request.url), {k.lower(): v for k, v in request.headers.items()}))
+        if request.url.path.endswith("/models"):
+            return httpx2.Response(200, json={"object": "list", "data": [], "has_more": False, "first_id": None, "last_id": None})
+        if request.url.path.endswith("/messages"):
+            return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=anthropic_sse())
+        if not json.loads(request.content).get("stream"):
+            return httpx2.Response(200, json={"id": "c", "object": "chat.completion", "created": 0, "model": "m", "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "fine"}}]})
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"},
+                               content=f"data: {json.dumps(CHUNK)}\n\ndata: [DONE]\n\n".encode())
+
+    made = [lambda http: LLMClient("https://models.example/api/v1", "PROVIDER-KEY", http_client=http),
+            lambda http: LLMClient("http://localhost:11434/v1", None, http_client=http),
+            lambda http: AnthropicClient("https://compatible.example/anthropic", "PROVIDER-KEY", http_client=http),
+            lambda http: AnthropicClient("https://api.anthropic.com", "PROVIDER-KEY", http_client=http),
+            lambda http: AnthropicClient("http://localhost:8080", None, http_client=http)]
+    for make in made:
+        client = mocked(make, handler)
+        await client.list_models()
+        [e async for e in client.stream("m", USER)]
+        assert await client.complete("m", USER) == "fine"
+    assert len(got) == 3 * len(made)
+    for url, headers in got:
+        assert "env-base" not in url, url
+        text = json.dumps(headers)
+        assert "ENV" not in text and "env" not in text.replace("x-stainless", ""), (url, headers)
+        for name in ("openai-organization", "openai-project", "x-env", "openai-beta"):
+            assert name not in headers, (url, name)
+        if "anthropic-version" in headers:                 # the Messages API: its key header, and no Authorization
+            assert headers["x-api-key"] in ("PROVIDER-KEY", "not-needed") and "authorization" not in headers, url
+            assert "env-beta" not in headers.get("anthropic-beta", "")
+        else:
+            assert headers["authorization"] in ("Bearer PROVIDER-KEY", "Bearer not-needed"), url
