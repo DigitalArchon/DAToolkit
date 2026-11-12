@@ -194,6 +194,14 @@ _REFUSED_SETTING = [re.compile(p, re.I) for p in (
     r"[`'\"]([a-z_]+)[`'\"] is not supported")]
 
 
+# Host and login names too common to tell from a search query's own words (Engine._case_names),
+# beside identity.COMMON_NAMES: a host called `firewall` or a login `administrator` names no one.
+_GENERIC_NAMES = {"administrator", "administrador", "administrateur", "sysadmin", "support", "service", "backup",
+                  "server", "router", "firewall", "gateway", "switch", "printer", "proxy", "mail", "web", "www", "vpn",
+                  "dns", "dhcp", "nas", "host", "local", "lan", "wan", "corp", "internal", "intranet", "office",
+                  "workgroup", "domain", "windows", "win"}
+
+
 # what a request other than the chat was for, in the timeline
 _PURPOSES = {"second_opinion": "a second opinion", "ticket_summary": "a ticket summary", "client_update": "a client update",
              "runbook": "a runbook", "compact": "a summary of earlier exchanges (compaction)", "research": "research",
@@ -3272,6 +3280,47 @@ class Engine:
         return {"provider": out["provider"], "count": len(out["results"]), "results": out["results"][:5],
                 "cost": out["cost"], "note": out["note"]}
 
+    def _case_names(self) -> list[str]:
+        """Who and where this case's computers are: the client's name and, for every session to
+        another machine, its host, short host name, domain and login, from the saved host and from
+        the session's own target. What a search must not carry unasked (safety/identity.py), which
+        until Nov 2026 knew only the technician's own computer: a query naming
+        `dc01.acme-corp.local` went out in auto mode. Not the words too common to tell from a
+        query's own (a login `root`, a host called `firewall`, the domain `lan`)."""
+        found: list[str] = []
+        if self.case and self.case.client:
+            found.append(self.case.client)
+        for s in self.sessions.sessions.values():
+            if s.kind in ("local", "window"):
+                continue
+            saved = self.cfg.host(s.host_name) if s.host_name else None
+            logins = [(saved.user, saved.host)] if saved else []
+            user, _, where = str(s.target or "").rpartition("@")
+            logins.append((user, where))
+            for user, where in logins:
+                # DOMAIN\user and user@realm name the domain too
+                found += [part for part in re.split(r"[\\@]", user.strip()) if part]
+                where = where.strip()
+                if where.startswith("["):                         # [fd00::1]:22
+                    where = where[1:].split("]")[0]
+                elif where.count(":") == 1:                       # host:22
+                    where = where.split(":")[0]
+                where = where.rstrip(".")
+                if not where:
+                    continue
+                found.append(where)
+                short, _, domain = where.partition(".")
+                if domain and not re.fullmatch(r"[\d.]+", where):   # a name, not an IPv4 address
+                    found.append(short)
+                    if "." in domain:                             # acme-corp.local, not .lan or .local alone
+                        found.append(domain)
+        plain = identity.COMMON_NAMES | _GENERIC_NAMES
+        return [n for n in dict.fromkeys(found) if len(n) >= 3 and n.lower() not in plain]
+
+    def _known_names(self) -> list[str]:
+        """The names identity.check looks for: this computer's and the case's (_case_names)."""
+        return list(dict.fromkeys(identity.names() + self._case_names()))
+
     def answer_search(self, sid: str, approve: bool, query: str | None = None) -> None:
         entry = self._search_reqs.get(sid)
         if entry and not entry[0].done():
@@ -3307,9 +3356,10 @@ class Engine:
         if turn["searches"] > MAX_SEARCHES_PER_TURN:
             update(status="unavailable", error="search limit for this turn")
             return f"Limit of {MAX_SEARCHES_PER_TURN} searches per turn reached; work with what you have."
-        # who or where a computer is (an e-mail, a MAC or private IP address, this computer's names) isn't
-        # redacted, being the point of some searches: it's shown to the technician first, whatever the mode
-        named = identity.check(query)
+        # who or where a computer is (an e-mail, a MAC or private IP address, this computer's names, the
+        # client's and the names of the hosts the case has sessions to) isn't redacted, being the point
+        # of some searches: it's shown to the technician first, whatever the mode
+        named = identity.check(query, known=self._known_names())
         if named:
             rec["reason"] = ("Asked first: the query names " + ", ".join(named[:5]) + ". " + rec["reason"]).strip()
         if status["mode"] == "ask" or named:
@@ -3515,7 +3565,8 @@ class Engine:
             return f"Research is not available: {e}"
         rec["model"] = model
         known = task == "research" or url in self._known_urls(entry)
-        named = identity.check(brief if task == "research" else unquote_plus(url))     # as a search's query
+        named = identity.check(brief if task == "research" else unquote_plus(url),     # as a search's query
+                               known=self._known_names())
         if named:
             rec["reason"] = ("Asked first: it names " + ", ".join(named[:5]) + ". " + rec["reason"]).strip()
         if status["mode"] == "ask" or not known or named:
@@ -3610,7 +3661,13 @@ class Engine:
 
         async def search_(query: str, use: str = "answer", **narrow) -> dict:
             query = " ".join(visible(query).split())
-            named = identity.check(query)                # no one is asked about the agent's own searches
+            # No one is asked about the agent's own searches, so one that names a computer is refused.
+            # Of the case's names, those in the brief are let through: the technician was shown that
+            # brief for the very reason that it names them, and approved it (a host called after its
+            # product, `opnsense.lan`, would otherwise stop every search about the product).
+            brief = str(rec.get("brief") or "").lower()
+            known = identity.names() + [n for n in self._case_names() if n.lower() not in brief]
+            named = identity.check(query, known=known)
             if named:
                 raise UserError("not searched: the query names " + ", ".join(named[:5]) + " (who or where a computer "
                                 "is), which mustn't leave in a search. Search again with general words.")
