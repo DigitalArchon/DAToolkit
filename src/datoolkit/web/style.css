@@ -205,24 +205,47 @@ body.rdp-max .term-host { inset: 0; }
 .queue-head { display: flex; align-items: center; gap: 10px; padding: 5px 10px; border-bottom: 1px solid var(--border); }
 .queue-head .title { font-weight: 600; }
 #queue-list { flex: 1; overflow-y: auto; }
+/* The command comes first: its column is never narrower than 320px, and the buttons take at most
+   340px beside it, in as many lines as they need. In a narrow window (the app window's minimum is
+   900px) the buttons go beneath the command instead, which then has the row's width. */
 .qitem {
-  display: grid; grid-template-columns: 38px 130px 1fr 110px auto; gap: 8px; align-items: start;
+  display: grid; grid-template-columns: 38px 130px minmax(320px, 1fr) 110px fit-content(340px); gap: 8px; align-items: start;
   padding: 6px 10px; border-bottom: 1px solid var(--border);
+}
+@media (max-width: 1000px) {
+  .qitem { grid-template-columns: 38px 120px minmax(0, 1fr) 100px; }
+  .qitem .actions { grid-column: 2 / -1; justify-content: flex-start; }
 }
 .qitem.flash { animation: flash 1.2s; }
 @keyframes flash { 0%, 40% { background: #23405f; } 100% { background: transparent; } }
 .qitem.done { opacity: .55; }
 .qitem .num { font-weight: 600; color: var(--muted); padding-top: 4px; }
 .qitem select { width: 100%; font-size: 12.5px; padding: 3px 4px; }
-.qitem .cmd { width: 100%; font-family: var(--mono); font-size: 12.5px; resize: none; overflow: hidden; min-height: 28px; }
+/* The command box shows all of its command or scrolls, never clips: app.js (fitCommandBox) makes
+   it as tall as its text, up to this max-height; past that it scrolls, with a scroll bar that is
+   always drawn (.long), and the line under it (.cmd-size) says how much there is. */
+.qitem .cmd {
+  display: block; width: 100%; font-family: var(--mono); font-size: 12.5px; resize: none; min-height: 28px;
+  max-height: min(400px, 60vh); overflow: auto; overflow-wrap: anywhere;
+}
 .qitem .cmd[readonly] { background: transparent; border-color: transparent; }
+.qitem .cmd.empty { border-color: var(--danger); }
+.qitem .cmd.long, .pcard .pcmd.long { overflow-y: scroll; border-color: var(--warn); }
+.qitem > div { min-width: 0; overflow-wrap: anywhere; }
+.cmd-size { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+.cmd-size:empty { display: none; }
+.long + .cmd-size { color: var(--warn); font-weight: 600; }
+.qitem .cmd.long::-webkit-scrollbar, .pcard .pcmd.long::-webkit-scrollbar { width: 12px; background: var(--panel); }
+.qitem .cmd.long::-webkit-scrollbar-thumb, .pcard .pcmd.long::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 6px; border: 3px solid var(--panel); }
+@supports not selector(::-webkit-scrollbar) { .qitem .cmd.long, .pcard .pcmd.long { scrollbar-color: var(--muted) var(--panel); scrollbar-width: auto; } }
 .qitem .purpose { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .qitem .note { font-size: 12px; color: var(--warn); margin-top: 2px; }
 .qitem .meta { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; padding-top: 3px; }
 .qitem .status { font-size: 11.5px; color: var(--muted); }
 .qitem .status.ran, .qitem .status.inserted { color: var(--ok); }
 .qitem .status.skipped { color: var(--warn); }
-.qitem .actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; padding-top: 2px; }
+.qitem .actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; padding-top: 2px; min-width: 0; }
+.qitem .actions button { white-space: nowrap; }
 .qitem.risk-disruptive { border-left: 3px solid var(--danger); }
 .qitem.risk-modifying { border-left: 3px solid var(--warn); }
 .qitem.risk-read_only { border-left: 3px solid transparent; }
@@ -356,7 +379,9 @@ p.small.warn { color: var(--warn); }
 .pcard.risk-disruptive { border-left-color: var(--danger); }
 .pcard.st-sent { opacity: .55; }
 .pcard .phead { display: flex; gap: 6px; align-items: center; }
-.pcard .pcmd { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow: auto; }
+/* as the queue's command box: all of the command, or a scroll bar and the line that says so */
+.pcard .pcmd { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-all; max-height: min(400px, 60vh); overflow: auto; border: 1px solid transparent; }
+.pcard .pcmd:focus-visible { outline: 1px solid var(--accent); }
 .pcard .cuts { color: var(--danger); font-weight: 600; }
 .pcard .invis { color: var(--danger); }
 .pcard .warn { color: var(--warn); }

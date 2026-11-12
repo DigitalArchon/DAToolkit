@@ -215,7 +215,7 @@ class Element extends Node {
       _doc: doc, _attrs: new Map(), style: makeStyle(), classList: null, dataset: null,
       _value: undefined, _checked: undefined, _selected: undefined, _ctx: undefined,
       scrollTop: 0, scrollLeft: 0, scrollHeight: 0, scrollWidth: 0, clientHeight: 0, clientWidth: 0,
-      offsetWidth: 0, offsetHeight: 0, selectionStart: 0, selectionEnd: 0,
+      offsetWidth: 0, offsetHeight: 0, offsetTop: 0, offsetLeft: 0, selectionStart: 0, selectionEnd: 0,
     });
     this.classList = new ClassList(this);
     this.dataset = makeDataset(this);
@@ -595,7 +595,7 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
   const clock = new Clock();
   const app = {
     document, clock, calls: [], routes: {}, sockets: [], terminals: [], clipboard: "", objectUrls: [], revoked: [],
-    opened: [], decodable: (src) => /^(data:image\/(png|jpeg|gif|webp)[;,]|blob:)/.test(src),
+    opened: [], observers: [], decodable: (src) => /^(data:image\/(png|jpeg|gif|webp)[;,]|blob:)/.test(src),
   };
 
   app.routes = {
@@ -723,9 +723,16 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
     navigator: { userAgent: "fakedom", platform: "Linux x86_64",
       clipboard: { writeText: async (t) => { app.clipboard = t; }, readText: async () => app.clipboard } },
     fetch, WebSocket: FakeWebSocket, Image: FakeImage,
-    ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
+    // nothing is laid out here, so nothing resizes by itself: app.resized(el) tells the observers of el
+    ResizeObserver: class {
+      constructor(fn) { this.fn = fn; this.targets = new Set(); app.observers.push(this); }
+      observe(el) { this.targets.add(el); }
+      unobserve(el) { this.targets.delete(el); }
+      disconnect() { this.targets.clear(); }
+    },
     MutationObserver: class { observe() {} disconnect() {} takeRecords() { return []; } },
     innerWidth: 1600, innerHeight: 1000, devicePixelRatio: 1,
+    performance: { now: () => clock.now },
     getComputedStyle: (el) => el.style,
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
     getSelection: () => ({ toString: () => "", removeAllRanges() {} }),
@@ -771,6 +778,10 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
     const calls = [];
     app.routes[key] = (call) => { calls.push(call); return gate.then(() => (typeof value === "function" ? value(call) : value)); };
     return { calls, release: async () => { release(); await clock.tick(0); } };
+  };
+  app.resized = async (el) => {
+    for (const o of app.observers) if (o.targets.has(el)) o.fn([{ target: el, contentRect: { width: el.clientWidth, height: el.clientHeight } }], o);
+    await clock.tick(0);
   };
   app.key = (target, init) => {
     const ev = new Event("keydown", init);

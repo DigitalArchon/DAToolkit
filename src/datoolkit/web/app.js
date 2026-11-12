@@ -1032,16 +1032,25 @@ function researchCard(rec) {
 // every queue change. Run goes through runItem, the same technician action as the queue.
 // The cards on the page are kept here with their item's number: the page fills the cards it made,
 // and never something in a message that only looks like one.
-const proposalCards = new Map();    // card element -> queue num
+const proposalCards = new Map();    // card element -> { num, cmd: its command box, size: the line under it }
 function proposalCard(num) {
   const el = h("div", { class: "pcard" });
-  proposalCards.set(el, Number(num));
+  const card = { num: Number(num), text: "", cmd: h("div", { class: "pcmd", tabindex: 0 }), size: h("div", { class: "cmd-size" }) };
+  proposalCards.set(el, card);
+  watchCommandBox(card.cmd, card.size, () => card.text);
   fillProposalCard(el);
   return el;
 }
+function forgetGoneCards() {
+  for (const [el, card] of proposalCards) {
+    if (el.isConnected) continue;
+    unwatchCommandBox(card.cmd);
+    proposalCards.delete(el);
+  }
+}
 
 function fillProposalCard(el) {
-  const num = proposalCards.get(el);
+  const card = proposalCards.get(el), num = card.num;
   const item = (S.state?.queue || []).find((i) => i.num === num);
   if (!item) {
     el.className = "pcard st-sent";
@@ -1049,6 +1058,8 @@ function fillProposalCard(el) {
     return;
   }
   el.className = `pcard risk-${item.risk} st-${item.status}`;
+  // the same box through every update, so it keeps its place when scrolled; measured as the row's is
+  if (card.text !== item.command) { card.text = item.command; card.cmd.textContent = item.command; }
   const pending = item.status === "pending";
   const btn = (label, fn, kind = "", title = "") => h("button", { type: "button", class: `small ${kind}`, title, onclick: () => guarded(fn) }, label);
   const sessOpen = (S.state.sessions || []).some((s) => s.id === item.session_id && !s.exited);
@@ -1073,7 +1084,7 @@ function fillProposalCard(el) {
       h("span", { class: "muted small" }, item.session_id),
       h("span", { class: "spacer" }),
       h("span", { class: `status ${item.status}` }, STATUS_LABEL[item.status] + (item.status === "skipped" && !item.note ? " (no reason)" : ""))),
-    h("div", { class: "pcmd" }, item.command),
+    card.cmd, card.size,
     item.purpose ? h("div", { class: "muted small" }, item.purpose) : null,
     item.cuts_session ? h("div", { class: "cuts small" }, `⚠ Cuts this session: ${item.cuts_session}`) : null,
     item.hidden?.length ? h("div", { class: "invis small" }, invisText(item)) : null,
@@ -1084,9 +1095,9 @@ function fillProposalCard(el) {
 }
 
 function updateProposalCards() {
-  for (const el of [...proposalCards.keys()]) {
-    if (el.isConnected) fillProposalCard(el); else proposalCards.delete(el);
-  }
+  forgetGoneCards();
+  for (const el of proposalCards.keys()) fillProposalCard(el);
+  requestAnimationFrame(() => { for (const card of proposalCards.values()) fitCommandBox(card.cmd); });
 }
 
 function renderChat(scroll) {
@@ -1103,7 +1114,8 @@ function renderChat(scroll) {
     log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
     if (S.streaming) log.append(streamingBubble());
   });
-  for (const el of [...proposalCards.keys()]) if (!el.isConnected) proposalCards.delete(el);   // the cards just replaced
+  forgetGoneCards();                 // the cards just replaced
+  requestAnimationFrame(() => { for (const card of proposalCards.values()) fitCommandBox(card.cmd); });
   if (!S.state.case) {
     log.append(h("div", { class: "empty" },
       h("p", {}, "No case is open. Settings, providers, models and hosts work without one; the conversation, sessions and the command queue belong to a case."),
@@ -2121,7 +2133,7 @@ function renderQueue() {
   const items = S.state.queue.filter((i) => showDone || !HIDDEN_WHEN_DONE.includes(i.status));
   const list = $("#queue-list");
   const keep = new Set(items.map((i) => i.num));
-  for (const [num, row] of S.rows) if (!keep.has(num)) { row.remove(); S.rows.delete(num); }
+  for (const [num, row] of S.rows) if (!keep.has(num)) { unwatchCommandBox($(".cmd", row)); row.remove(); S.rows.delete(num); }
   items.forEach((item, idx) => {
     let row = S.rows.get(item.num);
     if (!row) { row = buildRow(item); S.rows.set(item.num, row); }
@@ -2162,6 +2174,58 @@ function renderChatResults() {
 
 function autosize(ta) { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; }
 
+// ---- a command, where it can be run from: a queue row's box and a chat card's.
+// What the box shows is what Run types, so the box never cuts a command short without saying so.
+// It is as tall as its text, up to a generous height (the stylesheet's max-height); a command
+// taller than that (a tool transfer is megabytes of base64) scrolls inside the box, behind a
+// scroll bar that is always drawn, and the line under the box says how much there is. A command of
+// several lines always has its count there. The box is measured again whenever its size on the
+// page changes (a ResizeObserver: the queue un-collapsed, a pane or the window resized, the row
+// first laid out), when its text changes and when a font arrives. (Until Nov 2026 the box was
+// measured once and clipped the rest with no scroll bar: built while the queue was collapsed, a
+// row showed the first line of a command and Run typed all of it.)
+const commandBoxes = new Map();     // box -> { note: the line under it, text: () => what it holds, … }
+const commandResize = new ResizeObserver((entries) => { for (const e of entries) fitCommandBox(e.target); });
+function watchCommandBox(box, note, text) {
+  commandBoxes.set(box, { note, text, sized: null, what: "", lines: 1, fitText: null, fitWidth: 0 });
+  commandResize.observe(box);
+}
+function unwatchCommandBox(box) {
+  commandBoxes.delete(box);
+  commandResize.unobserve(box);
+}
+
+function fitCommandBox(box, again = false) {
+  const info = commandBoxes.get(box);
+  if (!info) return;
+  const text = info.text();
+  if (info.sized !== text) {
+    const bytes = new Blob([text]).size;
+    info.sized = text;
+    info.lines = text.split("\n").length;
+    info.what = `${info.lines.toLocaleString("en")} line${info.lines === 1 ? "" : "s"}`
+      + (bytes >= 1048576 ? `, ${(bytes / 1048576).toFixed(1)} MB` : bytes >= 1024 ? `, ${(bytes / 1024).toFixed(1)} kB` : "");
+  }
+  let more = false;
+  if (box.isConnected && box.clientWidth) {     // laid out: a row in a collapsed queue is measured when it shows
+    // a textarea is given its height; measured again only when its text or its width changed (or a
+    // font came), and with the list and the box left scrolled where they were
+    if (box.localName === "textarea" && (again || info.fitText !== text || info.fitWidth !== box.clientWidth)) {
+      const list = $("#queue-list"), at = [list.scrollTop, box.scrollTop];
+      box.style.height = "auto";
+      box.style.height = `${box.scrollHeight + 2}px`;
+      if (list.scrollTop !== at[0]) list.scrollTop = at[0];
+      if (box.scrollTop !== at[1]) box.scrollTop = at[1];
+      info.fitText = text;
+      info.fitWidth = box.clientWidth;
+    }
+    more = box.scrollHeight > box.clientHeight + 1;
+  }
+  box.classList.toggle("long", more);
+  info.note.textContent = more ? `${info.what}: scroll the box to read all of it` : info.lines > 1 ? info.what : "";
+}
+function fitCommandBoxes() { for (const box of commandBoxes.keys()) fitCommandBox(box, true); }
+
 // The reviewer's verdict on a queue item: { cls, icon, label } or null.
 const REVIEW_LEVEL = {
   ok: { icon: "✓", label: "Reviewer: looks fine" },
@@ -2200,28 +2264,95 @@ function sensitiveTitle(item) {
   return `May expose sensitive data:\n${item.sensitive.map((x) => `• ${x}`).join("\n")}\n\nNot run by Ctrl+Shift+Enter. Output is redacted before sending, but only on a best-effort basis: check it.`;
 }
 
+// A row's box holds the item's command, or what the technician has typed over it and not saved
+// yet (row._unsaved): an update of the queue leaves that alone, so the box never goes back to the
+// saved command behind the technician's back. Emptied, it says so and stays empty: Run and Insert
+// type nothing from an empty box (runItemNow), and Escape brings the saved command back. (Until
+// Nov 2026 an emptied box was not saved, and Run typed the command it no longer showed.)
 function buildRow(item) {
-  const cmd = h("textarea", { class: "cmd", rows: 1, spellcheck: "false" });
-  cmd.addEventListener("input", () => autosize(cmd));
-  cmd.addEventListener("change", () => guarded(() => saveCommand(item.num, cmd.value)));
-  const sel = h("select", { class: "sess", onchange: (e) => guarded(() => api("POST", `/api/queue/${item.num}`, { session_id: e.target.value })) });
-  const row = h("div", { class: "qitem", "data-num": item.num },
-    h("div", { class: "num" }, `#${item.num}`),
+  const num = item.num;
+  const saved = () => S.state.queue.find((i) => i.num === num)?.command ?? "";
+  const cmd = h("textarea", { class: "cmd", rows: 1, spellcheck: "false", "aria-label": `Command #${num}`,
+    placeholder: "Empty: Run and Insert type nothing. Skip the item to leave it out, or press Esc to get its command back." });
+  const size = h("div", { class: "cmd-size" });
+  const sel = h("select", { class: "sess", "aria-label": `Session for #${num}`, onchange: (e) => guarded(() => saveTarget(num, e.target.value)) });
+  const row = h("div", { class: "qitem", "data-num": num },
+    h("div", { class: "num" }, `#${num}`),
     sel,
-    h("div", {}, cmd, h("div", { class: "purpose" }), h("div", { class: "rollback" }), h("div", { class: "cuts" }),
+    h("div", {}, cmd, size, h("div", { class: "purpose" }), h("div", { class: "rollback" }), h("div", { class: "cuts" }),
       h("div", { class: "invis" }), h("div", { class: "sens" }), h("div", { class: "qreview-slot" }), h("div", { class: "note" })),
     h("div", { class: "meta" }, h("span", { class: "badge risk" }), h("span", { class: "badge sensitive" }), h("span", { class: "group" }), h("span", { class: "status" })),
     h("div", { class: "actions" }));
+  watchCommandBox(cmd, size, () => cmd.value);
+  cmd.addEventListener("input", () => {
+    row._unsaved = cmd.value.trim() !== saved();
+    cmd.classList.toggle("empty", !cmd.value.trim());
+    fitCommandBox(cmd);
+  });
+  cmd.addEventListener("change", () => guarded(() => saveCommand(num, cmd.value)));
+  cmd.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !row._unsaved) return;
+    e.preventDefault();
+    row._unsaved = false;
+    cmd.value = saved();
+    cmd.classList.remove("empty");
+    fitCommandBox(cmd);
+  });
   return row;
 }
 
 // The queue event follows on the events socket, maybe after this returns: the reply updates the
-// item here at once, so Run right after an edit types (and confirms) the edited command.
+// item here at once, so Run right after an edit types (and confirms) the edited command. An
+// emptied box is not a command and is not saved: the item is skipped, not blanked.
 async function saveCommand(num, value) {
+  const item = S.state.queue.find((i) => i.num === num), row = S.rows.get(num);
+  if (!item || !value.trim()) return;
+  if (item.command !== value.trim()) {
+    const r = await api("POST", `/api/queue/${num}`, { command: value });   // throws: Run must not type the old one
+    if (r.item) Object.assign(item, r.item);
+  }
+  if (row) row._unsaved = false;
+}
+
+// The session an item is for, as its list shows. One the server refuses puts the list back on the
+// session the item has, so the list never names a session other than the one Run types into.
+async function saveTarget(num, sid) {
   const item = S.state.queue.find((i) => i.num === num);
-  if (!item || item.command === value.trim()) return;
-  const r = await api("POST", `/api/queue/${num}`, { command: value });   // throws: Run must not type the old one
-  if (r.item) Object.assign(item, r.item);
+  if (!item || item.session_id === sid) return;
+  try {
+    const r = await api("POST", `/api/queue/${num}`, { session_id: sid });
+    if (r.item) Object.assign(item, r.item);
+  } catch (e) {
+    const row = S.rows.get(num), now = S.state.queue.find((i) => i.num === num);
+    if (row && now) { row._sessKey = null; updateRow(row, now); }
+    throw e;
+  }
+}
+
+// Run types what the server has recorded, which is what the technician was shown: the item as it
+// is on this page when the last dialog closes, then as the server answers when it is marked run.
+// If either differs from what was shown (another window edited it, the AI withdrew it), nothing
+// is typed, the item is pending again and the row is pointed out. (Until Nov 2026 Run typed the
+// command this page remembered from before its dialogs.)
+function changedMeanwhile(num) {
+  flashQueueItem(num);
+  return new Error(`#${num} changed while you were starting it, so nothing was typed. Check it in the queue, then run it again.`);
+}
+function stillAsShown(shown) {
+  const now = S.state.queue.find((i) => i.num === shown.num);
+  if (!now || now.status !== "pending" || now.command !== shown.command || now.session_id !== shown.session_id) throw changedMeanwhile(shown.num);
+}
+async function markStarted(shown, status) {
+  stillAsShown(shown);
+  // the server records the transcript position with the status, so the output capture starts here;
+  // it refuses an item that is no longer pending
+  const r = await api("POST", `/api/queue/${shown.num}`, { status });
+  const now = r.item || shown;
+  if (now.command !== shown.command || now.session_id !== shown.session_id) {
+    await api("POST", `/api/queue/${shown.num}`, { status: "pending" }).catch(() => {});
+    throw changedMeanwhile(shown.num);
+  }
+  return now;
 }
 
 function elapsed(ts) {
@@ -2243,9 +2374,11 @@ function updateRow(row, item) {
   const pending = item.status === "pending";
   row.className = `qitem risk-${item.risk}${HIDDEN_WHEN_DONE.includes(item.status) ? " done" : ""}${item.status === "withdrawn" ? " withdrawn" : ""}`;
   const cmd = $(".cmd", row);
-  if (document.activeElement !== cmd) cmd.value = item.command;
+  if (!pending) row._unsaved = false;
+  if (document.activeElement !== cmd && !row._unsaved) cmd.value = item.command;
   cmd.readOnly = !pending;
-  requestAnimationFrame(() => autosize(cmd));
+  cmd.classList.toggle("empty", pending && !cmd.value.trim());
+  requestAnimationFrame(() => fitCommandBox(cmd));
   const sel = $(".sess", row);
   // rebuilt only when it changes: a rebuild closes the dropdown open under the mouse
   const sessKey = JSON.stringify([item.session_id, (S.state.sessions || []).map((s) => [s.id, s.exited])]);
@@ -2348,11 +2481,23 @@ async function runItem(num, mode, opts = {}) {
   }
 }
 
-async function runItemNow(num, mode, { readOnly = false } = {}) {
+// The row's box and session list are saved first, so the item is what the row shows.
+async function saveRow(num) {
   const row = S.rows.get(num);
-  const cmdEl = row && $(".cmd", row);
-  if (cmdEl) await saveCommand(num, cmdEl.value);
+  if (!row) return;
+  const cmd = $(".cmd", row), sel = $(".sess", row);
+  if (!cmd.value.trim()) {
+    flashQueueItem(num);
+    throw new Error(`The command box of #${num} is empty, so nothing was typed. To leave the command out, skip the item; to get the command back, press Escape in its box.`);
+  }
+  await saveCommand(num, cmd.value);
+  if (!sel.disabled) await saveTarget(num, sel.value);
+}
+
+async function runItemNow(num, mode, { readOnly = false } = {}) {
+  await saveRow(num);
   const item = S.state.queue.find((i) => i.num === num);
+  if (!item) throw new Error(`#${num} is no longer in the queue.`);
   if (readOnly && (item.risk !== "read_only" || item.sensitive?.length || item.review?.level === "stop")) {
     flashQueueItem(num);
     return toast(`#${num} is no longer a plain read-only command after your edit: run it with its own Run button.`);
@@ -2404,9 +2549,15 @@ async function runItemNow(num, mode, { readOnly = false } = {}) {
       if (!ok) return;
       w.copiedOk = true;
     }
-    // status first: the server refuses an item that changed while a dialog was open (withdrawn)
-    await api("POST", `/api/queue/${num}`, { status: "ran" });
+    // The clipboard first: an item isn't marked run while the clipboard still holds something
+    // else. The server then refuses an item that changed while a dialog was open (withdrawn).
+    stillAsShown(item);
     await clipWrite(item.command);
+    try {
+      await markStarted(item, "ran");
+    } catch (e) {
+      throw new Error(`${e.message} The command had been copied to your clipboard already: don't paste it.`);
+    }
     activateTab(sess.id, false);
     toast(`#${num} copied: paste it into ${sess.id}.`, "ok", 4000);
     return;
@@ -2424,17 +2575,16 @@ async function runItemNow(num, mode, { readOnly = false } = {}) {
       r.typedOk = true;
     }
     activateTab(sess.id);
-    await api("POST", `/api/queue/${num}`, { status: mode === "run" ? "ran" : "inserted" });
-    await rdpType(r, item.command, mode === "run");
+    const now = await markStarted(item, mode === "run" ? "ran" : "inserted");
+    await rdpType(r, now.command, mode === "run");
     return;
   }
   activateTab(sess.id);
   const t = S.terms[sess.id];
   if (!t?.ws) throw new Error("Terminal is not connected.");
-  // status first: the server records the transcript position, so the output capture starts here
-  await api("POST", `/api/queue/${num}`, { status: mode === "run" ? "ran" : "inserted" });
+  const now = await markStarted(item, mode === "run" ? "ran" : "inserted");
   markOutput(t, num);
-  t.term.paste(item.command);
+  t.term.paste(now.command);
   if (mode === "run") termSend(t, { type: "input", data: "\r" });
   t.term.focus();
 }
@@ -2442,11 +2592,9 @@ async function runItemNow(num, mode, { readOnly = false } = {}) {
 async function runGroup(group) {
   const nums = (await api("GET", `/api/queue/group/${encodeURIComponent(group)}`)).nums;
   if (!nums.length) return toast("Nothing pending in that group.");
-  for (const n of nums) {
-    const cmdEl = S.rows.get(n) && $(".cmd", S.rows.get(n));
-    if (cmdEl) await saveCommand(n, cmdEl.value);
-  }
+  for (const n of nums) await saveRow(n);
   const items = nums.map((n) => S.state.queue.find((i) => i.num === n));
+  if (items.some((i) => !i)) throw new Error("An item of that group is no longer in the queue.");
   if (items.some((i) => isWindowSession(i.session_id))) {
     throw new Error("This group includes a window session, whose commands you paste by hand: run its items one at a time.");
   }
@@ -2471,10 +2619,18 @@ async function runGroup(group) {
     const ready = S.rdps[i.session_id] ? S.rdps[i.session_id].state === 3 : S.terms[i.session_id]?.ws;
     if (!sess || sess.exited || !ready) throw new Error(`Session ${i.session_id} is not open or not connected.`);
   }
-  // record all start positions first, then type everything in one go so the starts line up
-  await Promise.all(items.map((i) => api("POST", `/api/queue/${i.num}`, { status: "ran" })));
+  // record all start positions first, then type everything in one go so the starts line up; if
+  // one item can't be started as it was shown, none is typed and the others are pending again
+  for (const i of items) stillAsShown(i);
+  const marked = await Promise.allSettled(items.map((i) => markStarted(i, "ran")));
+  const failed = marked.find((m) => m.status === "rejected");
+  if (failed) {
+    await Promise.all(items.filter((_, k) => marked[k].status === "fulfilled")
+      .map((i) => api("POST", `/api/queue/${i.num}`, { status: "pending" }).catch(() => {})));
+    throw failed.reason;
+  }
   const typing = [];
-  for (const i of items) {
+  for (const i of marked.map((m) => m.value)) {
     if (S.rdps[i.session_id]) { typing.push(rdpType(S.rdps[i.session_id], i.command, true)); continue; }
     const t = S.terms[i.session_id];
     markOutput(t, i.num);
@@ -4199,6 +4355,7 @@ function setChatCollapsed(collapsed) {
 function setQueueCollapsed(collapsed) {
   saveLayout({ queue_collapsed: collapsed });
   applyLayout();
+  if (!collapsed) requestAnimationFrame(fitCommandBoxes);     // built while hidden, its rows had no size to measure
 }
 
 // a new AI message while the chat is hidden: a dot on the strip
@@ -4227,7 +4384,13 @@ function setupSplitters() {
   $("#chat-strip").addEventListener("click", () => setChatCollapsed(false));
   $("#queue-toggle").addEventListener("click", () => setQueueCollapsed(!layout.queue_collapsed));
   let resized = null;
-  window.addEventListener("resize", () => { clearTimeout(resized); resized = setTimeout(applyLayout, 100); });  // keep saved sizes in range
+  window.addEventListener("resize", () => {       // keep saved sizes in range, and command boxes as tall as their text
+    clearTimeout(resized);
+    resized = setTimeout(() => { applyLayout(); fitCommandBoxes(); }, 100);
+  });
+  // a font that arrives after the rows were measured changes how their text wraps
+  document.fonts?.ready?.then(fitCommandBoxes).catch(() => {});
+  document.fonts?.addEventListener?.("loadingdone", fitCommandBoxes);
   let pending = null;
   new ResizeObserver(() => {
     clearTimeout(pending);
