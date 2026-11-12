@@ -805,8 +805,8 @@ function renderUsage() {
   if (cached) el.textContent += ` · ${Math.round(100 * cached / p)}% cached`;
   btn.title = `Last request: ${p.toLocaleString()} prompt tokens, ${(u.completion_tokens || 0).toLocaleString()} completion tokens.`
     + (cached || written ? `\nPrompt cache: ${cached.toLocaleString()} read, ${written.toLocaleString()} written.` : "")
-    + (lim ? `\n${S.state.config.active_model}'s context window: ${lim.tokens.toLocaleString()} tokens (${{ override: "your override in Settings → Providers", provider: "reported by the provider", learned: "named in an earlier error" }[lim.source]}).`
-      : "\nThe selected model's context window isn't known; set it under Settings → Providers for local models.")
+    + (lim ? `\n${S.state.config.active_model}'s context window: ${lim.tokens.toLocaleString()} tokens (${{ override: "your override in Settings → AI providers", provider: "reported by the provider", learned: "named in an earlier error" }[lim.source]}).`
+      : "\nThe selected model's context window isn't known; set it under Settings → AI providers for local models.")
     + (lim && p >= bad ? "\nThe next request may not fit. Compact or remove earlier exchanges under Context ▾ → What the AI knows…."
       : p >= warn ? `\nThe conversation is getting long (warning threshold ${setting.toLocaleString()} in Settings → General). Consider a new case or a ticket summary.` : "");
 }
@@ -3616,7 +3616,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     x.route ? h("span", { class: "cap", title: `Routed: ${x.route} (change it with the route button in the top bar, or under Settings → AI providers)` }, "⚡") : null,
     x.reasoning ? h("span", { class: "cap", title: `Reasoning model${x.efforts?.length ? `: effort ${x.efforts.join(" / ")}` : ""}` }, "🧠") : null,
     x.tested ? h("span", { class: "cap tested", title: `DA Toolkit's prompts were tested with this model (evaluation of ${S.state.model_notes?.evaluated || "2026-10-10"}). ${x.tested}` }, "✓ tested") : null,
-    h("span", { class: `cap${x.vision ? "" : " off"}`, title: x.vision === true ? "Reads images" : x.vision === false ? "Text only: can't read images" : "Unknown whether it reads images (set it under Settings → Providers)" },
+    h("span", { class: `cap${x.vision ? "" : " off"}`, title: x.vision === true ? "Reads images" : x.vision === false ? "Text only: can't read images" : "Unknown whether it reads images (set it under Settings → AI providers)" },
       x.vision === true ? "👁" : x.vision === false ? "text only" : "?"),
     h("span", { class: `badge ${x.tier}` }, x.tier))));
     if (!shown.length) {
@@ -3640,7 +3640,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     title, wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       note ? h("div", { class: "small" }, note) : null,
-      h("div", { class: "muted small" }, legend, " Tier is detected from the model id; override it in Settings → Providers."),
+      h("div", { class: "muted small" }, legend, " Tier is detected from the model id; override it in Settings → AI providers."),
       h("div", { class: "muted small" }, filter ? `Showing ${filterNote} models only.` : "👁 reads images · text only: needs a vision helper (Settings → Model) for screenshots and photos · 🧠 reasoning model · ✓ tested: the prompts were evaluated with it (hover for the verdict; filter by \"tested\")."),
       h("div", { class: "row" }, providers.length > 1 ? provSel : null, search,
         h("button", { type: "button", onclick: () => load(true) }, "Refresh")),

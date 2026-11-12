@@ -773,6 +773,17 @@ test("control characters are taken out of what is pasted into a terminal, howeve
   assert.match(fs.readFileSync(path.join(WEB, "style.css"), "utf8"), /^\.prompt-text \{[^}]*overflow-wrap: anywhere/m);
 });
 
+test("messages name the Settings tab as it is labelled: AI providers", async () => {
+  const js = fs.readFileSync(path.join(WEB, "app.js"), "utf8");
+  assert.doesNotMatch(js, /Settings → Providers/);
+  const app = await page("a");
+  app.call("openSettings");
+  await app.clock.tick(0);
+  const tab = app.$(".modal .tabs-inline").querySelectorAll("button").find((b) => b.classList.contains("active"));
+  assert.equal(tab.textContent, "AI providers");
+  assert.ok(js.split("Settings → AI providers").length > 4);
+});
+
 function fakeRdp(app, sid = "rdp1") {
   const log = [];
   app.run(`S.rdps[${JSON.stringify(sid)}] = { id: ${JSON.stringify(sid)}, state: 3, host: h("div"), view: h("div", { class: "rdp-view", tabindex: 0 }),
