@@ -69,6 +69,8 @@ _ANSI = re.compile(
 )
 # what starts an OSC, DCS, SOS, PM or APC string
 _INTRODUCER = re.compile(r"\x1b[\]PX^_]")
+# the start of a control or charset sequence and no more: a read cut it and nothing followed
+_CUT_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*|[()])?")
 
 
 def _open_string(text: str) -> int:
@@ -92,7 +94,9 @@ class TranscriptWriter:
         self._times = None   # sidecar: "<unix time> <byte offset>" per write, for timeline replay
 
     def open(self, path: Path | None) -> None:
-        self.close()
+        """Write to `path` from here on (another case's folder), or nowhere. What is held back
+        goes with the output that follows it."""
+        self._close_files()
         if path is not None:
             self._file = path.open("a", encoding="utf-8")
             self._times = path.with_suffix(path.suffix + ".times").open("a", encoding="utf-8")
@@ -111,6 +115,9 @@ class TranscriptWriter:
             text, self._pending = text[:esc], text[esc:]
         else:
             self._pending = ""
+        self._put(text)
+
+    def _put(self, text: str) -> None:
         text = _ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "")
         text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
         if not text:
@@ -122,6 +129,21 @@ class TranscriptWriter:
             self._times.flush()
 
     def close(self) -> None:
+        """The session has ended: what was being held back is written, since nothing will come
+        to complete it. A stray introducer (a title cut off by a dropped connection, binary
+        output) held back up to 4 KB of what followed, the error that ended the session among
+        it, and that text was dropped here until Nov 2026. Only the introducer itself, or the
+        start of a sequence with nothing after it, is left out."""
+        if self._file:
+            held, self._pending = self._pending + self._decoder.decode(b"", final=True), ""
+            self._decoder.reset()
+            if _INTRODUCER.match(held):
+                held = held[2:]
+            if not _CUT_SEQUENCE.fullmatch(held):
+                self._put(held)
+        self._close_files()
+
+    def _close_files(self) -> None:
         if self._file:
             self._file.close()
             self._file = None
@@ -260,7 +282,9 @@ class SessionManager:
     def set_transcript_paths(self, path_for: Callable[[str], Path | None]) -> None:
         self._transcript_dir = path_for
         for s in self.sessions.values():
-            if isinstance(s, Session):
+            # not one that has exited: it writes nothing more, and its file would be made in the
+            # new case's folder, empty, and kept open for as long as its tab stays
+            if isinstance(s, Session) and not s.exited:
                 s.transcript.open(path_for(s.id))
 
     def unique_id(self, base: str) -> str:

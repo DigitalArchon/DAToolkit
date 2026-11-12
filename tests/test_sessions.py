@@ -136,6 +136,54 @@ def test_escape_sequences_split_across_reads_stay_out_of_the_transcript(tmp_path
     assert (tmp_path / "x.log").read_text() == written
 
 
+@pytest.mark.parametrize("chunks,written", [
+    # a title cut off by a dropped connection: what came after it is the error that ended the session
+    ([b"line 1\r\n", b"\x1b]0;title cut off by a dropped connection\r\nline 2: the error that ended the session\r\n"],
+     "line 1\n0;title cut off by a dropped connection\nline 2: the error that ended the session\n"),
+    ([b"binary \x1bP then Connection to web01 closed by remote host.\r\n"],
+     "binary  then Connection to web01 closed by remote host.\n"),
+    ([b"a\x1b[\nfatal: no space left\n"], "a[\nfatal: no space left\n"),       # not a control sequence after all
+    ([b"done\x1b[3"], "done"), ([b"done\x1b"], "done"), ([b"done\x1b("], "done"),  # the start of one, and no more
+    ([b"caf\xc3"], "caf�"),                                               # half a character
+])
+def test_text_held_back_is_written_when_the_session_ends(tmp_path, chunks, written):
+    w = TranscriptWriter()
+    w.open(tmp_path / "x.log")
+    for c in chunks:
+        w.write(c)
+    w.close()
+    assert (tmp_path / "x.log").read_text() == written
+
+
+def test_a_transcript_moved_to_another_case_keeps_what_was_held_back(tmp_path):
+    w = TranscriptWriter()
+    w.open(tmp_path / "a.log")
+    w.write(b"one\r\n\x1b]0;a title, its end still to c")
+    w.open(tmp_path / "b.log")                             # another case opened meanwhile
+    w.write(b"ome\x07two\r\n")
+    w.close()
+    assert ((tmp_path / "a.log").read_text(), (tmp_path / "b.log").read_text()) == ("one\n", "two\n")
+
+
+async def test_a_session_that_has_exited_gets_no_transcript_in_the_next_case(tmp_path):
+    mgr = SessionManager(on_change=lambda: None)
+    mgr.set_transcript_paths(lambda sid: tmp_path / f"first-{sid}.log")
+    done = mgr.spawn("done", ["/bin/sh", "-c", "echo bye"], {}, name="done", kind="local")
+    live = mgr.spawn("live", ["/bin/cat"], {}, name="live", kind="local")
+    try:
+        for _ in range(100):
+            if done.exited and done.transcript._file is None:
+                break
+            await asyncio.sleep(0.05)
+        assert done.exited and "session ended" in (tmp_path / "first-done.log").read_text()
+        mgr.set_transcript_paths(lambda sid: tmp_path / f"second-{sid}.log")
+        assert (tmp_path / "second-live.log").exists() and live.transcript._file is not None
+        assert not (tmp_path / "second-done.log").exists() and done.transcript._file is None
+    finally:
+        mgr.close_all()
+        await mgr.wait_closed()
+
+
 def test_output_of_nothing_but_string_introducers_doesnt_hold_the_app_up(tmp_path):
     """A program (or a remote host) printing ESC ] over and over: finding the string still open
     took time growing with the square of the read, 24 s of a busy event loop per megabyte, with
