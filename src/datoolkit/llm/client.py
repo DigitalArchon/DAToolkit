@@ -263,6 +263,28 @@ class _OpenAI(AsyncOpenAI):
         only_what_it_was_given(self)
 
 
+# Servers (by their address) that refused `stream_options` in this run of the app: they are not
+# sent it again. It asks for the token counts at the end of a stream, which most servers send
+# and a few older or stricter ones answer with HTTP 400 ("unknown field", "extra inputs are not
+# permitted"). The engine's learning of refused settings (Engine._learn_unsupported) can't leave
+# it out: that works on the settings the engine chose, and this one is the client's own.
+_NO_STREAM_OPTIONS: set[str] = set()
+
+
+def refuses_stream_options(err: Exception) -> bool:
+    """Whether a server's refusal of a chat request is about `stream_options`."""
+    return getattr(err, "status_code", None) in (400, 422) and "stream_options" in str(err).lower()
+
+
+def not_json(response) -> ProviderError:
+    """A line of a stream that is not JSON with more of the stream after it (a line the stream
+    ended in the middle of is `cut_off`), as the error to raise: what it held of the reply is
+    lost, so the reply is not shown as if it were whole. It raised a bare JSONDecodeError."""
+    return ProviderError(
+        f"{netguard.shown(str(response.request.url))} sent a line in its stream that is not JSON, so part of the "
+        "reply could not be read and none of it was taken; Retry asks again.", status_code=response.status_code)
+
+
 class LLMClient:
     def __init__(self, base_url: str, api_key: str | None, http_client=None):
         # Local servers often need no key, but the SDK insists on a value. The SDK's own HTTP
@@ -300,11 +322,25 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         kwargs.update(_split_params(params))
-        acc = StreamAccumulator()
-        # closed with this one: stopped or cancelled, the connection is dropped at once
-        async with aclosing(self._stream_as_received(kwargs, acc, receipts)) as events:
-            async for event in events:
-                yield event
+        server = str(self._client.base_url)
+        while True:
+            if server in _NO_STREAM_OPTIONS:
+                kwargs.pop("stream_options", None)
+            acc = StreamAccumulator()
+            began = False
+            try:
+                # closed with this one: stopped or cancelled, the connection is dropped at once
+                async with aclosing(self._stream_as_received(kwargs, acc, receipts)) as events:
+                    async for event in events:
+                        began = True
+                        yield event
+                break
+            except APIStatusError as e:
+                # a server that refuses stream_options is asked once more without it, and not
+                # sent it again; any other refusal is the caller's to read
+                if began or "stream_options" not in kwargs or not refuses_stream_options(e):
+                    raise
+                _NO_STREAM_OPTIONS.add(server)
         yield "done", acc.finish()
 
     async def _stream_as_received(self, kwargs: dict, acc: StreamAccumulator,
@@ -323,16 +359,26 @@ class LLMClient:
                     acc.result.receipt_id = (response.headers.get("x-receipt-id")
                                              or response.headers.get("x-tee-signature-id"))
                     acc.result.tee_route = response.headers.get("x-tee-verification-route")
-                done = saw_data = False
+                done = saw_data = unread = False
                 async for line in _lines(response, body):
                     if done or not line.startswith("data:"):
                         continue
-                    saw_data = True
                     data = line[len("data:"):].strip()
+                    if not data:
+                        continue         # an empty data line: some servers keep the connection alive with them
+                    saw_data = True
+                    if unread:
+                        raise not_json(response.http_response)
                     if data == "[DONE]":
                         done = True      # read on (nothing after it is taken), so the hash covers every byte
                         continue
-                    chunk = json.loads(data)
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        # if nothing follows it, the stream ended in the middle of this line (cut_off
+                        # below); if more does, a line of the reply is lost (not_json above)
+                        unread = True
+                        continue
                     if not isinstance(chunk, dict):
                         continue
                     if chunk.get("error"):
@@ -346,8 +392,9 @@ class LLMClient:
                 if not saw_data:
                     # not one event: whatever came wasn't a reply, and an empty one would say nothing of why
                     raise no_reply(response.http_response)
-                if not done and acc.result.finish_reason is None:
-                    # it ended saying neither why nor that it had: the connection closed mid-answer
+                if unread or (not done and acc.result.finish_reason is None):
+                    # it ended saying neither why nor that it had, or in the middle of a line: the
+                    # connection closed mid-answer
                     raise cut_off(response.http_response)
                 if receipts:
                     acc.result.body_hash = "sha256:" + body.hexdigest()
@@ -410,6 +457,26 @@ def _split_params(params: dict | None) -> dict:
     return params
 
 
+def _text_of(content) -> str:
+    """A delta's text. A string as a rule; some servers send the content as a list of parts
+    (`[{"type": "text", "text": "..."}]`, as a request's content may be), which raised a
+    TypeError when it was added to the reply."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part["text"] for part in content
+                       if isinstance(part, dict) and part.get("type", "text") == "text" and isinstance(part.get("text"), str))
+    return ""
+
+
+def _whole_json(text: str) -> bool:
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
+
+
 class StreamAccumulator:
     """Turns chat.completion.chunk objects into deltas and a final TurnResult."""
 
@@ -423,32 +490,44 @@ class StreamAccumulator:
         events: list[tuple[str, str]] = []
         if getattr(chunk, "id", None) and not self.result.id:
             self.result.id = chunk.id
-        if chunk.usage:
-            self.result.usage = chunk.usage.model_dump()
+        # Chunks are built without validation (construct), so a field may hold anything a server
+        # cared to send. What isn't of the shape a chunk has is passed over, not tripped on: a
+        # usage that is a string, a choice or a tool call that is null, raised an AttributeError
+        # that ended the turn, after the text had streamed.
+        usage = getattr(chunk, "usage", None)
+        if hasattr(usage, "model_dump"):
+            self.result.usage = usage.model_dump()
+        elif isinstance(usage, dict):
+            self.result.usage = dict(usage)
         # NanoGPT's own record of the charge: its usage.cost comes and goes between replies
         # (as SealedLore found), and a routed call's bill is the evidence that the route held
         pricing = (getattr(chunk, "model_extra", None) or {}).get("x_nanogpt_pricing")
         if isinstance(pricing, dict):
             self._pricing = pricing
-        if not chunk.choices:
+        choices = getattr(chunk, "choices", None)
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        if choice is None:
             return events
-        choice = chunk.choices[0]
-        if choice.finish_reason:
+        if isinstance(getattr(choice, "finish_reason", None), str) and choice.finish_reason:
             self.result.finish_reason = choice.finish_reason
-        delta = choice.delta
+        delta = getattr(choice, "delta", None)
         if delta is None:
             return events
-        extra = delta.model_extra or {}
+        extra = getattr(delta, "model_extra", None) or {}
         reasoning = extra.get("reasoning_content") or extra.get("reasoning")
         if isinstance(reasoning, str) and reasoning:
             self.result.reasoning += reasoning
             events.append(("reasoning", reasoning))
-        if delta.content:
-            self.result.content += delta.content
-            events.append(("text", delta.content))
-        for tc in delta.tool_calls or []:
+        text = _text_of(getattr(delta, "content", None))
+        if text:
+            self.result.content += text
+            events.append(("text", text))
+        tool_calls = getattr(delta, "tool_calls", None)
+        for tc in tool_calls if isinstance(tool_calls, list) else []:
+            if not hasattr(tc, "function"):
+                continue
             call = self._call_for(tc)
-            if tc.id:
+            if tc.id and not call.id:    # the id a call began with stays its id, whatever later pieces bring
                 call.id = tc.id
             if tc.function:
                 if tc.function.name:
@@ -462,12 +541,18 @@ class StreamAccumulator:
         return events
 
     def _call_for(self, tc) -> ToolCall:
-        """The call a delta continues. A new id at an index that already holds a named call is a
-        new call (some routes number every call 0), and a delta with no index continues the last
-        call unless it brings an id of its own."""
-        index = tc.index if isinstance(tc.index, int) else None
+        """The call a delta continues, or a new one it begins. A delta with no index continues the
+        last call. Some routes number every call 0, so a delta at an index that already holds a
+        call begins another when it brings an id of its own, a name, and the call there has all
+        its arguments. Other routes give one call a new id with every piece (and some repeat the
+        name each time): a piece that brings no name, or arrives while the arguments so far are
+        not yet whole JSON, belongs to the call being written. Until Nov 2026 any new id began a
+        call, so such a call came apart into one with half its arguments and one with no name."""
+        index = tc.index if isinstance(getattr(tc, "index", None), int) else None
         current = self._at.get(index) if index is not None else (self._calls[-1] if self._calls else None)
-        if current is None or (tc.id and current.id and tc.id != current.id and current.name):
+        another = (current is not None and tc.id and current.id and tc.id != current.id and current.name
+                   and getattr(tc.function, "name", None) and _whole_json(current.arguments))
+        if current is None or another:
             current = ToolCall(id="", name="", arguments="")
             self._calls.append(current)
             if index is not None:

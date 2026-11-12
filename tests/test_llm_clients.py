@@ -411,3 +411,134 @@ async def test_a_tool_call_still_being_written_is_never_returned_whatever_ended_
 async def test_a_messages_reply_cut_by_the_output_limit_reaches_the_caller_as_length():
     result = [e async for e in messages_stream(anthropic_events(*TEXT_BLOCK, *stopped("max_tokens")))][-1][1]
     assert result.finish_reason == "length" and result.content == "Two checks, then the fix." and not result.tool_calls
+
+
+async def test_a_stream_that_ends_in_the_middle_of_a_line_was_cut_off():
+    from datoolkit.llm.secure_http import ProviderError
+
+    whole = stream_of(chunk({"content": "The fix is"}), chunk({"content": " to restart it."}, "stop"))
+    for body in (whole[:whole.index(b"restart")],                                       # mid-JSON, nothing after it
+                 anthropic_events(*TEXT_BLOCK, *stopped("end_turn"))[:-60]):            # the Messages API likewise
+        stream = chat_stream(body) if body.startswith(b"data:") else messages_stream(body)
+        with pytest.raises(ProviderError, match="stopped before it was finished"):
+            [e async for e in stream]
+
+
+# ---------------------------------------------------------------- streams as servers really send them
+
+async def chat_result(*events, done=True):
+    return [e async for e in chat_stream(stream_of(*events, done=done), PROPOSE)][-1][1]
+
+
+async def test_content_sent_as_a_list_of_parts_is_read():
+    """Some servers send a delta's content as a request's may be written: a list of parts. It
+    raised "can only concatenate str (not "list") to str"."""
+    result = await chat_result(chunk({"content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": ", world"}]}),
+                               chunk({"content": [{"text": "."}, {"type": "image_url", "image_url": {"url": "x"}}, None, 7]}),
+                               chunk({"content": " Done."}, "stop"))
+    assert result.content == "Hello, world. Done." and result.finish_reason == "stop"
+
+
+async def test_a_call_whose_id_changes_or_is_repeated_stays_one_call():
+    args = '{"items": [{"command": "df -h"}]}'
+
+    def piece(call_id, name, part, index=0):
+        return chunk({"tool_calls": [{"index": index, "id": call_id, "function": {"name": name, "arguments": part}}]})
+
+    # a new id with every piece (it came apart: one call with half its arguments, one with no name)
+    result = await chat_result(piece("x1", "propose_commands", args[:9]), piece("x2", None, args[9:20]),
+                               piece("x3", None, args[20:]), chunk({}, "tool_calls"))
+    assert [(c.id, c.name, c.arguments) for c in result.tool_calls] == [("x1", "propose_commands", args)]
+    # ... and the whole name with it every time
+    result = await chat_result(piece("x1", "propose_commands", args[:9]), piece("x2", "propose_commands", args[9:20]),
+                               piece("x3", "propose_commands", args[20:]), chunk({}, "tool_calls"))
+    assert [(c.id, c.name, c.arguments) for c in result.tool_calls] == [("x1", "propose_commands", args)]
+    # the same id on every piece, with an index and without one
+    for index in (0, None):
+        result = await chat_result(piece("same", "propose_commands", args[:9], index), piece("same", None, args[9:], index),
+                                   chunk({}, "tool_calls"))
+        assert [(c.id, c.name, c.arguments) for c in result.tool_calls] == [("same", "propose_commands", args)]
+    # two calls a route numbered 0 both, each whole and with its own id and name: still two
+    result = await chat_result(piece("a", "update_hypotheses", '{"items":[]}'), piece("b", "propose_commands", args),
+                               chunk({}, "tool_calls"))
+    assert [(c.id, c.name, c.arguments) for c in result.tool_calls] == [("a", "update_hypotheses", '{"items":[]}'),
+                                                                        ("b", "propose_commands", args)]
+
+
+async def test_what_is_not_shaped_like_a_chunk_is_passed_over():
+    """Each of these ended the turn with an AttributeError, some after the text had streamed."""
+    for odd in ({"id": "c1", "choices": [], "usage": "n/a"}, {"id": "c1", "choices": [None]}, {"id": "c1", "choices": None},
+                chunk({"tool_calls": [None]}), chunk({"tool_calls": {"index": 0}}), chunk({"tool_calls": "none"}),
+                {"id": "c1", "choices": [{"index": 0, "delta": None, "finish_reason": None}]}, ""):
+        result = await chat_result(chunk({"content": "h"}), odd, chunk({"content": "i"}, "stop"))
+        assert result.content == "hi" and result.finish_reason == "stop" and not result.tool_calls, odd
+    usage = {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+    result = await chat_result(chunk({"content": "hi"}, "stop"), {"id": "c1", "choices": [], "usage": usage})
+    assert result.usage["total_tokens"] == 4
+
+
+async def test_a_line_that_is_not_json_in_the_middle_of_a_stream_is_said():
+    from datoolkit.llm.secure_http import ProviderError
+
+    with pytest.raises(ProviderError, match="sent a line in its stream that is not JSON"):
+        await chat_result(chunk({"content": "Hello"}), "{oops", chunk({}, "stop"))
+
+
+async def test_a_server_that_refuses_stream_options_is_asked_once_more_without_it():
+    """The client asks for the token counts at the end of a stream (stream_options). A server
+    that answers 400 to it could never be used: the engine can leave out a setting it chose
+    (Engine._learn_unsupported), but not one the client adds itself."""
+    import httpx2
+
+    from datoolkit.llm import client as client_module
+
+    sent = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        if "stream_options" in body:
+            return httpx2.Response(400, json={"error": {"message": "Unrecognized request argument supplied: stream_options",
+                                                        "type": "invalid_request_error"}})
+        if body.get("temperature") is not None:
+            return httpx2.Response(400, json={"error": {"message": "this model does not support temperature"}})
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"},
+                               content=stream_of(chunk({"content": "fine"}, "stop")))
+
+    def make():
+        return mocked(lambda http: LLMClient("https://strict.example/v1", "k", http_client=http), handler)
+
+    client_module._NO_STREAM_OPTIONS.discard("https://strict.example/v1/")
+    events = [e async for e in make().stream("m", USER)]
+    assert events[-1][1].content == "fine" and ["stream_options" in body for body in sent] == [True, False]
+    events = [e async for e in make().stream("m", USER)]            # another client for the same server: not sent it again
+    assert events[-1][1].content == "fine" and ["stream_options" in body for body in sent] == [True, False, False]
+    # any other refusal is the caller's to read, as before (the engine learns it)
+    with pytest.raises(Exception, match="does not support temperature"):
+        [e async for e in make().stream("m", USER, params={"temperature": 0.3})]
+    assert len(sent) == 4
+    # and a server that takes it is sent it every time
+    other = mocked(lambda http: LLMClient("https://models.example/v1", "k", http_client=http),
+                   lambda request: sent.append(json.loads(request.content)) or httpx2.Response(
+                       200, headers={"content-type": "text/event-stream"}, content=stream_of(chunk({"content": "ok"}, "stop"))))
+    [e async for e in other.stream("m", USER)]
+    assert sent[-1]["stream_options"] == {"include_usage": True}
+
+
+async def test_a_turn_on_a_server_that_refuses_stream_options_is_answered(env):  # noqa: F811
+    from datoolkit.llm import client as client_module
+
+    engine, fake, _ = env
+    client_module._NO_STREAM_OPTIONS.clear()
+    engine.new_case("c", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    fake.refuse["anthropic/claude-opus-5.5"] = "stream_options"
+    fake.responses.append(stream_of(chunk({"role": "assistant", "content": "Hello."}, "stop")).decode())
+    try:
+        engine.send("hi")
+        await wait_turn(engine)
+        assert engine.chat[-1]["kind"] == "assistant" and engine.chat[-1]["text"] == "Hello.", engine.chat[-1]
+        assert ["stream_options" in body for body in fake.requests] == [True, False]
+        assert not any(e["kind"] == "note" for e in engine.chat)        # nothing for the technician to do about it
+    finally:
+        client_module._NO_STREAM_OPTIONS.clear()
