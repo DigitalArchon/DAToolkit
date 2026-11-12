@@ -1974,7 +1974,7 @@ class Engine:
                                         "from the session menu.")
                     pin = pinned["sha256"]
                 env["DATOOLKIT_PSRP"] = winrm.console_config(host, pin)
-                env["PYTHONPATH"] = winrm.console_pythonpath()
+                env.update(winrm.console_env())
                 sess = self.sessions.spawn(sid, [sys.executable, *winrm.CONSOLE_ARGS], env,
                                            name=host.name, kind="winrm", target=target_label(host),
                                            shell="PowerShell (remoting, single-line)",

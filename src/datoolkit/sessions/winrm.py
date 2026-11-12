@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from ..config import Host
+from ..hostenv import own_tls_env
 from ..llm import netguard
 
 
@@ -71,13 +72,17 @@ def port(host: Host) -> int:
 # What the interpreter is given to run the console (sessions/psrp_console.py) in a session's PTY.
 # -P keeps the directory it starts in, the technician's home, off its import path: a stray
 # ~/json.py or ~/signal.py there is never imported by the process that holds the host's
-# password. The source root is passed in PYTHONPATH (console_pythonpath).
+# password. The source root is passed in PYTHONPATH (console_env).
 CONSOLE_ARGS = ("-P", "-m", "datoolkit.sessions.psrp_console")
 
 
-def console_pythonpath() -> str:
+def console_env() -> dict[str, str]:
+    """What the console's process needs besides its settings: the source root to import from,
+    and, being DA Toolkit's own program making TLS connections, the CA variables DA Toolkit
+    itself runs with (a session's environment leaves the AppImage's out: hostenv.host_env)."""
     src_root = str(Path(__file__).resolve().parents[2])
-    return src_root + (":" + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")
+    return {"PYTHONPATH": src_root + (":" + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""),
+            **own_tls_env()}
 
 
 def console_config(host: Host, pin: str = "") -> str:
