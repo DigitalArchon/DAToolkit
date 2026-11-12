@@ -21,6 +21,7 @@ import io
 import os
 import re
 import sys
+import unicodedata
 from ctypes import POINTER, Structure, byref, c_char_p, c_int, c_uint8, c_uint16, c_uint32, c_void_p
 from dataclasses import dataclass
 
@@ -40,8 +41,25 @@ BROWSERS = ("firefox", "chrome", "chromium", "brave", "vivaldi", "opera", "msedg
 BROWSER_CONSOLES = ("idrac", "ilo ", "integrated lights-out", "kvm", "novnc", "console")
 
 
+LABEL_LIMIT = 80                # characters of a window's title that go into its session's description
+_QUOTES = "`\"'\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f\u00ab\u00bb\u2039\u203a\u2032\u2033"
+
+
 class WindowError(Exception):
     pass
+
+
+def label(text: str, limit: int = LABEL_LIMIT) -> str:
+    """A window's title or class as it may stand in the session's description, which the model
+    reads in its system prompt: one line of at most `limit` characters, with no control or
+    formatting characters, line breaks, backticks or quotes. Whoever is at the other end sets a
+    window's title (a web page, the name of a remote computer), and the description puts it
+    between quotes in a list of sessions: a title with a quote and a line break in it wrote
+    list entries and notes of its own there, until Nov 2026."""
+    text = "".join(" " if unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp") else ch
+                   for ch in text if ch not in _QUOTES)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
 @dataclass

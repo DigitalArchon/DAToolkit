@@ -368,8 +368,8 @@ async def test_a_certificates_own_text_cant_draw_a_fingerprint_line(rdp_env, kin
     engine, events, _ = rdp_env
     forged = "3F:9A:" + ":".join(["11"] * 30)            # the fingerprint someone wants the technician to read
     cert = _certificate_named("SRV01.corp.example\nIssuer: CN=SRV01.corp.example (self-signed)\r\nValid until: "
-                              f"2027-05-01\nSHA-256: {forged} \x1b[2J‮" + "\n" * 40 + "(details)")
-    assert not any(ch in cert["subject"] + cert["issuer"] for ch in "\n\r\x1b ‮")
+                              f"2027-05-01\nSHA-256: {forged}\u2028\x1b[2J\u202e" + "\n" * 40 + "(details)")
+    assert not any(ch in cert["subject"] + cert["issuer"] for ch in "\n\r\x1b\u2028\u202e")
     opener = asyncio.create_task(engine._trust_cert("s", "10.99.0.3", 3389, cert, kind))
     await answer_prompts(engine, ["no"])
     with pytest.raises(UserError, match="not trusted"):

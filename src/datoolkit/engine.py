@@ -2286,9 +2286,11 @@ class Engine:
         name = name.strip() or info.short_name
         sid = self.sessions.unique_id(re.sub(r"\W+", "-", name[:40]))
         app = info.wm_class or info.instance or "window"
+        # the description the model reads: the window's own words cleaned and cut (xwindow.label)
+        shown, title = xwindow.label(app, 40) or "window", xwindow.label(info.title)
         sess = self.sessions.add(WindowSession(
             id=sid, name=name, xid=info.xid, wm_class=app, title=info.title,
-            target=f"{app} window \"{info.title}\"" if info.title else f"{app} window",
+            target=f"{shown} window \"{title}\"" if title else f"{shown} window",
             os_hint=os_hint.strip() or "Windows"))
         self.log("session_opened", **sess.roster())
         return sess.roster()
