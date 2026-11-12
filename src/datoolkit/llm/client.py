@@ -169,6 +169,20 @@ def no_reply(response, what: str = "stream") -> ProviderError:
         status_code=response.status_code)
 
 
+def cut_off(response) -> ProviderError:
+    """A stream that ended without the provider saying the reply was done (no finish reason and
+    no `[DONE]`; on the Messages API no stop reason), as the error to raise: the connection
+    closed mid-answer, at a proxy's time limit or a server that crashed. Until Nov 2026 what had
+    arrived was taken for the reply, a command cut short in the middle and a half-written tool
+    call included. A reply the provider itself ended early (finish reason "length",
+    "content_filter") is not this: that one is whole as far as it goes, and says why it stopped."""
+    return ProviderError(
+        "the reply stopped before it was finished: the connection closed mid-answer, and "
+        f"{netguard.shown(str(response.request.url))} never said the reply was complete. What arrived of it is "
+        "not a whole reply, so no command or other call in it was taken; Retry asks again.",
+        status_code=response.status_code)
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -269,7 +283,9 @@ class LLMClient:
 
         A redirect, or an answer with not one SSE data line in it (a web page), raises, saying
         where the endpoint redirected or what it answered (`redirected`, `no_reply`): a web page
-        ended the turn with nothing shown at all, and a redirect said only "Error code: 308"."""
+        ended the turn with nothing shown at all, and a redirect said only "Error code: 308". So
+        does a stream that ends with neither a finish reason nor `[DONE]` (`cut_off`): the
+        connection closed mid-answer, and what arrived is no reply."""
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
         kwargs: dict = {"model": model, "messages": openai_messages(messages), "stream": True,
@@ -324,6 +340,9 @@ class LLMClient:
                 if not saw_data:
                     # not one event: whatever came wasn't a reply, and an empty one would say nothing of why
                     raise no_reply(response.http_response)
+                if not done and acc.result.finish_reason is None:
+                    # it ended saying neither why nor that it had: the connection closed mid-answer
+                    raise cut_off(response.http_response)
                 if receipts:
                     acc.result.body_hash = "sha256:" + body.hexdigest()
         except APIStatusError as e:              # only the request's own answer raises it

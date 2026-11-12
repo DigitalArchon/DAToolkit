@@ -57,8 +57,8 @@ from typing import AsyncIterator
 import anthropic
 
 from .capabilities import EFFORTS
-from .client import (CONNECT_TIMEOUT, NO_RESULT, ToolCall, TurnResult, is_private_mode, local_http_options, no_reply,
-                     only_what_it_was_given, redirected)
+from .client import (CONNECT_TIMEOUT, NO_RESULT, ToolCall, TurnResult, cut_off, is_private_mode, local_http_options,
+                     no_reply, only_what_it_was_given, redirected)
 from .params import nearest_effort
 from .providers import is_official_anthropic
 
@@ -528,7 +528,9 @@ class AnthropicClient:
 
         A redirect, or an answer with no Messages event in it (a web page), raises, saying where
         the endpoint redirected or what it answered (llm/client.py redirected, no_reply): the SDK
-        said "Error code: 308", and of a web page nothing at all (an empty AssertionError)."""
+        said "Error code: 308", and of a web page nothing at all (an empty AssertionError). So
+        does a stream that ends without a stop reason (llm/client.py cut_off): the connection
+        closed mid-answer, and the SDK hands back what had arrived as if it were the message."""
         try:
             # closed with this one: stopped or cancelled, the connection is dropped at once
             async with aclosing(self._stream(model, messages, tools, params)) as events:
@@ -554,15 +556,19 @@ class AnthropicClient:
         last_kind = ""
         search_tail = None
         searched = False
+        unfinished: set[str] = set()      # tool calls whose input was still being written when their stream ended
         for _ in range(MAX_CONTINUATIONS + 1):
             async with self._client.messages.stream(**kwargs, **extra) as s:
                 saw_event = False
+                writing: dict[int, str] = {}       # block index -> the id of a tool call not yet closed
                 async for ev in s:
                     saw_event = True
                     if ev.type == "content_block_start":
                         b = ev.content_block
                         if b.type in ("tool_use", "server_tool_use"):
                             yield "tool", b.name
+                        if b.type == "tool_use":
+                            writing[ev.index] = b.id
                         if b.type == "text" and last_kind and last_kind != "text" and result.content:
                             result.content += "\n\n"
                             yield "text", "\n\n"
@@ -580,6 +586,7 @@ class AnthropicClient:
                             result.reasoning += d.thinking
                             yield "reasoning", d.thinking
                     elif ev.type == "content_block_stop":
+                        writing.pop(ev.index, None)
                         snap = s.current_message_snapshot.content
                         if ev.index >= len(snap):
                             continue
@@ -599,6 +606,12 @@ class AnthropicClient:
                     # not one event of a Messages stream: whatever came wasn't a reply
                     raise no_reply(s.response)
                 msg = await s.get_final_message()
+                unfinished.update(writing.values())
+                if msg.stop_reason is None:
+                    # the stream ended without saying why: the connection closed mid-answer. The SDK
+                    # hands back what had arrived, a half-written tool call's input patched up into
+                    # valid JSON (its later items missing their fields) included.
+                    raise cut_off(s.response)
             blocks = [_dump(b) for b in msg.content]
             blocks_all += blocks
             _usage(msg.usage, usage)
@@ -637,6 +650,8 @@ class AnthropicClient:
             # is whole.
             if stop in ("max_tokens", "model_context_window_exceeded") and return_calls and native[-1] is return_calls[-1]:
                 return_calls = return_calls[:-1]
+            # and whatever ended the stream, a call whose block was never closed is not a call
+            return_calls = [b for b in return_calls if b.get("id") not in unfinished]
         result.tool_calls = [ToolCall(id=b["id"], name=b["name"], arguments=json.dumps(b.get("input") or {}))
                              for b in return_calls]
         yield "done", result

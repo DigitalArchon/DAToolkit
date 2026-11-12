@@ -12,6 +12,8 @@ from datoolkit.llm import capabilities, research, routing, websearch
 from datoolkit.llm.anthropic_api import AnthropicClient
 from datoolkit.llm.client import LLMClient, local_http_options
 
+from test_engine import env, wait_turn  # noqa: F401
+
 USER = [{"role": "user", "content": "SOVEREIGN CASE: the database password is hunter2"}]
 CHUNK = {"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": "m",
          "choices": [{"index": 0, "delta": {"content": "fine"}, "finish_reason": "stop"}]}
@@ -258,3 +260,154 @@ async def test_a_model_server_that_never_answers_the_connection_fails_soon(make,
     finally:
         for s in held + [listener]:
             s.close()
+
+
+# ---------------------------------------------------------------- a reply that was cut off
+
+def chunk(delta=None, finish=None, **more) -> dict:
+    return {"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": "m",
+            "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish}], **more}
+
+
+def stream_of(*events, done=True) -> bytes:
+    """An SSE body of chat completion chunks (dicts) or raw data lines (str), ended by [DONE] or not."""
+    out = "".join("data: " + (e if isinstance(e, str) else json.dumps(e)) + "\n\n" for e in events)
+    return (out + ("data: [DONE]\n\n" if done else "")).encode()
+
+
+def answered_with(make, body: bytes):
+    """`make(http_client)`'s client, every request answered with the stream `body`."""
+    import httpx2
+
+    return mocked(make, lambda request: httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body))
+
+
+def chat_stream(body: bytes, tools=None):
+    """The events of an OpenAI-compatible stream `body`, as LLMClient yields them."""
+    client = answered_with(lambda http: LLMClient("https://models.example/v1", "k", http_client=http), body)
+    return client.stream("m", USER, tools=tools)
+
+
+PROPOSE = [{"type": "function", "function": {"name": "propose_commands", "parameters": {"type": "object"}}}]
+HALF_CALL = {"tool_calls": [{"index": 0, "id": "t1", "function": {
+    "name": "propose_commands", "arguments": '{"items": [{"command": "systemctl restart ngin'}}]}
+
+
+@pytest.mark.parametrize("events", [
+    [chunk({"content": "Run this: rm -rf /var/lib/app/ca"})],                     # "...cache", cut in the middle of a path
+    [chunk({"content": "I'll queue it."}), chunk(HALF_CALL)],
+    [chunk({"role": "assistant"})]])
+async def test_a_stream_that_ends_without_saying_it_is_done_is_an_error_not_a_reply(events):
+    """No finish reason and no [DONE]: the connection closed mid-answer. Until Nov 2026 what had
+    arrived was the reply: a command cut short, a tool call with half its arguments."""
+    from datoolkit.llm.secure_http import ProviderError
+
+    seen = []
+    with pytest.raises(ProviderError, match="stopped before it was finished: the connection closed mid-answer") as err:
+        async for event in chat_stream(stream_of(*events, done=False), PROPOSE):
+            seen.append(event)
+    assert not any(kind == "done" for kind, _ in seen), "no result is handed over"
+    assert "models.example" in str(err.value) and "Retry" in str(err.value)
+
+
+@pytest.mark.parametrize("finish", ["length", "content_filter", "stop"])
+@pytest.mark.parametrize("done", [True, False])
+async def test_a_reply_the_provider_ended_itself_reaches_the_caller_with_its_reason(finish, done):
+    """Cut by the output limit or a filter, the reply is whole as far as it goes and says why it
+    stopped: the engine marks it. Said by the finish reason, with or without a [DONE] after it."""
+    body = stream_of(chunk({"content": "The fix is to set PermitRootLogin to"}, finish), done=done)
+    events = [e async for e in chat_stream(body)]
+    result = events[-1][1]
+    assert events[-1][0] == "done" and result.finish_reason == finish
+    assert result.content == "The fix is to set PermitRootLogin to"
+
+
+async def test_a_turn_whose_reply_was_cut_off_queues_nothing_and_offers_retry(env):  # noqa: F811
+    engine, fake, _ = env
+    engine.new_case("c", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    engine.open_session("local")
+    sid = engine.sessions.roster()[0]["id"]
+    args = json.dumps({"items": [{"session_id": sid, "command": "df -h", "purpose": "space", "risk": "read_only"},
+                                 {"session_id": sid, "command": "sudo systemctl restart rsyslog", "purpose": "x"}]})
+    fake.responses.append(stream_of(
+        chunk({"role": "assistant", "content": "Two checks, then the fix."}),
+        chunk({"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                               "function": {"name": "propose_commands", "arguments": args[:len(args) - 30]}}]}),
+        done=False).decode())
+    engine.send("disk is full")
+    await wait_turn(engine)
+    assert not engine.queue.items
+    note = engine.chat[-1]
+    assert note["kind"] == "note" and note["retry"] is True and engine.can_retry
+    assert note["text"].startswith("AI request ProviderError: the reply stopped before it was finished: "
+                                   "the connection closed mid-answer")
+    assert engine.chat[-2]["text"] == "Two checks, then the fix."           # what arrived stays shown, above the note
+
+
+# the same on the Messages API
+
+def anthropic_events(*events) -> bytes:
+    def ev(kind, **data):
+        return f"event: {kind}\ndata: {json.dumps({'type': kind, **data})}\n\n"
+    start = ev("message_start", message={"id": "m1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+                                         "content": [], "stop_reason": None, "usage": {"input_tokens": 5, "output_tokens": 0}})
+    return (start + "".join(ev(kind, **data) for kind, data in events)).encode()
+
+
+TEXT_BLOCK = [("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}}),
+              ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "Two checks, then the fix."}}),
+              ("content_block_stop", {"index": 0})]
+WHOLE_INPUT = {"items": [{"session_id": "s1", "command": "df -h", "purpose": "space", "risk": "read_only"}]}
+HALF_INPUT = ('{"items": [{"session_id": "s1", "command": "df -h", "purpose": "space", "risk": "read_only"}, '
+              '{"session_id": "s1", "command": "sudo systemctl restart rsyslog", "purpose": "Release the fi')
+
+
+def tool_block(index, tool_id, partial_json, closed=True):
+    return [("content_block_start", {"index": index, "content_block": {"type": "tool_use", "id": tool_id,
+                                                                       "name": "propose_commands", "input": {}}}),
+            ("content_block_delta", {"index": index, "delta": {"type": "input_json_delta", "partial_json": partial_json}}),
+            *([("content_block_stop", {"index": index})] if closed else [])]
+
+
+def stopped(reason):
+    return [("message_delta", {"delta": {"stop_reason": reason}, "usage": {"output_tokens": 9}}), ("message_stop", {})]
+
+
+def messages_stream(body: bytes):
+    """The events of a Messages API stream `body`, as AnthropicClient yields them."""
+    client = answered_with(lambda http: AnthropicClient("https://api.anthropic.com", "k", http_client=http), body)
+    return client.stream("claude-opus-5-5", [{"role": "system", "content": "s"}, *USER], PROPOSE)
+
+
+@pytest.mark.parametrize("events", [
+    TEXT_BLOCK + tool_block(1, "toolu_1", HALF_INPUT, closed=False),          # in the middle of a tool call
+    TEXT_BLOCK[:2],                                                            # in the middle of the text
+    TEXT_BLOCK + tool_block(1, "toolu_1", json.dumps(WHOLE_INPUT))])           # between blocks: still no stop reason
+async def test_a_messages_stream_that_ends_without_a_stop_reason_is_an_error_not_a_reply(events):
+    """The SDK hands back what had arrived as the message, a half-written call's input patched
+    into valid JSON: its second command had lost its purpose, risk and rollback, and was queued."""
+    from datoolkit.llm.secure_http import ProviderError
+
+    seen = []
+    with pytest.raises(ProviderError, match="stopped before it was finished: the connection closed mid-answer"):
+        async for event in messages_stream(anthropic_events(*events)):
+            seen.append(event)
+    assert ("text", "Two checks, then the fix.") in seen and not any(kind == "done" for kind, _ in seen)
+
+
+@pytest.mark.parametrize("reason", ["tool_use", "end_turn", "max_tokens"])
+async def test_a_tool_call_still_being_written_is_never_returned_whatever_ended_the_stream(reason):
+    """A stream may say it is done with a tool call's block never closed (a gateway that drops
+    events, a limit reached as the input was written). The call before it is whole and stays."""
+    body = anthropic_events(*TEXT_BLOCK, *tool_block(1, "toolu_1", json.dumps(WHOLE_INPUT)),
+                            *tool_block(2, "toolu_2", HALF_INPUT, closed=False),
+                            *stopped(reason))
+    result = [e async for e in messages_stream(body)][-1][1]
+    assert [(c.id, json.loads(c.arguments)) for c in result.tool_calls] == [("toolu_1", WHOLE_INPUT)]
+    assert result.finish_reason == {"tool_use": "tool_calls", "end_turn": "stop", "max_tokens": "length"}[reason]
+
+
+async def test_a_messages_reply_cut_by_the_output_limit_reaches_the_caller_as_length():
+    result = [e async for e in messages_stream(anthropic_events(*TEXT_BLOCK, *stopped("max_tokens")))][-1][1]
+    assert result.finish_reason == "length" and result.content == "Two checks, then the fix." and not result.tool_calls
