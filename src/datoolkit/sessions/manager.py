@@ -5,12 +5,15 @@ console), read only through screenshots (see xwindow.py).
 
 Sessions reaching the same machine share a `device` key, so the model can be told that an
 RDP view and a WinRM shell are the same computer. Opening a session links it automatically
-to open sessions with the same address; the technician can link or unlink by hand."""
+to open sessions that reach the same address the same way (link_key: the address and the jump
+hosts on the way, and for a loopback address the port); the technician can link or unlink by
+hand."""
 
 from __future__ import annotations
 
 import asyncio
 import codecs
+import ipaddress
 import os
 import re
 import time
@@ -20,6 +23,7 @@ from typing import Callable
 
 from ..hostenv import host_env
 from .ptyproc import PtyProcess
+from .ssh import jump_route
 
 BACKLOG_BYTES = 512 * 1024
 VIEWER_BEHIND_BYTES = 8 * 1024 * 1024    # output a viewer may fall behind by before it is skipped
@@ -132,7 +136,9 @@ class Session:
     subscribers: set = field(default_factory=set)
     transcript: TranscriptWriter = field(default_factory=TranscriptWriter)
     used_stored_password: bool = False
-    address: str = ""          # host address used for automatic device linking
+    address: str = ""          # host address used for automatic device linking,
+    jump: str = ""             # with the jump hosts it is reached through (Host.jump)
+    port: int = 0              # and its port (see link_key)
     device: str = ""           # sessions with the same key reach the same machine
     link: str = "auto"         # "auto" | "manual" | "unlinked" (never auto-linked again)
 
@@ -156,6 +162,8 @@ class RdpSession:
     host_name: str = ""
     exited: bool = False
     address: str = ""
+    jump: str = ""
+    port: int = 0
     device: str = ""
     link: str = "auto"
     cert: dict = field(default_factory=dict)
@@ -187,6 +195,8 @@ class WindowSession:
     host_name: str = ""
     exited: bool = False
     address: str = ""
+    jump: str = ""
+    port: int = 0
     device: str = ""
     link: str = "auto"
 
@@ -195,6 +205,37 @@ class WindowSession:
                 "shell": self.shell, "os_hint": self.os_hint, "exited": self.exited,
                 "host_name": self.host_name, "device": self.device, "link": self.link,
                 "xid": self.xid, "wm_class": self.wm_class, "title": self.title}
+
+
+def _is_loopback(address: str) -> bool:
+    if address == "localhost" or address.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
+
+
+def link_key(sess) -> tuple | None:
+    """What automatic linking goes by: two sessions are the same device only when they reach the
+    same machine, and an address alone doesn't say that. 192.168.1.1 behind one client's jump
+    host and 192.168.1.1 behind another's are two routers, so the jump hosts on the way are part
+    of the key. A loopback address names whatever listens on that port, usually a port forwarded
+    from somewhere else (a host saved as localhost:3390), so there the port is part of it too,
+    and such a host is never the technician's own shell: only local shells link to each other.
+    None for a session with no address (a window), which links to nothing by itself. Until Nov
+    2026 the bare address was the key, and the model was told that such sessions were one machine
+    and to send one's commands to the other."""
+    address = sess.address.strip().lower().rstrip(".").strip("[]")
+    if not address:
+        return None
+    if sess.kind == "local":
+        return ("local",)
+    route = jump_route(sess.jump)
+    if _is_loopback(address):
+        return ("loopback", route, sess.port)
+    return (address, route)
 
 
 class SessionManager:
@@ -247,10 +288,9 @@ class SessionManager:
         return f"dev{self._devices}"
 
     def _auto_link(self, sess) -> None:
-        addr = sess.address.strip().lower()
+        key = link_key(sess)
         for other in self.sessions.values():
-            if (addr and not other.exited and other.link != "unlinked"
-                    and other.address.strip().lower() == addr):
+            if key and not other.exited and other.link != "unlinked" and link_key(other) == key:
                 sess.device = other.device
                 return
         sess.device = self._new_device()

@@ -165,3 +165,72 @@ async def test_a_security_key_touch_notice_is_shown_not_asked(tmp_path):
         assert done.returncode == 0 and calls == [("Confirm user presence for key ED25519-SK", "notice")]
     finally:
         await bridge.stop()
+
+
+async def test_sessions_link_by_themselves_only_when_they_reach_the_same_machine():
+    """An address alone doesn't say which machine: a host saved as localhost:3390 is a forwarded
+    port, not this computer, and two clients' 192.168.1.1 behind two jump hosts are two routers.
+    Linked, the model is told they are one machine and to send one's commands to the other."""
+    from datoolkit.sessions.manager import RdpSession, WindowSession, link_key
+
+    mgr = SessionManager(on_change=lambda: None)
+
+    def pty(sid, kind, address, **meta):
+        return mgr.spawn(sid, ["/bin/cat"], {}, name=sid, kind=kind, address=address, **meta)
+
+    def rdp(sid, address, port):
+        return mgr.add(RdpSession(id=sid, name=sid, params={}, address=address, port=port))
+
+    try:
+        local, local2 = pty("local", "local", "localhost"), pty("local-2", "local", "localhost")
+        assert local.device == local2.device                              # two shells on this computer
+        # saved hosts at a loopback address: never the technician's own shell, and one device per port
+        forwarded = rdp("acme-dc", "localhost", 3390)
+        other = rdp("other-dc", "127.0.0.1", 3391)
+        same_port = pty("acme-dc-winrm", "winrm", "LOCALHOST", port=3390)
+        here = pty("me", "ssh", "::1", port=22)
+        assert len({local.device, forwarded.device, other.device, here.device}) == 4
+        assert same_port.device == forwarded.device
+        # the same private address behind different jump hosts, and behind none
+        fw_a = pty("fw-a", "ssh", "192.168.1.1", jump="me@bastion.acme.example", port=22)
+        fw_b = pty("fw-b", "ssh", "192.168.1.1", jump="me@bastion.other.example", port=22)
+        fw_c = pty("fw-c", "ssh", "192.168.1.1", port=22)
+        assert len({fw_a.device, fw_b.device, fw_c.device}) == 3
+        # the same address by the same way is one machine, whoever logs in to the jump host and on whatever port
+        fw_a2 = pty("fw-a2", "ssh", "192.168.1.1.", jump="other@BASTION.acme.example:2222", port=2022)
+        fw_c2 = rdp("fw-c-rdp", "192.168.1.1", 3389)
+        assert fw_a2.device == fw_a.device and fw_c2.device == fw_c.device
+        # a window has no address and links to nothing by itself
+        window = mgr.add(WindowSession(id="w", name="w", xid=1))
+        assert link_key(window) is None and window.device not in {s.device for s in mgr.sessions.values() if s is not window}
+        # by hand, anything links to anything, as before
+        mgr.link("acme-dc", "local")
+        assert forwarded.device == local.device and forwarded.link == "manual"
+        mgr.link("fw-a2", None)
+        assert fw_a2.device != fw_a.device and fw_a2.link == "unlinked"
+    finally:
+        mgr.close_all()
+        await mgr.wait_closed()
+
+
+async def test_a_host_session_carries_its_jump_host_and_port_for_linking(tmp_path, monkeypatch):
+    from datoolkit.config import Config, Host
+    from datoolkit.engine import Engine
+
+    engine = Engine(Config(hosts=[Host("fw-a", "ssh", "192.168.1.1", user="admin", jump="me@bastion-a"),
+                                  Host("fw-b", "ssh", "192.168.1.1", user="admin", jump="me@bastion-b", port=2022),
+                                  Host("fwd", "ssh", "localhost", port=2201)]),
+                    lambda event: None, tmp_path / "rt", save_config=lambda c: None)
+    await engine.start()
+    try:
+        engine.new_case("link", "open")
+        spawn = engine.sessions.spawn
+        monkeypatch.setattr(engine.sessions, "spawn", lambda sid, argv, env, **meta: spawn(sid, ["/bin/cat"], env, **meta))
+        engine.open_session("local")
+        for name in ("fw-a", "fw-b", "fwd"):
+            engine.open_session("ssh", name)
+        s = engine.sessions.sessions
+        assert (s["fw-a"].jump, s["fw-a"].port, s["fw-b"].jump, s["fw-b"].port) == ("me@bastion-a", 22, "me@bastion-b", 2022)
+        assert len({x.device for x in s.values()}) == 4               # nothing here is the same machine
+    finally:
+        await engine.stop()

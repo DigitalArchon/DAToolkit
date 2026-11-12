@@ -1959,7 +1959,8 @@ class Engine:
             if host.kind == "ssh":
                 sess = self.sessions.spawn(sid, ssh_argv(host), env, name=host.name, kind="ssh",
                                            target=target_label(host), shell="remote shell/CLI",
-                                           os_hint=host.os_hint, host_name=host.name, address=host.host)
+                                           os_hint=host.os_hint, host_name=host.name, address=host.host,
+                                           jump=host.jump, port=host.port or 22)
             else:
                 # checked again where the connection is made, so a config edited by hand sends nothing
                 found = winrm.problem(host)
@@ -1979,7 +1980,7 @@ class Engine:
                                            name=host.name, kind="winrm", target=target_label(host),
                                            shell="PowerShell (remoting, single-line)",
                                            os_hint=host.os_hint or "Windows", host_name=host.name,
-                                           address=host.host)
+                                           address=host.host, port=winrm.port(host))
         self.log("session_opened", **sess.roster())
         return sess.roster()
 
@@ -2107,7 +2108,7 @@ class Engine:
             params["cert-fingerprints"] = guac.fingerprint_param(cert["sha256"])
         sess = self.sessions.add(RdpSession(
             id=sid, name=host.name, params=params, target=f"{host.user + '@' if host.user else ''}{host.host}:{port}",
-            os_hint=host.os_hint or "Windows", host_name=host.name, address=host.host, cert=cert))
+            os_hint=host.os_hint or "Windows", host_name=host.name, address=host.host, port=port, cert=cert))
         self.log("session_opened", **sess.roster())
         return sess.roster()
 

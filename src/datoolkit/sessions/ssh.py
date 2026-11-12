@@ -56,10 +56,10 @@ def resolved_hostname(host: Host) -> str:
     return ""
 
 
-def jump_hosts(jump: str) -> set[str]:
-    """The addresses of a host's jump hosts ("me@bastion:2222,[fd00::1]:22"), lower-cased, as a
-    credential prompt of theirs would name them."""
-    out = set()
+def jump_route(jump: str) -> tuple[str, ...]:
+    """The addresses of a host's jump hosts in the order they are passed through
+    ("me@bastion:2222,[fd00::1]:22" -> bastion, fd00::1), lower-cased, without user or port."""
+    out = []
     for hop in jump.split(","):
         hop = hop.strip().removeprefix("ssh://").rsplit("@", 1)[-1]
         if hop.startswith("["):
@@ -67,8 +67,13 @@ def jump_hosts(jump: str) -> set[str]:
         elif hop.count(":") == 1:
             hop = hop.split(":", 1)[0]
         if hop:
-            out.add(hop.lower().rstrip("."))
-    return out
+            out.append(hop.lower().rstrip("."))
+    return tuple(out)
+
+
+def jump_hosts(jump: str) -> set[str]:
+    """The same as a set: each as a credential prompt of that jump host would name it."""
+    return set(jump_route(jump))
 
 
 @functools.lru_cache(maxsize=1)
