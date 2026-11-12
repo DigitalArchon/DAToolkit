@@ -774,6 +774,37 @@ KEY = ("Fake", "TEE/glm-5.3")
 TALK = [{"role": "user", "content": "VPN down"}, {"role": "assistant", "content": "Restarted it."}]
 
 
+async def test_an_attestation_that_doesnt_end_is_given_up_and_nothing_sent(env, monkeypatch):  # noqa: F811
+    """The client gives an attempt llm/tee.py's ATTEMPT_SECONDS; the engine waits one request's
+    timeout longer, and then says it was refused, whatever the attempt is doing."""
+    from datoolkit.llm import tee
+
+    monkeypatch.setattr(tee, "ATTEMPT_SECONDS", 0.05)
+    monkeypatch.setattr(tee, "TIMEOUT_SECONDS", 0.05)
+    engine, fake, _ = env
+    plain, state = switchable()
+    closed = []
+
+    def make(base, key, model):
+        client = plain(base, key, model)
+        client.close = lambda: closed.append(model)
+        return client
+    engine._tee_factory = make
+    engine.new_case("s", "open")
+    gate = state["gate"] = threading.Event()
+    try:
+        engine.select_model("Fake", "TEE/glm-5.3")
+        att = await settled(engine)
+        assert att["status"] == "failed" and "wasn't done within" in att["error"] and "given up" in att["error"]
+        assert KEY not in engine._tee and closed == ["TEE/glm-5.3"]
+        engine.conv = list(TALK)
+        with pytest.raises(UserError, match="nothing was sent"):
+            await engine.ticket_summary()
+        assert not fake.requests
+    finally:
+        gate.set()
+
+
 async def test_why_an_attestation_failed_is_said_short_on_one_line_with_nothing_hidden(env):  # noqa: F811
     """Whoever wrote it: it is shown in the top bar, logged, and handed to the chat model when a
     research run on the model fails."""

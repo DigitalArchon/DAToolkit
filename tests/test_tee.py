@@ -1883,3 +1883,89 @@ def test_an_answer_of_nvidias_that_cant_be_read_is_no_verdict():
               "submods": {"GPU-0": ["DIGEST", ["SHA-256", "ab"]]}}
     with pytest.raises(nras.NrasError, match=r"could not be read \(AttributeError\)"):
         nras.verify([["JWT", _token({"alg": "ES384"}, claims)], {"GPU-0": 5}], "00", session, now=1.0)
+
+
+# --- Intel's collateral is kept once it has been read ---------------------------------------
+
+
+def test_collateral_that_cant_be_read_is_not_kept_for_the_hour(real):
+    """A 200 that isn't Intel's (a proxy's page, a portal's) was cached as it came, and refused
+    every quote for an hour, however soon Intel's service answered again."""
+    def portal(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>Sign in to the network</html>")
+
+    quote = bytes.fromhex(real["intel_quote"])
+    with pytest.raises(dcap.DcapError, match="could not be read"):
+        dcap.verify(quote, httpx.Client(transport=httpx.MockTransport(portal)), now=at(real))
+    assert not dcap._cache
+    assert intel(real).status == "UpToDate"            # Intel's own, a moment later
+    kept = len(dcap._cache)
+    assert kept == 4                                   # the two CRLs, the TCB info, the QE identity
+
+    def none(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"fetched again: {request.url}")
+
+    again = dcap.verify(quote, httpx.Client(transport=httpx.MockTransport(none)), now=at(real))
+    assert again.status == "UpToDate" and len(dcap._cache) == kept
+
+
+def test_collateral_whose_signature_fails_is_not_kept_either(real):
+    for item in real["collateral"]:
+        if "tcb" in item["url"]:
+            item["body"] = base64.b64encode(
+                base64.b64decode(item["body"]).replace(b"UpToDate", b"UpToDatf", 1)).decode()
+    with pytest.raises(dcap.DcapError, match="signature"):
+        intel(real)
+    assert not dcap._cache
+
+
+# --- one attestation's time ------------------------------------------------------------------
+
+
+def test_an_attestation_no_address_answers_is_given_up_within_its_time(monkeypatch):
+    """The endpoints are asked for under three paths, for the gateway's report and then the model's
+    own, 90 seconds each: an address that never answered kept a model "attesting…" for nine
+    minutes. The whole attempt has ATTEMPT_SECONDS, and each request what is left of them."""
+    from datoolkit.llm import tee
+
+    clock = [1000.0]
+    monkeypatch.setattr(tee.time, "monotonic", lambda: clock[0])
+    waited: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        wait = request.extensions["timeout"]["read"]
+        waited.append(wait)
+        clock[0] += wait                                # no answer: the read timeout runs out
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = TeeClient("https://nano-gpt.com/custom/v1", "k", "TEE/x", client=httpx.Client(transport=httpx.MockTransport(handler)),
+                       intel=lambda raw, session: UP_TO_DATE, nvidia=lambda answer, nonce, session: 8)
+    with pytest.raises(TeeRefused, match="wasn't done within 3 minutes, and was given up"):
+        client.attest()
+    assert sum(waited) == tee.ATTEMPT_SECONDS == 180 and waited == [90.0, 90.0]
+    assert client._deadline is None
+    # a reply's check has its own time, as before
+    client.signers = frozenset({"0x00"})
+    waited.clear()
+    with pytest.raises(ProviderError, match="no signature for this reply"):
+        client.check("req_1")
+    assert waited == [5.0] * 3                          # the client's own timeout (httpx's default here), each path
+
+
+def test_intels_and_nvidias_checks_are_not_begun_once_the_time_has_passed(monkeypatch):
+    from datoolkit.llm import tee
+
+    clock = [1000.0]
+    monkeypatch.setattr(tee.time, "monotonic", lambda: clock[0])
+    asked: list = []
+
+    def slow_intel(raw, session):
+        asked.append("intel")
+        clock[0] += tee.ATTEMPT_SECONDS                 # Intel's service, a byte at a time
+        return UP_TO_DATE
+
+    client = TeeClient("https://nano-gpt.com/api/v1", "k", "TEE/x", client=tee_server(), intel=slow_intel,
+                       nvidia=lambda answer, nonce, session: asked.append("nvidia") or 8)
+    with pytest.raises(TeeRefused, match="wasn't done within 3 minutes"):
+        client.attest()
+    assert asked == ["intel"]

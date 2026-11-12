@@ -1088,17 +1088,25 @@ class Engine:
         """A TEE model's enclave, checked now with a fresh nonce. Raises TeeRefused when it
         doesn't hold; then nothing may be sent to it, under this attestation or the one before:
         that is dropped, so a refused Re-check, or a model chosen again and refused, isn't
-        followed by requests sent under the attestation it just refused (_tee_guard)."""
+        followed by requests sent under the attestation it just refused (_tee_guard).
+
+        The client gives the whole attempt llm/tee.py's ATTEMPT_SECONDS; one request's timeout
+        after that it is given up here whatever it is doing (Intel's or NVIDIA's service
+        answering a byte at a time), as a refusal: the top bar never says "attesting…" for longer."""
         self._secure(prov)
         key = self._provider_key(prov) or ""
         make = self._tee_factory or tee_mod.TeeClient
         client = make(prov.base_url, key, model)
+        limit = tee_mod.ATTEMPT_SECONDS + tee_mod.TIMEOUT_SECONDS
         try:
-            att = await asyncio.to_thread(client.attest)
+            att = await asyncio.wait_for(asyncio.to_thread(client.attest), limit)
         except BaseException as e:
             client.close()
             if not isinstance(e, asyncio.CancelledError):       # cancelled is no refusal
                 self._tee.pop((prov.name, model), None)
+            if isinstance(e, TimeoutError):
+                raise UserError(f"{model}'s attestation wasn't done within {limit / 60:g} minutes, and was given "
+                                "up; this may pass if tried again") from e
             raise
         self._tee[(prov.name, model)] = (client, since_boot(), att.to_dict())
         self._tee_doubted.discard((prov.name, model))
