@@ -2610,28 +2610,80 @@ class Engine:
         key = self._host_key(sid)
         d = private_dir(self._baseline_root() / key)
         path = d / f"{datetime.now():%Y%m%d-%H%M%S}.json"
+        # with the case's sensitivity and client, which decide where its lines may be compared and
+        # sent from (_baseline_origin): the host's name or address alone says neither
         data = {"host": key, "taken": datetime.now().isoformat(timespec="seconds"), "case": self.case.id,
+                "sensitivity": self.case.sensitivity, "client": self.case.client,
                 "sections": {k: {"command": c, "text": t} for k, (c, t) in items.items()}}
         path.write_bytes(utf8(json.dumps(data, ensure_ascii=False, indent=1)))
         self.log("baseline_saved", host=key, path=str(path), sections=sorted(items))
         return {"host": key, "path": str(path), "sections": sorted(items)}
 
+    def _baseline_origin(self, data: dict) -> dict:
+        """Whose a saved baseline is: {"case", "case_name", "client", "sensitivity"}. From the
+        case it names while that exists (its sensitivity may have been raised, its client changed,
+        since the baseline was saved), else from what was saved with it; "sensitivity" is None
+        when neither says (a baseline from before Nov 2026 whose case is gone)."""
+        case_id = str(data.get("case", "")) if isinstance(data, dict) else ""
+        case = self.case if self.case and self.case.id == case_id else None
+        if case is None and case_id:
+            try:
+                case = Case.load(case_id)
+            except (OSError, ValueError, KeyError):
+                case = None
+        if case is not None:
+            return {"case": case_id, "case_name": case.name, "client": case.client, "sensitivity": case.sensitivity}
+        stored = data.get("sensitivity") if isinstance(data, dict) else None
+        return {"case": case_id, "case_name": "", "client": str(data.get("client") or "") if isinstance(data, dict) else "",
+                "sensitivity": stored if stored in SENSITIVITIES else None}
+
+    def _baseline_refused(self, origin: dict) -> str:
+        """Why the open case may not compare against a baseline of this origin, or "" when it may.
+        Baselines are filed by host name or address across all cases, and a diff is made to be
+        sent to the case's model: lines captured in a case of higher sensitivity, or on another
+        client's machine at the same private address, don't belong in it. One whose origin nobody
+        knows is treated as the strictest."""
+        case = self._need_case()
+        of = f"the case {origin['case_name']}" if origin["case_name"] else "a case that no longer exists"
+        if origin["sensitivity"] is None:
+            if case.sensitivity != SENSITIVITIES[-1]:
+                return (f"This baseline doesn't say which case it came from or how sensitive that was (it was saved by an "
+                        f"earlier version, and its case is gone), so it can be compared only in a "
+                        f"{SENSITIVITIES[-1].capitalize()} case.")
+            return ""
+        if SENSITIVITIES.index(origin["sensitivity"]) > SENSITIVITIES.index(case.sensitivity):
+            return (f"This baseline was taken in {of}, which is {origin['sensitivity'].capitalize()}; this case is "
+                    f"{case.sensitivity.capitalize()}, so its lines can't be compared or sent from here.")
+        if origin["client"] and case.client and origin["client"] != case.client:
+            return (f"This baseline was taken in {of} for the client {origin['client']}; this case is for "
+                    f"{case.client}, so it isn't this client's machine to compare with.")
+        return ""
+
     def list_baselines(self, sid: str = "") -> list[dict]:
-        """Saved baselines, newest first: every host's, or only those of the session's host."""
+        """Saved baselines, newest first: every host's, or only those of the session's host. Each
+        with its origin (_baseline_origin) and, with a case open, why that case may not use it
+        ("refused", "" when it may)."""
         out = []
         root = self._baseline_root()
         dirs = [root / self._host_key(sid)] if sid else sorted(root.iterdir()) if root.is_dir() else []
-        names = {c["id"]: c["name"] for c in Case.list_all()}
+        origins: dict[str, dict] = {}         # one look at each case, however many baselines it has
         for d in dirs:
             for f in sorted(d.glob("*.json")) if d.is_dir() else []:
                 try:
                     data = json.loads(f.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
+                if not isinstance(data, dict):
+                    continue
                 case_id = str(data.get("case", ""))
-                out.append({"host": d.name, "taken": data.get("taken", f.stem), "path": str(f),
-                            "case": case_id, "case_name": names.get(case_id, ""),
-                            "sections": sorted(data.get("sections", {}))})
+                mark = (case_id, str(data.get("sensitivity")), str(data.get("client")))
+                if mark not in origins:
+                    origins[mark] = self._baseline_origin(data)
+                origin = origins[mark]
+                sections = data.get("sections")
+                out.append({"host": d.name, "taken": data.get("taken", f.stem), "path": str(f), **origin,
+                            "refused": self._baseline_refused(origin) if self.case else "",
+                            "sections": sorted(sections) if isinstance(sections, dict) else []})
         out.sort(key=lambda b: Path(b["path"]).name, reverse=True)
         return out
 
@@ -2655,17 +2707,43 @@ class Engine:
             raise UserError(f"Could not delete {path.name}.")
         self.log("baseline_deleted", host=path.parent.name, path=str(path))
 
+    def _read_baseline(self, path: Path) -> tuple[dict, dict, str]:
+        """(a saved baseline, its origin, why the open case may not use it or "")."""
+        try:
+            base = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise UserError(f"The baseline {path.name} can't be read: {e}") from e
+        if not isinstance(base, dict) or not isinstance(base.get("sections", {}), dict):
+            raise UserError(f"The baseline {path.name} is not in the form DA Toolkit saves.")
+        origin = self._baseline_origin(base)
+        return base, origin, self._baseline_refused(origin)
+
     def diff_baseline(self, sid: str, baseline_path: str = "") -> dict:
+        """What changed on a session's host since a saved baseline, as text to send to the AI.
+        Only against a baseline this case may use (_baseline_refused): the one chosen, or the
+        newest of the host's that it may."""
         self._need_case()
         key = self._host_key(sid)
         if baseline_path:
             path = self._baseline_file(baseline_path)
+            base, origin, refused = self._read_baseline(path)
+            if refused:
+                raise UserError(refused)
         else:
-            files = sorted((self._baseline_root() / key).glob("*.json"))
+            files = sorted((self._baseline_root() / key).glob("*.json"), reverse=True)
             if not files:
                 raise UserError(f"No saved baseline for {key}.")
-            path = files[-1]
-        base = json.loads(path.read_text(encoding="utf-8"))
+            why = ""
+            for path in files:
+                try:
+                    base, origin, refused = self._read_baseline(path)
+                except UserError as e:
+                    refused = str(e)
+                if not refused:
+                    break
+                why = why or refused
+            else:
+                raise UserError(f"No saved baseline for {key} that this case may use. The newest: {why}")
         current = self._baseline_items(sid)
         if not current:
             raise UserError("No ran baseline-recipe items for that session. Queue the Baseline snapshot recipe and run it first.")
@@ -2677,7 +2755,7 @@ class Engine:
         parts, changed, same, missing = [], [], [], []
         for k, (cmd, now) in current.items():
             old = base.get("sections", {}).get(k)
-            if old is None:
+            if not isinstance(old, dict):
                 missing.append(k)
                 continue
             was, now_shown = redact(str(old.get("text", "")))[0], redact(now)[0]
@@ -2702,7 +2780,8 @@ class Engine:
         redactions = len(re.findall(r"\[REDACTED(?: [A-Z ]+)?\]", body))
         self.log("baseline_diffed", host=key, baseline=str(path), changed=changed)
         return {"host": key, "baseline": str(path), "taken": base.get("taken"), "changed": changed, "same": same,
-                "missing": missing, "text": text, "redactions": redactions}
+                "missing": missing, "text": text, "redactions": redactions,
+                "case_name": origin["case_name"], "client": origin["client"], "sensitivity": origin["sensitivity"]}
 
     # ---------------------------------------------------------------- tool cache
 
@@ -3429,16 +3508,6 @@ class Engine:
         if turn["research"] > MAX_RESEARCH_PER_TURN:
             update(status="unavailable", error="research limit for this turn")
             return f"Limit of {MAX_RESEARCH_PER_TURN} research tasks per turn reached; work with what you have."
-        if task == "research" and not args.get("fresh"):
-            hit = self._research_cache().find(brief)
-            if hit:
-                update(status="cached", report=hit["report"], sources=hit.get("sources", []), model=hit.get("model", ""),
-                       cached_at=hit["ts"])
-                self.log("research", task=task, brief=brief, status="cached", model=hit.get("model", ""))
-                return (f"Cached research report from {datetime.fromtimestamp(hit['ts']):%Y-%m-%d} by {hit.get('model')}, "
-                        "kept on this machine from an earlier research on the same product, version and question. If it "
-                        "doesn't answer your question, or may be out of date, call research again with fresh: true.\n\n"
-                        + self._report_text(hit["report"]))
         try:
             prov, model, tier = await self._research_target()
         except UserError as e:
@@ -3477,6 +3546,20 @@ class Engine:
                     update(status="failed", error=problem)
                     return f"Can't fetch the page the technician gave: {problem}."
                 rec["edited"] = True
+        # A report kept from an earlier research on the same question is used instead of
+        # researching again, once the technician has approved the brief where they are asked:
+        # until Nov 2026 a hit came back before the question, and from any case's research.
+        if task == "research" and not args.get("fresh"):
+            hit = self._research_cache().find(brief, client=self.case.client, sensitivity=self.case.sensitivity)
+            if hit:
+                update(status="cached", brief=brief, report=hit["report"], sources=hit.get("sources", []),
+                       model=hit.get("model", ""), cached_at=hit["ts"])
+                self.log("research", task=task, brief=brief, status="cached", model=hit.get("model", ""))
+                return (f"Cached research report from {datetime.fromtimestamp(hit['ts']):%Y-%m-%d} by {hit.get('model')}, "
+                        "kept on this machine from an earlier research on the same product, version and question. If it "
+                        "doesn't answer your question, or may be out of date, call research again with fresh: true.\n\n"
+                        + self._report_text(hit["report"])
+                        + (" (The technician edited your request before it was looked up.)" if rec.get("edited") else ""))
         update(status="running", brief=brief if task == "research" else "", url=url if task == "page" else "")
         self.log("sent_to_ai", purpose="research", provider=prov.name, model=model, tier=tier, task=task)
         try:
@@ -3556,10 +3639,12 @@ class Engine:
         self.emit("research", research=dict(rec))
         self.log("research", task="research", brief=brief, model=model, status="done", searches=out.searches,
                  pages=out.pages, cost=rec["cost"], sources=out.sources, report=out.report, usage=out.usage, **marks)
-        # one whose replies weren't the attested enclave's isn't handed to later cases as a report
-        if out.sources and marks.get("tee_signature") != "failed":
+        # one whose replies weren't the attested enclave's isn't handed to later cases as a report;
+        # one that is kept goes only to cases of this client that are at least as sensitive (ReportCache)
+        if out.sources and marks.get("tee_signature") != "failed" and self.case:
             try:
-                self._research_cache().save(brief, out.report, out.sources, model)
+                self._research_cache().save(brief, out.report, out.sources, model, client=self.case.client,
+                                            sensitivity=self.case.sensitivity)
             except OSError as e:
                 self.emit("toast", level="error", text=f"Could not keep the research report for later cases: {e}")
         return (f"Research report from the research agent ({model}; {out.searches} search(es), {out.pages} page(s) "

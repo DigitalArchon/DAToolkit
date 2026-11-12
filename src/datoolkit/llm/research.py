@@ -517,12 +517,30 @@ def _numbers(words: set[str]) -> set[str]:
 
 class ReportCache:
     """Reports kept on this machine, so the next case about the same product, version and
-    question reuses one instead of researching again."""
+    question reuses one instead of researching again.
+
+    A brief is written from a case, and its report answers it ("For Acme Dental's XGS 126 …"), so
+    a report follows the rules its case did: it is kept with the case's client and sensitivity,
+    and offered only to a case of the same client (or to one without a client, when it came from
+    one without) that is at least as sensitive as the case it came from. An entry that says
+    neither (kept before Nov 2026, when the cache was one for all cases) is never offered."""
+
+    LEVELS = ("open", "confidential", "sovereign")      # case.SENSITIVITIES: the least sensitive first
 
     def __init__(self, root: Path):
         self.root = root
 
-    def find(self, brief: str, now: float | None = None) -> dict | None:
+    def _offered(self, rec: dict, client: str, sensitivity: str) -> bool:
+        """May a case of this client and sensitivity be given this entry?"""
+        if not isinstance(rec, dict) or not isinstance(rec.get("client"), str):
+            return False
+        if rec.get("sensitivity") not in self.LEVELS or sensitivity not in self.LEVELS:
+            return False
+        return rec["client"] == client and self.LEVELS.index(sensitivity) >= self.LEVELS.index(rec["sensitivity"])
+
+    def find(self, brief: str, *, client: str, sensitivity: str, now: float | None = None) -> dict | None:
+        """The best recent report for a brief like this one, of those a case of this `client`
+        ("" for none) and `sensitivity` may be given."""
         want = terms(brief)
         if not want or not self.root.is_dir():
             return None
@@ -532,6 +550,8 @@ class ReportCache:
             try:
                 rec = json.loads(f.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                continue
+            if not self._offered(rec, client, sensitivity):
                 continue
             if now - rec.get("ts", 0) > CACHE_DAYS * 86400:
                 continue
@@ -543,10 +563,15 @@ class ReportCache:
                 best, score = rec, s
         return best if score >= CACHE_OVERLAP else None
 
-    def save(self, brief: str, report: str, sources: list[str], model: str) -> None:
+    def save(self, brief: str, report: str, sources: list[str], model: str, *, client: str, sensitivity: str) -> None:
+        """Keep a report, with the client ("" for none) and sensitivity of the case it was made
+        for. One file per brief, client and sensitivity: one client's report never replaces
+        another's on the same question."""
         private_dir(self.root)
-        rec = {"ts": time.time(), "brief": brief, "report": report, "sources": sources, "model": model}
-        name = sha256(" ".join(sorted(terms(brief))).encode()).hexdigest()[:24] + ".json"
+        rec = {"ts": time.time(), "brief": brief, "report": report, "sources": sources, "model": model,
+               "client": client, "sensitivity": sensitivity}
+        key = "\n".join([" ".join(sorted(terms(brief))), client, sensitivity])
+        name = sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:24] + ".json"
         tmp = self.root / (name + ".tmp")
         tmp.write_text(json.dumps(rec, indent=1), encoding="ascii")      # any text at all, surrogates included
         tmp.replace(self.root / name)

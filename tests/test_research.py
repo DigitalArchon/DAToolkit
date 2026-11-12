@@ -241,13 +241,37 @@ async def test_agent_only_fetches_what_it_was_shown_and_reports_when_out_of_roun
 
 def test_report_cache_matches_similar_recent_briefs(tmp_path):
     cache = research.ReportCache(tmp_path / "research")
-    assert cache.find("anything") is None
-    cache.save("Sophos Firewall OS 21: configure DHCP relay on a VLAN interface", "## Answer\nX", [DOC], "m")
-    hit = cache.find("Sophos Firewall OS 21 - configure DHCP relay on VLAN interface")
+    whose = {"client": "", "sensitivity": "open"}
+    assert cache.find("anything", **whose) is None
+    cache.save("Sophos Firewall OS 21: configure DHCP relay on a VLAN interface", "## Answer\nX", [DOC], "m", **whose)
+    hit = cache.find("Sophos Firewall OS 21 - configure DHCP relay on VLAN interface", **whose)
     assert hit and hit["report"] == "## Answer\nX"
-    assert cache.find("Sophos Firewall OS 19: configure DHCP relay on a VLAN interface") is None   # another version
-    assert cache.find("Sophos Firewall OS 21: configure DHCP relay on a VLAN interface",
+    assert cache.find("Sophos Firewall OS 19: configure DHCP relay on a VLAN interface", **whose) is None   # another version
+    assert cache.find("Sophos Firewall OS 21: configure DHCP relay on a VLAN interface", **whose,
                       now=time.time() + (research.CACHE_DAYS + 1) * 86400) is None
+
+
+def test_a_cached_report_follows_its_cases_client_and_sensitivity(tmp_path):
+    cache = research.ReportCache(tmp_path / "research")
+    brief = "Sophos XGS 126 SFOS 21.0 site-to-site IPsec to Azure drops every 8 hours: how to fix the rekey"
+    cache.save(brief, "For Acme Dental's XGS 126 ...", [DOC], "m", client="Acme Dental", sensitivity="confidential")
+    assert cache.find(brief, client="Acme Dental", sensitivity="confidential")["report"].startswith("For Acme Dental")
+    assert cache.find(brief, client="Acme Dental", sensitivity="sovereign")           # a more sensitive case may
+    assert cache.find(brief, client="Acme Dental", sensitivity="open") is None        # a less sensitive one may not
+    assert cache.find(brief, client="Other Corp", sensitivity="sovereign") is None    # nor another client's
+    assert cache.find(brief, client="", sensitivity="sovereign") is None              # nor a case without a client
+    # the same question from a case without a client is kept beside it, not over it
+    cache.save(brief, "General answer", [DOC], "m", client="", sensitivity="open")
+    assert cache.find(brief, client="", sensitivity="open")["report"] == "General answer"
+    assert cache.find(brief, client="Acme Dental", sensitivity="confidential")["report"].startswith("For Acme Dental")
+    assert cache.find(brief, client="Other Corp", sensitivity="open") is None
+    # an entry from before reports were kept with their case's client and sensitivity is never offered
+    old = tmp_path / "research" / "old.json"
+    old.write_text(json.dumps({"ts": time.time(), "brief": "Cisco IOS 15.2 port security violation recovery",
+                               "report": "old", "sources": [DOC], "model": "m"}))
+    assert cache.find("Cisco IOS 15.2 port security violation recovery", client="", sensitivity="sovereign") is None
+    old.write_text("[1, 2]")                                                           # nor does a damaged one break the rest
+    assert cache.find(brief, client="", sensitivity="open")["report"] == "General answer"
 
 
 # ---------------------------------------------------------------- research through the engine

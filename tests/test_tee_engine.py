@@ -495,7 +495,7 @@ async def test_every_reply_of_a_tee_research_agent_is_checked_and_the_run_marked
     looked_up = sorted(str(r.url).rsplit("/", 1)[-1].split("?")[0] for r in seen if "/tee/signature/" in str(r.url))
     assert looked_up == sorted(streams)                        # each of the agent's replies, and only those
     assert _checks_logged(engine)[-1] | {"replies": 3} == _checks_logged(engine)[-1]
-    assert engine._research_cache().find(rec["brief"])          # kept for later cases
+    assert engine._research_cache().find(rec["brief"], client="", sensitivity="open")   # kept for later cases
 
 
 async def test_a_tee_research_run_with_a_reply_that_fails_is_marked_so_and_not_kept_for_later_cases(env):  # noqa: F811
@@ -510,7 +510,7 @@ async def test_a_tee_research_run_with_a_reply_that_fails_is_marked_so_and_not_k
     rec = engine.chat[-1]["research"][0]
     assert rec["status"] == "done" and rec["tee_signature"] == "failed"
     assert any("TEE/glm-5.3's research report didn't match" in t for t in _toasts(events))
-    assert not engine._research_cache().find(rec["brief"])
+    assert not engine._research_cache().find(rec["brief"], client="", sensitivity="sovereign")
     assert ("Fake", "TEE/glm-5.3") in engine._tee_doubted
 
 
