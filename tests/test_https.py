@@ -93,6 +93,23 @@ def test_what_is_not_a_web_address_at_all_is_refused():
     assert netguard.check(" https://api.example.com/v1 ") == "https://api.example.com/v1"
 
 
+def test_an_address_no_parser_can_read_is_nobodys_and_not_local():
+    """Half typed, or edited by hand in config.toml: asking for such a provider's tier or kind
+    raised ValueError ("Invalid IPv6 URL"), wherever the provider list is shown."""
+    from datoolkit.llm import websearch
+    from datoolkit.llm.client import detect_tier, is_local_url, local_http_options
+    from datoolkit.llm.providers import describe, is_official_anthropic, kind_of
+
+    for url in ("http://[::1", "https://[fd00::5", "https://[not-an-address]/v1"):
+        assert netguard.problem(url) is not None, url                    # refused, with the reason
+        assert is_local_url(url) is False, url
+        assert detect_tier("llama3", url) == "standard", url             # never the Local tier
+        assert kind_of(url) == "openai-compatible" and kind_of(url, "anthropic") == "anthropic-compatible", url
+        assert describe(url)["kind"] == "openai-compatible" and not is_official_anthropic(url), url
+        assert websearch.is_nanogpt(url) is False and local_http_options(url) == {}, url
+    assert is_local_url("http://[::1]:11434/v1") and kind_of("http://[::1]:11434/v1") == "local"
+
+
 def engine_with(tmp_path, *providers):
     engine = Engine(Config(providers=list(providers)), lambda e: None, tmp_path / "rt", save_config=lambda c: None)
     for p in providers:

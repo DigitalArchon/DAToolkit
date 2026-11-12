@@ -55,7 +55,13 @@ def is_local_url(base_url: str) -> bool:
     MANUAL.md, Model tiers."""
     if base_url.startswith("training://"):
         return True  # scripted training provider: nothing leaves the machine
-    host = (urlparse(base_url).hostname or "").lower()
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except ValueError:
+        # "http://[::1", half typed or edited by hand in config.toml: not an address at all, so
+        # not a local one. It raised here, wherever a provider's tier or kind was asked for;
+        # netguard refuses the address itself, with the reason, before anything is sent to it.
+        return False
     if host in ("localhost", ""):
         return True
     if host.endswith((".local", ".lan")):

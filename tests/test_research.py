@@ -655,3 +655,41 @@ async def test_a_scrape_that_says_false_in_a_string_did_not_succeed():
     pages = (await research.scrape(NANO, "sk-test", [DOC, DOC + "?b"], http=http))["pages"]
     assert [p["success"] for p in pages] == [False, True]
     assert research.looks_blocked(pages[0]) and not research.looks_blocked(pages[1])
+
+
+def test_a_site_no_address_can_be_read_from_is_left_out():
+    """`[docs.sophos.com]` is a bad IPv6 address to a URL parser, which raises on it."""
+    assert websearch.clean_sites(["[docs.sophos.com]"]) == []
+    assert websearch.clean_sites(["[docs.sophos.com]", "http://[::1", "https://[fd00::5/x", {"a": "//x"}, None, 3,
+                                  ["docs.sophos.com"], "help.mikrotik.com", "https://docs.sophos.com/nsg/"]) == [
+        "help.mikrotik.com", "docs.sophos.com"]
+
+
+async def test_one_malformed_site_does_not_lose_the_research_task():
+    """The agent's third request named a site in brackets: research.run raised, and a search and
+    a page already paid for went with it."""
+    replies = [
+        TurnResult(tool_calls=[ToolCall("c1", "web_search", json.dumps({"query": "sophos xg 19.5 ipsec"}))]),
+        TurnResult(tool_calls=[ToolCall("c2", "fetch_pages", json.dumps({"urls": [DOC]}))]),
+        TurnResult(tool_calls=[ToolCall("c3", "web_search", json.dumps({
+            "query": "sophos ipsec nat-t", "sites": ["[docs.sophos.com]", "docs.sophos.com"]}))]),
+        TurnResult(content="## Answer\nSet NAT traversal under VPN > IPsec [1]."),
+    ]
+    searched = []
+
+    async def complete(messages, tools, tool_choice=None):
+        return replies.pop(0)
+
+    async def search(q, use="answer", **narrow):
+        searched.append((q, narrow["sites"]))
+        return {"results": [{"title": "Docs", "url": DOC, "snippet": "IPsec", "date": ""}], "provider": "p", "cost": 0.01}
+
+    async def fetch(urls):
+        return {"pages": [{"url": u, "ok": True, "title": "t", "markdown": DOC_TEXT, "stealth": False, "error": ""}
+                          for u in urls], "cost": 0.02}
+
+    out = await research.run("Sophos XG 19.5: IPsec NAT-T steps", complete=complete, search=search, fetch=fetch,
+                             step=lambda s: None)
+    assert out.report.startswith("## Answer") and out.searches == 2 and out.pages == 1
+    assert searched == [("sophos xg 19.5 ipsec", []), ("sophos ipsec nat-t", ["docs.sophos.com"])]
+    assert out.cost == pytest.approx(0.04)
