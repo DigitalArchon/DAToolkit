@@ -1444,6 +1444,9 @@ function ensureTerm(sess) {
     cursorBlink: true,
     allowProposedApi: true,
     theme: { background: "#0b0d10", foreground: "#d8dee6", selectionBackground: "#2f6fc080" },
+    // a link the session's output sets (OSC 8) opens by the page's rules, not xterm's own
+    // confirm() and window.open(); xterm offers only http(s) ones here
+    linkHandler: { activate: (ev, uri) => openTerminalLink(uri) },
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
@@ -1458,9 +1461,18 @@ function ensureTerm(sess) {
     // Returning false only stops xterm; preventDefault also stops the browser's own
     // Ctrl+Shift+V paste, which xterm would otherwise paste a second time.
     if (e.code === "KeyC") { e.preventDefault(); if (term.hasSelection()) clipWrite(term.getSelection()).catch(showError); return false; }
-    if (e.code === "KeyV") { e.preventDefault(); clipRead().then((txt) => txt && term.paste(txt)).catch(() => toast("Clipboard not available", "error")); return false; }
+    if (e.code === "KeyV") { e.preventDefault(); clipRead().then((txt) => termPaste(t, txt)).catch(() => toast("Clipboard not available", "error")); return false; }
     return true;
   });
+  // every other way a paste arrives (the browser's own paste, Shift+Insert, the middle button):
+  // taken here, before xterm's handlers, so it goes through termPaste too
+  host.addEventListener("paste", (e) => {
+    const text = e.clipboardData?.getData?.("text/plain");
+    if (typeof text !== "string") return;
+    e.preventDefault();
+    e.stopPropagation();
+    termPaste(t, text);
+  }, true);
   S.terms[sess.id] = t;
   connectTerm(t);
   return t;
@@ -1503,6 +1515,44 @@ function closeTerm(t) {
   t.ws?.close();
   t.term.dispose();
   t.host.remove();
+}
+
+// What the clipboard holds is pasted as text. Control characters in it would act in the terminal
+// instead: an escape sequence can end the bracketed paste, so that what follows runs as if typed,
+// line by line. They are taken out (line breaks and tabs stay), as the server takes them out of a
+// queued command (safety/hidden.py), and a toast says so. (Until Nov 2026 the clipboard went to
+// the session as it was.)
+function termPaste(t, text) {
+  const raw = String(text ?? "").replace(/\r\n?/g, "\n");
+  const clean = raw.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+  if (clean.length !== raw.length) {
+    const n = raw.length - clean.length;
+    toast(`${n} control character${n === 1 ? " was" : "s were"} left out of what you pasted into ${t.id}: they would have acted in the terminal instead of being text.`, "info", 8000);
+  }
+  if (clean) t.term.paste(clean);
+}
+
+// A link in a terminal is the session's to write: an OSC 8 hyperlink puts any text over any
+// address. It opens as a link in the chat does (http or https only, outside the app, and one that
+// isn't secure asks first with its warning), and, its address being hidden behind the text, it
+// always asks first, naming the address in full. (Until Nov 2026 xterm.js's own handler asked with
+// the browser's confirm() and opened a window itself.)
+function openTerminalLink(uri) {
+  let url = null;
+  try { url = new URL(String(uri ?? "").trim()); } catch { /* not an address */ }
+  if (!url || !/^https?:$/.test(url.protocol)) return toast("That link isn't an http or https address, so it wasn't opened.", "error");
+  if (insecureLink(url.href)) return confirmInsecure(url.href).then((yes) => { if (yes) openConfirmed(url.href); });
+  return new Promise((resolve) => {
+    let open = false;
+    const { box } = modal({
+      title: "Open this link from the terminal?",
+      body: h("div", {}, h("div", { class: "insecure-address" }, url.href),
+        h("p", {}, "The session's output made this link. Its text in the terminal can say anything; this is the address it opens, in your browser.")),
+      buttons: [{ label: "Cancel" }, { label: "Open", kind: "primary", onClick: () => { open = true; } }],
+      onClose: () => { if (open) openConfirmed(url.href); resolve(open); },
+    });
+    setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
+  });
 }
 
 function termSend(t, msg) {
