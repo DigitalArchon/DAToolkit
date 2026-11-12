@@ -136,6 +136,36 @@ def test_escape_sequences_split_across_reads_stay_out_of_the_transcript(tmp_path
     assert (tmp_path / "x.log").read_text() == written
 
 
+def test_output_of_nothing_but_string_introducers_doesnt_hold_the_app_up(tmp_path):
+    """A program (or a remote host) printing ESC ] over and over: finding the string still open
+    took time growing with the square of the read, 24 s of a busy event loop per megabyte, with
+    every terminal, websocket and the companion waiting."""
+    import random
+    import re
+    import time
+
+    from datoolkit.sessions.manager import _open_string
+
+    w = TranscriptWriter()
+    w.open(tmp_path / "flood.log")
+    started = time.perf_counter()
+    for _ in range(4):                                   # a 64 KB read each, as the PTY hands them over
+        w.write(b"\x1b]" * 32000 + b"\x07x")
+    w.write(b"\x1bP" * 32000)
+    w.write(b"\x1b]0;" + b"t" * 60000)
+    took = time.perf_counter() - started
+    w.close()
+    assert took < 2, f"{took:.1f} s"                     # it was 10 s and more for the first of these
+    assert (tmp_path / "flood.log").read_text().count("x") == 4
+    # and it finds what the pattern found
+    pattern = re.compile(r"\x1b[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*+\Z")
+    rng = random.Random(11)
+    for _ in range(3000):
+        text = "".join(rng.choice(["\x1b", "]", "P", "\\", "\x07", "a", "[", "\n"]) for _ in range(rng.randrange(0, 14)))
+        found = pattern.search(text)
+        assert _open_string(text) == (found.start() if found else -1), repr(text)
+
+
 async def test_a_viewer_that_falls_behind_has_output_skipped_not_kept(tmp_path):
     from datoolkit.sessions.manager import OutputQueue
     q = OutputQueue(limit=100)

@@ -67,8 +67,19 @@ _ANSI = re.compile(
     # unnoticed, and the title text landed in the transcript
     r"|\x1b[0-OQ-WYZ\\`-~]"
 )
-# an OSC, DCS, SOS, PM or APC string not yet ended by BEL or ESC \ (its end in the next read)
-_OPEN_STRING = re.compile(r"\x1b[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*+\Z")
+# what starts an OSC, DCS, SOS, PM or APC string
+_INTRODUCER = re.compile(r"\x1b[\]PX^_]")
+
+
+def _open_string(text: str) -> int:
+    """Where a string (OSC, DCS, SOS, PM or APC) begins that BEL or ESC \\ has not ended yet, its
+    end being in the next read; -1 when there is none. That is the first introducer after the
+    last terminator, found in one pass. Until Nov 2026 a pattern looked for it, which tried
+    every introducer in turn to the end of the text: output of nothing but ESC ] kept the whole
+    app busy for 24 seconds per megabyte."""
+    ended = max(text.rfind("\x07"), text.rfind("\x1b\\")) + 1
+    found = _INTRODUCER.search(text, ended)
+    return found.start() if found else -1
 
 
 class TranscriptWriter:
@@ -92,11 +103,11 @@ class TranscriptWriter:
         text = self._pending + self._decoder.decode(data)
         # hold back an escape sequence split across reads: a string (window titles run long)
         # until its end arrives, up to 4 KB; any other up to 64 characters
-        open_string = _OPEN_STRING.search(text)
+        open_string = _open_string(text)
         esc = text.rfind("\x1b")
-        if open_string and len(text) - open_string.start() < 4096:
-            text, self._pending = text[:open_string.start()], text[open_string.start():]
-        elif not open_string and esc != -1 and len(text) - esc < 64 and not _ANSI.match(text, esc):
+        if open_string != -1 and len(text) - open_string < 4096:
+            text, self._pending = text[:open_string], text[open_string:]
+        elif open_string == -1 and esc != -1 and len(text) - esc < 64 and not _ANSI.match(text, esc):
             text, self._pending = text[:esc], text[esc:]
         else:
             self._pending = ""
