@@ -183,39 +183,73 @@ MODIFYING: list[tuple[re.Pattern, str]] = [
 # Commands that cut the connection you are issuing them over. Keyed by session kind.
 # (These are the classic self-inflicted outages of remote work.)
 _SSH_CUTS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bsystemctl\s+(\S+\s+)*(stop|restart|disable|mask|kill)\s+(\S+\s+)*(ssh|sshd|openssh-server|networking|NetworkManager|systemd-networkd|network|wicked|netbird|tailscaled|wg-quick@\S+)\b"), "stops or restarts the SSH/network service you are connected through"),
+    (re.compile(r"\bsystemctl\s+(\S+\s+)*(stop|restart|try-restart|disable|mask|kill)\s+(\S+\s+)*(ssh|sshd|openssh-server|networking|NetworkManager|network-manager|systemd-networkd|network|wicked|netbird|tailscaled|wg-quick@\S+)\b"), "stops or restarts the SSH/network service you are connected through"),
+    # the targets and sleep states that end every login, by systemctl's own verbs
+    (re.compile(r"\bsystemctl\s+(\S+\s+)*(isolate|rescue|emergency|suspend|hibernate|hybrid-sleep|suspend-then-hibernate|kexec|soft-reboot)\b"),
+     "leaves the state this login runs in (rescue, sleep or a restart)"),
     (re.compile(r"\bservice\s+(ssh|sshd|networking|network|NetworkManager)\s+(stop|restart)\b"), "stops or restarts the SSH/network service you are connected through"),
     (re.compile(r"\b(pkill|killall)\s+(-\S+\s+)*(sshd?|ssh-agent)\b"), "kills sshd"),
-    (re.compile(r"\bip\s+link\s+set\s+(dev\s+)?\S+\s+down\b"), "brings an interface down"),
+    # ip takes options before the object and any unambiguous start of a word: `ip l s eth0 down`,
+    # `ip -4 a f dev eth0`, `ip r d default` (link's `s` is set, as iproute2 reads it)
+    (re.compile(r"\bip\s+(?:-\S+\s+)*l(?:i(?:nk?)?)?\s+s(?:et?)?\s+(?:dev\s+)?\S+\s+(?:[^\s;&|]+\s+)*down\b"), "brings an interface down"),
+    (re.compile(r"\bip\s+(?:-\S+\s+)*l(?:i(?:nk?)?)?\s+d(?:el(?:ete)?)?\s"), "removes an interface"),
+    (re.compile(r"\bnetplan\s+(?:--\S+\s+)*(apply|try)\b"), "reapplies the network configuration (a mistake in it takes the host off the network)"),
+    (re.compile(r"\brfkill\s+block\s+(all|wifi|wlan)\b|\bnmcli\s+radio\s+(all|wifi|wwan)\s+off\b"), "turns the radio off"),
     (re.compile(r"\b(ifdown|nmcli\s+(dev|device|con|connection)\s+down|nmcli\s+(dev|device)\s+disconnect|ifconfig\s+\S+\s+down)\b"),
      "brings an interface down"),
     (re.compile(r"\bnmcli\s+networking\s+off\b"), "turns networking off"),
     (re.compile(r"\broute\s+(del|delete)\s+(default|0\.0\.0\.0)\b"), "removes the default route"),
     (re.compile(r"\b(dhclient|dhcpcd)\s+(-\S+\s+)*-[rxk]\b"), "releases the DHCP lease"),
-    (re.compile(r"\bip\s+(addr|address|route)\s+(flush|del|delete)\b"), "removes addresses or routes"),
-    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-P\s+INPUT\s+DROP\b"), "default-drops inbound traffic"),
+    (re.compile(r"\bip\s+(?:-\S+\s+)*(?:a(?:d(?:d(?:r(?:e(?:ss?)?)?)?)?)?|r(?:o(?:u(?:te?)?)?)?)\s+(?:f(?:l(?:u(?:sh?)?)?)?|d(?:e(?:l(?:e(?:te?)?)?)?)?)\b"),
+     "removes addresses or routes"),
+    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*(-P|--policy)\s+INPUT\s+DROP\b"), "default-drops inbound traffic"),
+    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*(-D|--delete)\s+INPUT\b"), "deletes an inbound rule, possibly the one that lets SSH in"),
     (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-[AI]\s+INPUT\b(?!.*--dport\s+(?!22\b))(?=.*-j\s+(DROP|REJECT))"), "drops inbound traffic, possibly including SSH"),
-    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*-F\b"), "flushes the firewall (default policy may drop SSH)"),
-    (re.compile(r"\bnft\s+(flush|delete)\s+(ruleset|table)\b"), "flushes the firewall"),
-    (re.compile(r"\bufw\s+(enable|reset|deny\s+(22|ssh)\b|default\s+deny\s+incoming)"), "may block SSH"),
-    (re.compile(r"\bfirewall-cmd\b.*--remove-service=ssh\b"), "removes the SSH firewall allowance"),
+    (re.compile(r"\b(iptables|ip6tables)\s+(\S+\s+)*(-F|--flush)\b"), "flushes the firewall (default policy may drop SSH)"),
+    (re.compile(r"\bnft\s+(-\S+\s+)*(flush|delete)\s+(ruleset|table|chain)\b"), "flushes the firewall"),
+    (re.compile(r"\bufw\s+(--\S+\s+)*(enable|reset|(delete\s+(allow|limit)|deny|reject)\s+(\S+\s+)*(22|ssh|OpenSSH)\b|default\s+(deny|reject)\s+incoming)"),
+     "may block SSH"),
+    (re.compile(r"\bfirewall-cmd\b.*--remove-(service=ssh|port=22/tcp)\b"), "removes the SSH firewall allowance"),
+    (re.compile(r"\bfirewall-cmd\b.*--panic-on\b"), "drops all traffic (panic mode)"),
     (re.compile(r"\bsed\s+(-\S+\s+)*-i\b.*\bsshd_config\b"), "edits sshd_config in place (a bad edit locks you out on restart)"),
+    # the keys that let you in and the server's configuration, removed, moved away or written over
+    (re.compile(r"\b(rm|mv|shred|unlink|truncate)\s[^;&|\n]*(authorized_keys|sshd_config)\b"
+                r"|(?<![0-9&>=-])>{1,2}\s*[^\s;&|]*(authorized_keys|sshd_config)\b|\btee\s[^;&|\n]*(authorized_keys|sshd_config)\b"),
+     "removes or rewrites the SSH keys or configuration that let you in"),
+    (re.compile(r"\b(pkill|killall)\s+(-\S+\s+)*-u\s*(\$USER|\$LOGNAME|\$\(whoami\)|\$\(id -un\))|\bkill\s+(-\S+\s+)*(\$PPID|\$\$)(?!\w)"),
+     "kills your own login's processes, this shell among them"),
     (re.compile(r"\b(usermod\s+-L|passwd\s+-l|chage\s+-E\s*0)\b.*\b(root|\$USER)\b"), "locks the account you may be using"),
     (re.compile(r"\b(shutdown|reboot|poweroff|halt|init\s+[06]|telinit\s+[06])\b"), "reboots or halts the host"),
     (re.compile(r"\b(wg-quick\s+down|tailscale\s+down|openvpn\b.*--rmtun|ipsec\s+(stop|down))\b"), "tears down the VPN this session may traverse"),
 ]
 _WINRM_CUTS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\b(Stop|Restart)-Service\b.*\bWinRM\b", _I), "stops or restarts WinRM, which carries this session"),
+    # the service named before the cmdlet too (`Get-Service WinRM | Restart-Service`), by alias, or
+    # stopped through Set-Service
+    (re.compile(r"\b(Stop-Service|Restart-Service|spsv)\b.*\bWinRM\b|\bWinRM\b[^;\n]*\|\s*(Stop-Service|Restart-Service|spsv)\b"
+                r"|\bSet-Service\b[^|;\n]*\bWinRM\b[^|;\n]*\b(Stopped|Disabled)\b", _I), "stops or restarts WinRM, which carries this session"),
+    (re.compile(r"\b(Stop-Process|spps|kill|taskkill(\.exe)?)\b.*\bwsmprovhost\b", _I), "kills the WinRM host process this session runs in"),
+    (re.compile(r"\bSet-Item\b.*\bWSMan:|\bwinrm(\.cmd)?\s+set\b", _I), "changes the WinRM configuration this session depends on"),
+    (re.compile(r"\bSet-NetConnectionProfile\b.*-NetworkCategory\s+Public\b", _I),
+     "makes the network Public, where the firewall keeps WinRM out by default"),
     (re.compile(r"\b(Disable|Restart)-NetAdapter\b", _I), "disables or restarts a network adapter"),
     (re.compile(r"\b(Disable-PSRemoting|winrm\s+delete|Remove-Item\b.*\bWSMan:)", _I), "disables PowerShell remoting"),
-    (re.compile(r"\bSet-NetFirewallProfile\b.*-DefaultInboundAction\s+Block", _I), "blocks inbound traffic by default"),
-    (re.compile(r"\b(Disable-NetFirewallRule|Remove-NetFirewallRule)\b.*\b(WinRM|WINRM|5985|5986)\b", _I), "removes the WinRM firewall rule"),
+    (re.compile(r"\bSet-NetFirewallProfile\b.*-DefaultInboundAction\s+Block|\bnetsh(\.exe)?\s+advfirewall\b.*\bblockinbound", _I),
+     "blocks inbound traffic by default"),
+    (re.compile(r"\b(Disable-NetFirewallRule|Remove-NetFirewallRule)\b.*(\bWinRM\b|Windows Remote Management|\b5985\b|\b5986\b)"
+                r"|\bnetsh(\.exe)?\s+advfirewall\b.*(Windows Remote Management|winrm).*\b(enable=no|delete)\b", _I), "removes the WinRM firewall rule"),
+    (re.compile(r"\b(Disable-NetFirewallRule|Remove-NetFirewallRule)\s+(-\w+\s+\S+\s+)*-All\b", _I), "disables or removes every firewall rule"),
     (re.compile(r"\bNew-NetFirewallRule\b.*-Direction\s+Inbound\b.*-Action\s+Block", _I), "adds an inbound block rule"),
-    (re.compile(r"\b(Remove-NetIPAddress|Remove-NetRoute|Set-NetIPInterface\b.*-Dhcp\s+Disabled)", _I), "changes the addressing this session depends on"),
-    (re.compile(r"\b(Restart-Computer|Stop-Computer|shutdown\s+/[rs])\b", _I), "reboots or halts the host"),
+    (re.compile(r"\b(Remove-NetIPAddress|Remove-NetRoute|New-NetIPAddress|Set-NetIPAddress|Set-NetIPInterface\b.*-Dhcp\s+Disabled)"
+                r"|\bnetsh(\.exe)?\s+(interface|int)\s+(ip|ipv4|ipv6)\s+set\s+address\b", _I), "changes the addressing this session depends on"),
+    # shutdown's switches with a slash or a dash (/r, -r, /s, /h, /g, /p, /sg, /fw, /o), not /a (abort) nor /l (log off)
+    (re.compile(r"\b(Restart-Computer|Stop-Computer)\b|\bshutdown(\.exe)?\s+(?:[/-]\S+\s+)*[/-](?:r|s|h|g|p|sg|fw|o)\b", _I), "reboots or halts the host"),
+    (re.compile(r"\bwmic(\.exe)?\b.*\bos\b.*\bcall\s+(reboot|shutdown|win32shutdown)\b"
+                r"|\bWin32_OperatingSystem\b.*\b(Reboot|Shutdown|Win32Shutdown)\b", _I), "reboots or halts the host"),
+    # a cmdlet told to restart the host when it is done (Rename-Computer, Add-Computer, Install-WindowsFeature...)
+    (re.compile(r"\b[A-Za-z]+-[A-Za-z0-9]+\b[^|;\n]*\s-(Restart|AutoReboot|ForceReboot)\b(?!:\s*\$false)", _I), "restarts the host when it has finished"),
     (re.compile(r"\bipconfig\s+/release\b", _I), "releases the DHCP lease"),
     (re.compile(r"\bnetsh\s+(interface|int)\b.*\b(disable|disabled)\b", _I), "disables an interface"),
-    (re.compile(r"\bnet\s+stop\s+winrm\b", _I), "stops WinRM"),
+    (re.compile(r"\bnet1?(\.exe)?\s+stop\s+winrm\b", _I), "stops WinRM"),
     (re.compile(r"\bsc(\.exe)?\s+stop\s+winrm\b", _I), "stops WinRM"),
 ]
 _NETDEV_CUTS: list[tuple[re.Pattern, str]] = [

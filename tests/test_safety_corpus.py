@@ -114,6 +114,61 @@ def test_looking_at_vty_settings_cuts_nothing(command):
     assert session_impact(command, "ssh") is None
 
 
+@pytest.mark.parametrize("command", [
+    # the network reapplied or an interface taken down, in the short forms iproute2 reads
+    "netplan apply", "sudo netplan try", "ip l set eth0 down", "ip l s eth0 down", "ip link set dev eth0 mtu 1400 down",
+    "ip -4 a flush dev eth0", "ip a f dev eth0", "ip r del default", "ip r d default", "ip route flush table main", "ip link del wg0",
+    "rfkill block all", "nmcli radio wifi off", "systemctl restart network-manager", "systemctl stop sshd.socket",
+    "systemctl isolate rescue.target", "systemctl suspend",
+    # the firewall, with long options and options before the verb
+    "ufw --force enable", "ufw --force reset", "ufw delete allow ssh", "ufw deny 22/tcp", "iptables --flush", "iptables -t nat --flush",
+    "iptables --policy INPUT DROP", "iptables -D INPUT 1", "nft -a flush ruleset", "firewall-cmd --panic-on",
+    "firewall-cmd --permanent --remove-port=22/tcp",
+    # the keys and the configuration that let you in
+    "rm ~/.ssh/authorized_keys", "> ~/.ssh/authorized_keys", "mv /etc/ssh/sshd_config /tmp", "echo 'AllowUsers nobody' >> /etc/ssh/sshd_config",
+    "echo x | sudo tee /etc/ssh/sshd_config", "pkill -u $USER", "kill -9 $PPID", "kill -9 $$",
+])
+def test_more_ways_to_cut_an_ssh_session(command):
+    assert session_impact(command, "ssh")
+
+
+@pytest.mark.parametrize("command", [
+    "Get-Service WinRM | Restart-Service", "Get-Service -Name WinRM | Stop-Service -Force", "spsv winrm", "net.exe stop winrm",
+    "Set-Service WinRM -StartupType Disabled -Status Stopped", "Stop-Process -Name wsmprovhost -Force",
+    "shutdown -r -t 0", "shutdown.exe /s /f /t 0", "shutdown /f /r", "Rename-Computer x -Restart", "Add-Computer -DomainName x -Restart",
+    "Install-WindowsUpdate -AcceptAll -AutoReboot", "wmic os where primary=true call reboot", "(Get-WmiObject Win32_OperatingSystem).Reboot()",
+    "Invoke-CimMethod -ClassName Win32_OperatingSystem -MethodName Reboot",
+    "Remove-NetFirewallRule -DisplayGroup 'Windows Remote Management'", "Disable-NetFirewallRule -All",
+    'netsh advfirewall firewall set rule group="Windows Remote Management" new enable=no',
+    "netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound", "Set-NetConnectionProfile -NetworkCategory Public",
+    "Set-Item WSMan:\\localhost\\Service\\AllowRemoteAccess $false", "New-NetIPAddress -InterfaceAlias Ethernet -IPAddress 10.9.9.9 -PrefixLength 24",
+    "netsh interface ip set address Ethernet static 10.9.9.9 255.255.255.0",
+])
+def test_more_ways_to_cut_a_winrm_session(command):
+    assert session_impact(command, "winrm")
+
+
+@pytest.mark.parametrize("command,kind", [
+    ("ip link show", "ssh"), ("ip -br a", "ssh"), ("ip r", "ssh"), ("ip route get 1.1.1.1", "ssh"), ("ufw status verbose", "ssh"),
+    ("iptables -S INPUT", "ssh"), ("nft list ruleset", "ssh"), ("cat ~/.ssh/authorized_keys", "ssh"), ("netplan get", "ssh"),
+    ("grep PermitRootLogin /etc/ssh/sshd_config", "ssh"), ("systemctl status sshd", "ssh"), ("rfkill list", "ssh"), ("kill -9 1234", "ssh"),
+    ("shutdown /a", "winrm"), ("Get-Service WinRM", "winrm"), ("Get-Service WinRM | Format-List", "winrm"),
+    ("Install-WindowsFeature Web-Server -Restart:$false", "winrm"), ("Get-NetFirewallRule -DisplayGroup 'Windows Remote Management'", "winrm"),
+    ("Get-NetConnectionProfile", "winrm"), ("Get-Item WSMan:\\localhost\\Service\\AllowRemoteAccess", "winrm"), ("Get-NetIPAddress", "winrm"),
+    ("Disable-NetFirewallRule -All", "local"),
+])
+def test_these_cut_nothing(command, kind):
+    assert session_impact(command, kind) is None
+
+
+def test_a_desktop_session_is_cut_by_the_host_restarting_too():
+    # the rules about the host and its network hold for a remote desktop and a support tool's window; WinRM's own don't
+    for kind in ("rdp", "window"):
+        assert session_impact("shutdown -r -t 0", kind) and session_impact("Rename-Computer x -Restart", kind)
+        assert session_impact("Disable-NetFirewallRule -All", kind)
+        assert session_impact("Get-Service WinRM | Restart-Service", kind) is None
+
+
 FFPROBE_AWK = (
     'ffprobe -v error -select_streams v:0 -show_entries frame_tags=pts_time -show_entries packet=pts_time,size '
     '-of csv "/mnt/nas/TV Series/House/Season 2/House (2004) - S02E01 - Acceptance (1080p BluRay x265 Panda).mkv" '
