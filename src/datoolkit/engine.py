@@ -3246,11 +3246,16 @@ class Engine:
         return {"mode": mode, "why": "", "provider": provider, "private": private, "via": prov.name, "research": True,
                 **fallback}
 
-    def _chat_tools(self) -> tuple[list[dict], dict]:
-        """The chat model's tools, and what its request needs for them (Anthropic's own search)."""
+    def _chat_tools(self, native_used: int = 0) -> tuple[list[dict], dict]:
+        """The chat model's tools, and what its request needs for them (Anthropic's own search).
+        `native_used`: the searches Anthropic has run for this turn already. Its cap (`max_uses`)
+        holds for one request, and a turn makes up to MAX_TOOL_ROUNDS of them: each request is
+        given what is left of the turn's allowance, and none the search tool once that is spent.
+        Until Nov 2026 every request of a turn could search MAX_SEARCHES_PER_TURN times, unasked."""
         st = self.search_status()
         if st.get("native"):
-            return prompts.tools(search=False, research=st["research"]), {"native_search": MAX_SEARCHES_PER_TURN}
+            left = max(0, MAX_SEARCHES_PER_TURN - native_used)
+            return prompts.tools(search=False, research=st["research"]), ({"native_search": left} if left else {})
         return prompts.tools(search=st["mode"] != "off"), {}
 
     async def _run_search(self, query: str, use: str = "answer", sites: list[str] | None = None,
@@ -4088,7 +4093,7 @@ class Engine:
                 static, state = self._prompt_parts()
                 messages, extra = self._chat_request(static, state, await self._conv_for_model(vision), ttl, prov)
                 system = messages[0]["content"]
-                tools, tool_extra = self._chat_tools()
+                tools, tool_extra = self._chat_tools(turn.get("native_searches", 0))
                 extra = {**extra, **tool_extra}
                 start = self._req_conv_len if self._req_conv_len <= len(self.conv) else 0   # 0: context was trimmed
                 sent = self.conv[start:] + (messages[-1:] if messages[-1].get("_state") else [])
@@ -4127,6 +4132,8 @@ class Engine:
                     # check). Until Nov 2026 such a reply was left out, and the turn showed the
                     # mark of its other replies, or the TEE badge with no mark at all.
                     replies.append(self._reply_record(result, tee))
+                # the searches Anthropic ran for this request count against the turn's allowance (_chat_tools)
+                turn["native_searches"] = turn.get("native_searches", 0) + len(getattr(result, "searches", None) or [])
                 # Words only was for the round just answered. Until Nov 2026 it stayed set for the
                 # rest of the turn, so the round that asks the model to queue the commands it
                 # promised (PROMISE_NUDGE) went out with tool_choice "none".

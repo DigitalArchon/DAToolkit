@@ -229,6 +229,35 @@ async def test_native_search_runs_on_anthropics_side_and_is_shown(aenv):
     assert stored[1]["content"][0]["encrypted_content"] == "ENC"
 
 
+def _searched(n: int, first: int) -> list[dict]:
+    """The blocks of `n` searches Anthropic ran, numbered from `first`."""
+    return [b for i in range(first, first + n) for b in (
+        {"type": "server_tool_use", "id": f"srvtoolu_{i}", "name": "web_search", "input": {"query": f"query {i}"}},
+        {"type": "web_search_tool_result", "tool_use_id": f"srvtoolu_{i}", "content": []})]
+
+
+async def test_native_searches_are_capped_for_the_turn_not_for_each_request(aenv):
+    """max_uses holds for one request, and a turn makes several: each was allowed four searches, up
+    to 24 unasked in one turn."""
+    engine, fake = aenv
+    engine.cfg.settings.search_engine = "native"
+    await start(engine)
+    again = {"type": "tool_use", "id": "toolu_x", "name": "propose_commands", "input": {"items": "df -h"}}   # refused: asked again
+    fake.replies += [_sse(_searched(3, 1) + [{"type": "text", "text": "Looking."}, again]),
+                     _sse(_searched(1, 4) + [{"type": "text", "text": "Still looking."}, {**again, "id": "toolu_y"}]),
+                     _sse([{"type": "text", "text": "25.1 changed the firewall UI."}])]
+    engine.send("what changed in opnsense 25.1?")
+    await wait_turn(engine)
+    allowed = [next((t["max_uses"] for t in r["tools"] if t.get("name") == "web_search"), None) for r in fake.requests]
+    assert allowed == [4, 1, None]                       # what is left of the turn's four, then no search tool at all
+    assert len(engine.chat[-1]["searches"]) == 4
+    # the next turn has its own allowance
+    fake.replies.append(_sse([{"type": "text", "text": "Yes."}]))
+    engine.send("sure?")
+    await wait_turn(engine)
+    assert {"type": "web_search_20260209", "name": "web_search", "max_uses": 4} in fake.requests[-1]["tools"]
+
+
 async def test_native_search_is_never_used_for_a_confidential_case(aenv):
     engine, fake = aenv
     engine.cfg.settings.search_engine = "native"
