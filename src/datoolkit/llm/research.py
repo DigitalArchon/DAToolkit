@@ -100,7 +100,8 @@ async def scrape(base_url: str, api_key: str, urls: list[str], stealth: bool = F
     pages = []
     for item in (payload.get("results") or []) if isinstance(payload, dict) else []:
         if isinstance(item, dict):
-            pages.append({"url": str(item.get("url") or ""), "success": bool(item.get("success")),
+            # only a JSON true is a success: bool() of the string "false" is True
+            pages.append({"url": str(item.get("url") or ""), "success": item.get("success") is True,
                           "title": str(item.get("title") or ""), "markdown": str(item.get("markdown") or ""),
                           "error": str(item.get("error") or "")})
     summary = payload.get("summary") if isinstance(payload, dict) else None
@@ -466,7 +467,12 @@ async def _fetch(args: dict, out: Outcome, budget: Budget, allowed: Allowlist, f
 
 
 def parse_check(text: str) -> dict:
-    """The page checker's JSON reply; a reply that can't be read counts as not clean."""
+    """The page checker's JSON reply; a reply that can't be read counts as not clean.
+
+    Only a JSON `true` is clean. Until Nov 2026 the verdict was taken by its truth value, so
+    `"clean": "false"` or "no", a string, passed for clean. The passages likewise: a single
+    passage given as a string is that passage (it was read letter by letter, and none removed),
+    and passages given as anything else but a list leave the page not clean."""
     m = re.search(r"\{.*\}", text or "", re.S)
     try:
         data = json.loads(m.group(0)) if m else None
@@ -474,9 +480,13 @@ def parse_check(text: str) -> dict:
         data = None
     if not isinstance(data, dict):
         return {"clean": False, "summary": "", "passages": [], "unreadable": True}
-    passages = [p for p in data.get("passages") or [] if isinstance(p, str) and p.strip()]
-    return {"clean": bool(data.get("clean")) and not passages, "summary": str(data.get("summary") or "")[:300],
-            "passages": passages[:50]}
+    listed = data.get("passages")
+    if isinstance(listed, str):
+        listed = [listed]
+    readable = listed is None or isinstance(listed, list)
+    passages = [p for p in listed or [] if isinstance(p, str) and p.strip()] if readable else []
+    return {"clean": data.get("clean") is True and readable and not passages,
+            "summary": str(data.get("summary") or "")[:300], "passages": passages[:50]}
 
 
 def strip_passages(text: str, passages: list[str]) -> tuple[str, int]:
