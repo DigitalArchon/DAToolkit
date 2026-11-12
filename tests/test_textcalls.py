@@ -111,13 +111,17 @@ def test_no_message_makes_the_reading_slow():
         assert time.perf_counter() - started < 0.25, text[:40]
 
 
+def _written_call(sid: str) -> str:
+    return ("Checking the link.\n<tool_call>\n<function=propose_commands>\n<parameter=items>\n"
+            + json.dumps([{"session_id": sid, "command": "ethtool eth0", "purpose": "speed", "risk": "read_only"}])
+            + "\n</parameter>\n</function>\n</tool_call>")
+
+
 async def test_engine_queues_a_call_written_as_text(env):  # noqa: F811
     engine, fake, _ = env
     sid = setup(engine)
-    body = ("Checking the link.\n<tool_call>\n<function=propose_commands>\n<parameter=items>\n"
-            + json.dumps([{"session_id": sid, "command": "ethtool eth0", "purpose": "speed", "risk": "read_only"}])
-            + "\n</parameter>\n</function>\n</tool_call>")
-    fake.responses.append(sse(({"role": "assistant", "content": body}, "stop")))
+    engine.select_model("Fake", "qwen/qwen-3.8-27b")       # a model seen to write its calls as text
+    fake.responses.append(sse(({"role": "assistant", "content": _written_call(sid)}, "stop")))
     engine.send("go")
     await wait_turn(engine)
     entry = engine.chat[-1]
@@ -140,6 +144,20 @@ async def test_engine_takes_no_call_from_markup_a_reply_quotes(env):  # noqa: F8
     entry = engine.chat[-1]
     assert entry["text"] == body and not entry.get("searches") and not entry["proposals"]
     assert len(fake.requests) == 1 and "text_tool_calls" not in (engine.case.dir / "events.jsonl").read_text()
+
+
+async def test_markup_a_claude_model_quotes_stays_text_and_makes_no_call(env):  # noqa: F811
+    # Claude makes its calls as calls: tool-call markup in its message is something it quotes (from
+    # a page, a log, the technician's own question), which was run as a call and cut from the message
+    engine, fake, _ = env
+    sid = setup(engine)                                     # anthropic/claude-opus-5.5
+    body = _written_call(sid)
+    fake.responses.append(sse(({"role": "assistant", "content": body}, "stop")))
+    engine.send("what does this markup in the log mean?")
+    await wait_turn(engine)
+    entry = engine.chat[-1]
+    assert entry["text"] == body and entry["proposals"] == [] and engine.queue.items == []
+    assert "text_tool_calls" not in (engine.case.dir / "events.jsonl").read_text()
 
 
 def _chunk(*tool_deltas, content=None):
