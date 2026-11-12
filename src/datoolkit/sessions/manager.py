@@ -26,6 +26,7 @@ from .ptyproc import PtyProcess
 from .ssh import jump_route
 
 BACKLOG_BYTES = 512 * 1024
+CLOSING_READS = 16                       # reads of 64 KB taken from a PTY whose program has exited
 VIEWER_BEHIND_BYTES = 8 * 1024 * 1024    # output a viewer may fall behind by before it is skipped
 
 
@@ -99,7 +100,11 @@ class TranscriptWriter:
         self._close_files()
         if path is not None:
             self._file = path.open("a", encoding="utf-8")
-            self._times = path.with_suffix(path.suffix + ".times").open("a", encoding="utf-8")
+            try:
+                self._times = path.with_suffix(path.suffix + ".times").open("a", encoding="utf-8")
+            except OSError:
+                self._close_files()
+                raise
 
     def write(self, data: bytes) -> None:
         if self._file is None:
@@ -139,17 +144,28 @@ class TranscriptWriter:
             self._decoder.reset()
             if _INTRODUCER.match(held):
                 held = held[2:]
-            if not _CUT_SEQUENCE.fullmatch(held):
-                self._put(held)
+            try:
+                if not _CUT_SEQUENCE.fullmatch(held):
+                    self._put(held)
+            except OSError:              # a full disk: the session still closes
+                pass
+        self._close_files()
+
+    def give_up(self) -> None:
+        """The file can't be written: nothing more is tried for it."""
+        self._pending = ""
         self._close_files()
 
     def _close_files(self) -> None:
-        if self._file:
-            self._file.close()
-            self._file = None
-        if self._times:
-            self._times.close()
-            self._times = None
+        """Never raises: closing a file writes what it still holds, which a full disk refuses
+        again, and a session must close all the same."""
+        for f in (self._file, self._times):
+            if f:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+        self._file = self._times = None
 
 
 @dataclass
@@ -168,6 +184,8 @@ class Session:
     pending: bytearray = field(default_factory=bytearray)   # input the PTY hasn't taken yet
     subscribers: set = field(default_factory=set)
     transcript: TranscriptWriter = field(default_factory=TranscriptWriter)
+    transcript_error: str = ""      # why the transcript was switched off (it couldn't be written)
+    child_fd: int = -1              # a pidfd of the program: readable once it has exited
     used_stored_password: bool = False
     address: str = ""          # host address used for automatic device linking,
     jump: str = ""             # with the jump hosts it is reached through (Host.jump)
@@ -278,6 +296,7 @@ class SessionManager:
         self._transcript_dir: Callable[[str], Path | None] = lambda sid: None
         self._devices = 0
         self._tasks: set[asyncio.Task] = set()     # reaping and terminating, off the event loop
+        self._reserved: set[str] = set()           # ids of sessions still opening (see reserve)
 
     def set_transcript_paths(self, path_for: Callable[[str], Path | None]) -> None:
         self._transcript_dir = path_for
@@ -285,36 +304,87 @@ class SessionManager:
             # not one that has exited: it writes nothing more, and its file would be made in the
             # new case's folder, empty, and kept open for as long as its tab stays
             if isinstance(s, Session) and not s.exited:
-                s.transcript.open(path_for(s.id))
+                self._open_transcript(s)
 
     def unique_id(self, base: str) -> str:
         base = re.sub(r"[^a-z0-9-]+", "-", base.lower()).strip("-") or "session"
-        if base not in self.sessions:
+        taken = self.sessions.keys() | self._reserved
+        if base not in taken:
             return base
         n = 2
-        while f"{base}-{n}" in self.sessions:
+        while f"{base}-{n}" in taken:
             n += 1
         return f"{base}-{n}"
 
+    def reserve(self, base: str) -> str:
+        """An id for a session that has things to wait for before it can be registered (a
+        certificate to read, a question to the technician), kept out of unique_id's answers
+        until then. Without this, two opens of one host waiting side by side were given the same
+        id and the second replaced the first; and a session registered under the id meanwhile
+        was replaced, its program still running and logged in, with no tab to close it from.
+        The caller registers the session (spawn, add) or gives the id back (release)."""
+        sid = self.unique_id(base)
+        self._reserved.add(sid)
+        return sid
+
+    def release(self, sid: str) -> None:
+        self._reserved.discard(sid)
+
+    def _register(self, sess) -> None:
+        if sess.id in self.sessions:         # never in place of another: that one would be orphaned
+            raise ValueError(f"session id {sess.id!r} is already in use")
+        self._auto_link(sess)
+        self.sessions[sess.id] = sess
+        self._reserved.discard(sess.id)
+
     def spawn(self, sid: str, argv: list[str], env: dict[str, str], **meta) -> Session:
+        if sid in self.sessions:
+            raise ValueError(f"session id {sid!r} is already in use")
         full_env = host_env(TERM="xterm-256color", COLORTERM="truecolor", **env)
         proc = PtyProcess.spawn(argv, env=full_env, cwd=os.path.expanduser("~"), dimensions=(30, 100))
-        # Never block the event loop on the PTY: a paste the program isn't reading waits in
-        # `pending` (see write) instead of stalling every session, the GUI and the companion.
-        os.set_blocking(proc.fd, False)
-        sess = Session(id=sid, proc=proc, **meta)
-        sess.transcript.open(self._transcript_dir(sid))
-        self._auto_link(sess)
-        self.sessions[sid] = sess
-        asyncio.get_running_loop().add_reader(proc.fd, self._on_readable, sess)
+        try:
+            # Never block the event loop on the PTY: a paste the program isn't reading waits in
+            # `pending` (see write) instead of stalling every session, the GUI and the companion.
+            os.set_blocking(proc.fd, False)
+            sess = Session(id=sid, proc=proc, **meta)
+            self._open_transcript(sess)
+            self._register(sess)
+            asyncio.get_running_loop().add_reader(proc.fd, self._on_readable, sess)
+        except BaseException:
+            # the program is running already: not left behind, logged in, with no session to it
+            self.sessions.pop(sid, None)
+            proc.terminate()
+            raise
+        self._watch_child(sess)
         self._on_change()
         return sess
 
     def add(self, sess: RdpSession | WindowSession) -> RdpSession | WindowSession:
-        self._auto_link(sess)
-        self.sessions[sess.id] = sess
+        self._register(sess)
         self._on_change()
         return sess
+
+    # ---------------------------------------------------------------- transcripts
+
+    def _open_transcript(self, sess: Session) -> None:
+        try:
+            sess.transcript.open(self._transcript_dir(sess.id))
+            sess.transcript_error = ""
+        except OSError as e:
+            self._transcript_off(sess, e)
+
+    def _transcript_off(self, sess: Session, why: OSError) -> None:
+        """The transcript can't be opened or written (a full disk, usually). The terminal must
+        go on working: it may be the shell that frees the space. So the transcript is switched
+        off for this session, and the technician is told once, in the terminal itself. Until Nov
+        2026 the error stopped the output on its way to every viewer, and closing the session
+        raised it again."""
+        sess.transcript.give_up()
+        sess.transcript_error = why.strerror or str(why)
+        self._show(sess, (f"\r\n\x1b[0;33m[DA Toolkit can't write this session's transcript ({sess.transcript_error}): "
+                          "it is switched off for this session. The terminal works as before; output from here on is "
+                          "not in the case's transcript, so copy what the AI should see from the terminal.]"
+                          "\x1b[0m\r\n").encode())
 
     # ---------------------------------------------------------------- device links
 
@@ -370,18 +440,62 @@ class SessionManager:
         self._publish(sess, data)
 
     def _publish(self, sess: Session, data: bytes) -> None:
+        self._show(sess, data)
+        try:
+            sess.transcript.write(data)
+        except OSError as e:
+            self._transcript_off(sess, e)
+
+    def _show(self, sess: Session, data: bytes) -> None:
+        """To the terminal's viewers and its backlog, which need no file."""
         sess.backlog.extend(data)
         if len(sess.backlog) > BACKLOG_BYTES:
             del sess.backlog[: len(sess.backlog) - BACKLOG_BYTES]
-        sess.transcript.write(data)
         for q in list(sess.subscribers):
             q.put_nowait(data)
 
+    def _watch_child(self, sess: Session) -> None:
+        """Have the session end when its program exits, not only when the PTY reports EOF: EOF
+        comes when the last process holding the terminal has gone, and a background job the
+        shell left (`sleep 600 &`, then `exit`) holds it. The session stayed "open" until the
+        job finished, and Run typed into a terminal nobody read. A pidfd becomes readable when
+        the program has exited; a kernel without them (before 5.3) leaves EOF as the only sign."""
+        try:
+            sess.child_fd = os.pidfd_open(sess.proc.pid)
+        except (AttributeError, OSError):
+            return
+        asyncio.get_running_loop().add_reader(sess.child_fd, self._on_child_exit, sess)
+
+    def _unwatch_child(self, sess: Session) -> None:
+        if sess.child_fd >= 0:
+            try:
+                asyncio.get_running_loop().remove_reader(sess.child_fd)
+            except RuntimeError:         # no event loop any more
+                pass
+            os.close(sess.child_fd)
+            sess.child_fd = -1
+
+    def _on_child_exit(self, sess: Session) -> None:
+        self._unwatch_child(sess)
+        if sess.exited:
+            return
+        for _ in range(CLOSING_READS):       # what it printed last is still in the PTY
+            try:
+                data = os.read(sess.proc.fd, 65536)
+            except OSError:                  # nothing more to read, or the PTY has gone too
+                break
+            if not data:
+                break
+            self._publish(sess, data)
+        self._mark_exited(sess)
+
     def _mark_exited(self, sess: Session) -> None:
-        """The PTY reported EOF. The child is reaped on a worker thread (it may take a moment
-        to go), and the closing line is written once its exit status is known."""
+        """The PTY reported EOF, or the program exited. The child is reaped on a worker thread
+        (it may take a moment to go), and the closing line is written once its exit status is
+        known."""
         loop = asyncio.get_running_loop()
         loop.remove_reader(sess.proc.fd)
+        self._unwatch_child(sess)
         self._drop_pending(sess)
         sess.exited = True
         sess.proc.close()
@@ -464,6 +578,7 @@ class SessionManager:
                 sess.relay.cancel()
             self._on_change()
             return
+        self._unwatch_child(sess)
         if not sess.exited:
             try:
                 asyncio.get_running_loop().remove_reader(sess.proc.fd)

@@ -1995,13 +1995,18 @@ class Engine:
         if found:
             raise UserError(found)
         if winrm.pins(host):
-            sid = self.sessions.unique_id(host.name)
+            # the id the question below is asked under is kept for this session while it waits
+            # (SessionManager.reserve) and given back just before open_session takes it again
+            sid = self.sessions.reserve(host.name)
             port = winrm.port(host)
             try:
-                cert = await rdpcert.fetch_tls(host.host, port)
-            except rdpcert.CertError as e:
-                raise UserError(str(e)) from e
-            await self._trust_cert(sid, host.host, port, cert, "winrm")
+                try:
+                    cert = await rdpcert.fetch_tls(host.host, port)
+                except rdpcert.CertError as e:
+                    raise UserError(str(e)) from e
+                await self._trust_cert(sid, host.host, port, cert, "winrm")
+            finally:
+                self.sessions.release(sid)
         return self.open_session("winrm", host_name, _cert_checked=True)
 
     # ---------------------------------------------------------------- RDP
@@ -2074,7 +2079,16 @@ class Engine:
     async def _open_rdp(self, host) -> dict:
         if host.rdp_security == "nla-ext":     # saved by an earlier version, which offered it
             raise UserError(f"{host.name} is set to Extended NLA. {_NLA_EXT} Edit the host under Settings → Hosts.")
-        sid = self.sessions.unique_id(host.name)
+        # The id is this session's from here on (SessionManager.reserve): reading the certificate
+        # and the questions below can take minutes, and until Nov 2026 a second open of the host,
+        # or another session meanwhile, got the same id and one replaced the other.
+        sid = self.sessions.reserve(host.name)
+        try:
+            return await self._open_rdp_as(sid, host)
+        finally:
+            self.sessions.release(sid)
+
+    async def _open_rdp_as(self, sid: str, host) -> dict:
         port = host.port or 3389
         try:
             cert = await rdpcert.fetch(host.host, port, host.user.split("\\")[-1].split("@")[0])

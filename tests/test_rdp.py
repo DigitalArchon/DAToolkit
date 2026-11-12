@@ -318,6 +318,64 @@ async def test_legacy_rdp_asks_every_time_and_guacd_missing(rdp_env, monkeypatch
     assert err.value.commands == ["sudo apt install guacd"]
 
 
+async def _prompts(engine, n, secs=5.0):
+    for _ in range(int(secs * 100)):
+        if len(engine._prompts) >= n:
+            return list(engine._prompts)
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"fewer than {n} prompts are up")
+
+
+async def test_two_opens_of_one_rdp_host_are_two_sessions(rdp_env, monkeypatch):
+    """Open clicked twice, both waiting at the password prompt: both were given the id `dc03`,
+    and the second to finish replaced the first."""
+    engine = rdp_env[0]
+    engine.cfg.hosts.append(Host("dc03", "rdp", "10.250.0.3", user="bob", auth="password"))
+
+    async def fetch(host, port=3389, user=""):
+        await asyncio.sleep(0.02)                         # the probe of the server's certificate
+        return dict(GOOD_CERT)
+    monkeypatch.setattr(rdpcert, "fetch", fetch)
+    engine.pins.pin("10.250.0.3", 3389, GOOD_CERT)
+    first, second = asyncio.create_task(engine.open_rdp("dc03")), asyncio.create_task(engine.open_rdp("dc03"))
+    for pid in await _prompts(engine, 2):
+        engine.answer_prompt(pid, "pw-" + engine._prompts[pid][1]["session_id"])
+    a, b = await first, await second
+    assert {a["id"], b["id"]} == {"dc03", "dc03-2"} and set(engine.sessions.sessions) == {"dc03", "dc03-2"}
+    assert {sid: engine.rdp_params(sid)["password"] for sid in ("dc03", "dc03-2")} == {"dc03": "pw-dc03", "dc03-2": "pw-dc03-2"}
+    assert not engine.sessions._reserved
+
+
+async def test_a_session_opened_while_an_rdp_host_waits_doesnt_get_its_id(rdp_env, monkeypatch):
+    """An RDP open at its password prompt, and a terminal session taking the same id meanwhile:
+    the RDP session then replaced it, and its program ran on, logged in, with no tab."""
+    engine = rdp_env[0]
+    engine.cfg.hosts.append(Host("gw", "rdp", "10.250.0.4", user="bob", auth="password"))
+
+    async def fetch(host, port=3389, user=""):
+        return dict(GOOD_CERT)
+    monkeypatch.setattr(rdpcert, "fetch", fetch)
+    engine.pins.pin("10.250.0.4", 3389, GOOD_CERT)
+    opener = asyncio.create_task(engine.open_rdp("gw"))
+    (pid,) = await _prompts(engine, 1)
+    pty = engine.sessions.spawn(engine.sessions.unique_id("GW"), ["/bin/cat"], {}, name="GW", kind="ssh")
+    assert pty.id == "gw-2"
+    engine.answer_prompt(pid, "pw")
+    assert (await opener)["id"] == "gw"
+    assert engine.sessions.sessions["gw-2"] is pty and isinstance(engine.sessions.sessions["gw"], RdpSession)
+    # an open that comes to nothing gives its id back
+    opener = asyncio.create_task(engine.open_rdp("gw"))
+    (pid,) = await _prompts(engine, 1)
+    assert engine.sessions._reserved == {"gw-3"}
+    engine.answer_prompt(pid, None)
+    with pytest.raises(UserError, match="No password given"):
+        await opener
+    assert not engine.sessions._reserved and engine.sessions.unique_id("gw") == "gw-3"
+    engine.sessions.close_all()
+    await engine.sessions.wait_closed()
+    assert pty.proc.popen.poll() is not None
+
+
 async def test_a_pinned_host_that_stops_offering_tls_is_refused(rdp_env, tmp_path):
     engine, events, _ = rdp_env
     server, port = await fake_rdp_server("legacy")

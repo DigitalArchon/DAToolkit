@@ -184,6 +184,138 @@ async def test_a_session_that_has_exited_gets_no_transcript_in_the_next_case(tmp
         await mgr.wait_closed()
 
 
+async def _until(cond, secs: float = 5.0) -> bool:
+    for _ in range(int(secs * 50)):
+        if cond():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_a_session_ends_when_its_shell_exits_though_a_background_job_holds_the_terminal(tmp_path):
+    """Found live: after `sleep 20 &` and `exit` the session stayed "open" until the job
+    finished, since the PTY reports EOF only when nothing holds it any more."""
+    changes = []
+    mgr = SessionManager(on_change=lambda: changes.append(1))
+    mgr.set_transcript_paths(lambda sid: tmp_path / f"{sid}.log")
+    sess = mgr.spawn("sh1", ["/bin/bash", "--norc", "--noprofile", "-i"], {"PS1": "$ "}, name="sh1", kind="local")
+    _, q = mgr.subscribe("sh1")
+    try:
+        assert sess.child_fd >= 0
+        mgr.write("sh1", b"sleep 30 & echo job=$!\n")
+        assert await _until(lambda: b"job=" in sess.backlog and b"\n" in bytes(sess.backlog).split(b"job=")[-1])
+        job = int(bytes(sess.backlog).split(b"job=")[-1].split()[0])
+        mgr.write("sh1", b"echo last words; exit 7\n")
+        assert await _until(lambda: sess.exited, 3), "the session is still open, with its shell gone"
+        assert await _until(lambda: sess.exit_status == 7 and sess.transcript._file is None)
+        assert os.path.exists(f"/proc/{job}")                    # the job itself is left alone
+        assert sess.child_fd == -1 and sess.proc.fd == -1
+        log = (tmp_path / "sh1.log").read_text()
+        assert "last words" in log and "[session ended, exit status 7]" in log   # what it printed last isn't lost
+        mgr.write("sh1", b"typed at nobody\n")                   # ignored, as for any ended session
+        mgr.close("sh1")
+        while await asyncio.wait_for(q.get(), 2) is not None:      # to the end of the session: None
+            pass
+    finally:
+        mgr.close_all()
+        await mgr.wait_closed()
+        try:
+            os.kill(job, 9)
+        except (NameError, ProcessLookupError):
+            pass
+
+
+async def test_a_transcript_that_cant_be_written_is_switched_off_and_the_terminal_goes_on(tmp_path):
+    """A full disk: the error stopped output on its way to every viewer, of the very shell that
+    could free the space, and closing the session raised it again."""
+    mgr = SessionManager(on_change=lambda: None)
+    mgr.set_transcript_paths(lambda sid: tmp_path / f"{sid}.log")
+    sess = mgr.spawn("full", ["/bin/cat"], {}, name="full", kind="local")
+    _, q = mgr.subscribe("full")
+    errors = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: errors.append(ctx))
+    try:
+        sess.transcript._file.close()
+        sess.transcript._file = open("/dev/full", "a", encoding="utf-8")      # every write: no space left on device
+        seen = b""
+        for word in (b"one", b"two", b"three"):
+            mgr.write("full", word + b"\n")
+            while seen.count(word) < 2:                                       # the echo and cat's own line
+                seen += await asyncio.wait_for(q.get(), 3)
+        assert seen.count(b"can't write this session's transcript (No space left on device)") == 1   # told once
+        assert sess.transcript_error == "No space left on device" and sess.transcript._file is None
+        assert b"three" in sess.backlog and not errors
+        mgr.close("full")                                                     # and it closes
+        assert "full" not in mgr.sessions
+        while await asyncio.wait_for(q.get(), 2) is not None:      # to the end of the session: None
+            pass
+    finally:
+        mgr.close_all()
+        await mgr.wait_closed()
+
+
+async def test_a_session_starts_without_a_transcript_that_cant_be_opened(tmp_path):
+    mgr = SessionManager(on_change=lambda: None)
+    mgr.set_transcript_paths(lambda sid: tmp_path / "no such folder" / f"{sid}.log")
+    sess = mgr.spawn("t", ["/bin/cat"], {}, name="t", kind="local")
+    try:
+        assert "t" in mgr.sessions and sess.proc.popen.poll() is None
+        assert b"can't write this session's transcript (No such file or directory)" in sess.backlog
+        mgr.write("t", b"still works\n")
+        assert await _until(lambda: sess.backlog.count(b"still works") == 2)
+        # the next case's folder can be written: the transcript is back
+        mgr.set_transcript_paths(lambda sid: tmp_path / f"{sid}.log")
+        mgr.write("t", b"kept again\n")
+        assert await _until(lambda: "kept again" in (tmp_path / "t.log").read_text())
+        assert sess.transcript_error == ""
+    finally:
+        mgr.close_all()
+        await mgr.wait_closed()
+
+
+async def test_a_program_isnt_left_running_when_its_session_cant_be_registered(tmp_path, monkeypatch):
+    from datoolkit.sessions import manager as manager_mod
+    from datoolkit.sessions.ptyproc import PtyProcess
+
+    started = []
+    real = PtyProcess.spawn
+    monkeypatch.setattr(manager_mod.PtyProcess, "spawn",
+                        classmethod(lambda cls, *a, **k: started.append(real(*a, **k)) or started[-1]))
+    mgr = SessionManager(on_change=lambda: None)
+
+    def unusable(sid):
+        raise RuntimeError("the case's folder can't be worked out")
+    mgr.set_transcript_paths(unusable)
+    with pytest.raises(RuntimeError):
+        mgr.spawn("lost", ["/bin/cat"], {}, name="lost", kind="local")
+    assert "lost" not in mgr.sessions and started[0].popen.poll() is not None and started[0].fd == -1
+    # and a session is never registered in another's place
+    mgr.set_transcript_paths(lambda sid: None)
+    first = mgr.spawn("same", ["/bin/cat"], {}, name="same", kind="local")
+    try:
+        with pytest.raises(ValueError, match="already in use"):
+            mgr.spawn("same", ["/bin/cat"], {}, name="same", kind="local")
+        assert mgr.sessions["same"] is first and len(started) == 2      # refused before anything was started
+    finally:
+        mgr.close_all()
+        await mgr.wait_closed()
+
+
+def test_an_id_held_for_a_session_still_opening_is_nobody_elses():
+    from datoolkit.sessions.manager import RdpSession
+
+    mgr = SessionManager(on_change=lambda: None)
+    a, b = mgr.reserve("DC 01"), mgr.reserve("dc-01")
+    assert (a, b, mgr.unique_id("dc-01")) == ("dc-01", "dc-01-2", "dc-01-3")
+    mgr.release(b)
+    assert mgr.unique_id("dc-01") == "dc-01-2"
+    mgr.add(RdpSession(id=a, name="dc01", params={}))
+    mgr.release(a)                                          # registered: giving it back changes nothing
+    assert mgr.unique_id("dc-01") == "dc-01-2" and not mgr._reserved
+    with pytest.raises(ValueError, match="already in use"):
+        mgr.add(RdpSession(id=a, name="dc01", params={}))
+
+
 def test_output_of_nothing_but_string_introducers_doesnt_hold_the_app_up(tmp_path):
     """A program (or a remote host) printing ESC ] over and over: finding the string still open
     took time growing with the square of the read, 24 s of a busy event loop per megabyte, with

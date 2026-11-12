@@ -117,6 +117,36 @@ async def test_pinned_host_never_opens_unchecked(env):  # noqa: F811
         engine.open_session("winrm", "win10")
 
 
+async def test_a_winrm_session_keeps_the_id_its_certificate_was_asked_about_under(env, tmp_path, monkeypatch):  # noqa: F811
+    engine, _, events = env
+    engine.new_case("c", "open")
+    c1, k1, fp1 = _self_signed(tmp_path, "win12")
+    server, port = await tls_server(c1, k1)
+    engine.cfg.hosts.append(Host("win12", "winrm", "127.0.0.1", port=port, user="admin", auth="ntlm",
+                                 winrm_cert_validation=False))
+    spawn = engine.sessions.spawn
+    monkeypatch.setattr(engine.sessions, "spawn", lambda sid, argv, env, **meta: spawn(sid, ["/bin/cat"], env, **meta))
+    async with server:
+        opener = asyncio.create_task(engine.open_winrm("win12"))
+        for _ in range(500):
+            if engine._prompts:
+                break
+            await asyncio.sleep(0.01)
+        # the certificate question is up; another session opened meanwhile doesn't take the id
+        assert [info["session_id"] for _, info in engine._prompts.values()] == ["win12"]
+        other = engine.sessions.spawn(engine.sessions.unique_id("WIN12"), ["/bin/cat"], {}, name="other", kind="local")
+        assert other.id == "win12-2"
+        await answer_prompts(engine, ["yes"])
+        assert (await opener)["id"] == "win12" and engine.sessions.sessions["win12"].kind == "winrm"
+        # one that is refused gives its id back
+        engine.forget_pin("win12")
+        opener = asyncio.create_task(engine.open_winrm("win12"))
+        await answer_prompts(engine, ["no"])
+        with pytest.raises(UserError, match="not trusted"):
+            await opener
+        assert not engine.sessions._reserved
+
+
 def _tls_server(tmp_path):
     """A local HTTPS server with a self-signed certificate; returns (port, SHA-256 of its certificate, stop)."""
     import datetime
