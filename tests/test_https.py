@@ -402,7 +402,7 @@ def test_a_key_no_header_can_carry_is_refused_without_quoting_it():
         h11.Request(method="GET", target="/", headers=[("Host", "x"), ("Authorization", f"Bearer {BAD_KEYS[0]}")])
     for key in BAD_KEYS:
         found = netguard.key_problem(key, "NanoGPT")
-        assert "Enter it again" in found and "ABCDEF" not in found, repr(key)
+        assert "Enter it again in Settings → AI providers." in found and "ABCDEF" not in found, repr(key)
     assert netguard.key_problem("sk-live-ABCDEF_GHIJKL-0123") is None
     assert netguard.key_problem("") is None and netguard.key_problem(None) is None
 

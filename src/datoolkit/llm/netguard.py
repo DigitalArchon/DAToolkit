@@ -155,7 +155,7 @@ def key_problem(key, name: str = "the provider") -> str | None:
     (DA Assistant's netguard.key_problem, Nov 2026.)"""
     if key and (not key.isascii() or UNSAFE.search(key) or " " in key):
         return (f"The API key for {name} has a space, a line break or another character no API key has "
-                f"in it, picked up where it was copied from, perhaps. Enter it again in Settings → Providers.")
+                f"in it, picked up where it was copied from, perhaps. Enter it again in Settings → AI providers.")
     return None
 
 
