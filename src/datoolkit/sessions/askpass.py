@@ -41,10 +41,13 @@ class AskpassBridge:
         self.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.runtime_dir, 0o700)
         src_root = Path(__file__).resolve().parents[2]
+        # -P: the directory ssh was started in (the technician's home) is not on the helper's
+        # import path. With plain `-m` it came first, and a stray ~/secrets.py or ~/json.py was
+        # imported, by the process that carries the password, in place of Python's own.
         self.script_path.write_text(
             "#!/bin/sh\n"
             f"PYTHONPATH={shlex.quote(str(src_root))}${{PYTHONPATH:+:$PYTHONPATH}} "
-            f"exec {shlex.quote(sys.executable)} -m datoolkit.sessions.askpass \"$@\"\n"
+            f"exec {shlex.quote(sys.executable)} -P -m datoolkit.sessions.askpass \"$@\"\n"
         )
         os.chmod(self.script_path, 0o700)
         if self.sock_path.exists():

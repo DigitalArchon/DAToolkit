@@ -167,6 +167,67 @@ async def test_a_security_key_touch_notice_is_shown_not_asked(tmp_path):
         await bridge.stop()
 
 
+def _stray_modules(folder):
+    """A home directory with files named like modules the helpers import: each, if imported,
+    leaves a mark and breaks the import."""
+    folder.mkdir()
+    for name in ("secrets", "json", "signal", "socket", "hmac", "shlex", "tempfile", "readline", "shutil", "datoolkit"):
+        (folder / f"{name}.py").write_text(
+            f"open({str(folder / 'imported')!r}, 'a').write({name!r} + '\\n')\nraise RuntimeError('stray {name}.py imported')\n")
+    return folder
+
+
+async def test_the_password_helper_imports_nothing_from_the_directory_it_runs_in(tmp_path):
+    """ssh runs the helper in the session's directory, the technician's home. Started with plain
+    `python -m`, a stray ~/secrets.py or ~/json.py there was imported in place of Python's own,
+    by the process that carries the password."""
+    home = _stray_modules(tmp_path / "home")
+
+    async def handler(sid, prompt, kind):
+        return "s3cret"
+
+    bridge = AskpassBridge(tmp_path / "rt", handler)
+    await bridge.start()
+    try:
+        env = {k: v for k, v in os.environ.items() if k != "SSH_ASKPASS_PROMPT"} | bridge.env_for("web01")
+        done = await asyncio.to_thread(subprocess.run, [str(bridge.script_path), "bob@web01.lan's password: "],
+                                       env=env, cwd=home, capture_output=True, text=True, timeout=20)
+        assert (done.returncode, done.stdout, done.stderr) == (0, "s3cret\n", "")
+        assert not (home / "imported").exists()
+    finally:
+        await bridge.stop()
+
+
+async def test_the_winrm_console_imports_nothing_from_the_directory_it_runs_in(tmp_path, monkeypatch):
+    import sys
+
+    from datoolkit.config import Config, Host
+    from datoolkit.engine import Engine
+
+    home = _stray_modules(tmp_path / "home")
+    engine = Engine(Config(hosts=[Host("win", "winrm", "192.168.250.7", user="bob", auth="ntlm", winrm_ssl=False)]),
+                    lambda event: None, tmp_path / "rt", save_config=lambda c: None)
+    await engine.start()
+    started = []
+    try:
+        engine.new_case("console", "open")
+        spawn = engine.sessions.spawn
+        monkeypatch.setattr(engine.sessions, "spawn", lambda sid, argv, env, **meta: started.append((argv, env)) or spawn(
+            sid, ["/bin/cat"], env, **meta))
+        engine.open_session("winrm", "win")
+    finally:
+        await engine.stop()
+    argv, env = started[0]
+    assert argv == [sys.executable, "-P", "-m", "datoolkit.sessions.psrp_console"]
+    # as the session runs it, in a home that holds such files, and with no settings: it gets as far
+    # as reading them (every import done) and stops there
+    env = {**os.environ, **{k: v for k, v in env.items() if k != "DATOOLKIT_PSRP"}}
+    done = await asyncio.to_thread(subprocess.run, argv, env=env, cwd=home, capture_output=True, text=True, timeout=30,
+                                   stdin=subprocess.DEVNULL)
+    assert "KeyError: 'DATOOLKIT_PSRP'" in done.stderr and "stray" not in done.stderr
+    assert not (home / "imported").exists()
+
+
 async def test_sessions_link_by_themselves_only_when_they_reach_the_same_machine():
     """An address alone doesn't say which machine: a host saved as localhost:3390 is a forwarded
     port, not this computer, and two clients' 192.168.1.1 behind two jump hosts are two routers.

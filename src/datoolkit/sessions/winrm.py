@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
+from pathlib import Path
 
 from ..config import Host
 from ..llm import netguard
@@ -64,6 +66,18 @@ def pins(host: Host) -> bool:
 
 def port(host: Host) -> int:
     return host.port or (5986 if host.winrm_ssl else 5985)
+
+
+# What the interpreter is given to run the console (sessions/psrp_console.py) in a session's PTY.
+# -P keeps the directory it starts in, the technician's home, off its import path: a stray
+# ~/json.py or ~/signal.py there is never imported by the process that holds the host's
+# password. The source root is passed in PYTHONPATH (console_pythonpath).
+CONSOLE_ARGS = ("-P", "-m", "datoolkit.sessions.psrp_console")
+
+
+def console_pythonpath() -> str:
+    src_root = str(Path(__file__).resolve().parents[2])
+    return src_root + (":" + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")
 
 
 def console_config(host: Host, pin: str = "") -> str:

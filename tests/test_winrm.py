@@ -222,10 +222,13 @@ def test_the_console_never_reaches_a_local_host_through_the_environments_proxy(m
                 if not more:
                     break
                 data += more
+        except OSError:
+            pass
+        seen.append(data)                                 # before the answer that lets the console go on
+        try:
             conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         except OSError:
             pass
-        seen.append(data)
         conn.close()
     threading.Thread(target=proxy, daemon=True).start()
     address = f"http://127.0.0.1:{listener.getsockname()[1]}"
