@@ -202,6 +202,10 @@ _GENERIC_NAMES = {"administrator", "administrador", "administrateur", "sysadmin"
                   "workgroup", "domain", "windows", "win"}
 
 
+# How a reply ended when it didn't end by itself (a TurnResult's finish_reason; the Anthropic client
+# reports max_tokens as "length"), as the note on the message and the tool reply say it.
+_CUT_OFF = {"length": "at the output limit", "content_filter": "by the provider's content filter"}
+
 # what a request other than the chat was for, in the timeline
 _PURPOSES = {"second_opinion": "a second opinion", "ticket_summary": "a ticket summary", "client_update": "a client update",
              "runbook": "a runbook", "compact": "a summary of earlier exchanges (compaction)", "research": "research",
@@ -4048,6 +4052,7 @@ class Engine:
         replies: list[tuple] = []
         tee = None
         out_of_rounds = False  # the turn used all its rounds and the model was still to be asked again
+        cut_off: list[str] = []   # how replies of the turn were cut off: "length", "content_filter" (_CUT_OFF)
         # A conversation saved while a turn waited (the app closed during a search's approval) has a
         # call with no answer in it: answered here, in its place, before anything is built on it.
         self._answer_open_calls("Not done: the turn ended before this was carried out.")
@@ -4146,6 +4151,8 @@ class Engine:
                         entry["text"] = entry["text"][:round_text] + clean
                 usage = result.usage
                 self._turn_extras(entry, prov, model, result)
+                if result.finish_reason in _CUT_OFF and result.finish_reason not in cut_off:
+                    cut_off.append(result.finish_reason)     # said under the message; its calls aren't acted on
                 self._log_request("chat", model, tier, system, sent, {
                     "content": result.content, "reasoning": entry["reasoning"][round_reasoning:],
                     "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls],
@@ -4230,8 +4237,9 @@ class Engine:
             # Retry, the technician left looking at their own message.
             error = (f"ended with nothing to show: {model} was asked {MAX_TOOL_ROUNDS} times (the limit for one turn) "
                      "and made only calls that couldn't be carried out" if out_of_rounds else
-                     f"got an empty reply: {model} sent no message and queued nothing")
-            self.log("turn_empty", model=model, out_of_rounds=out_of_rounds)
+                     f"got nothing to show: {model}'s reply was cut off {_CUT_OFF[cut_off[-1]]} before any of it came"
+                     if cut_off else f"got an empty reply: {model} sent no message and queued nothing")
+            self.log("turn_empty", model=model, out_of_rounds=out_of_rounds, cut_off=cut_off)
         if error:                 # a call whose handling failed is answered too, or every later request is refused
             self._answer_open_calls(f"Not done: DA Toolkit hit an error carrying it out ({error}).")
         if tee and in_flight and (len(entry["reasoning"]), len(entry["text"])) != in_flight[3:5]:
@@ -4254,6 +4262,13 @@ class Engine:
                 task.add_done_callback(self._background.discard)
             elif entry.get("tee_attested"):
                 entry["tee_signature"] = "unchecked"     # nothing of it could be looked up
+            if cut_off:
+                # A reply that stopped at the output limit, or was stopped by a filter, reads like a
+                # whole one: said under it, in the chat and in the log. Until Nov 2026 it went unmarked.
+                entry["cut_off"] = cut_off
+                for reason in cut_off:
+                    self.chat.append({"kind": "note", "text": f"The reply was cut off {_CUT_OFF[reason]}."})
+                self.log("reply_cut_off", model=model, finish_reasons=cut_off)
         self._last_turn_error = error
         if error:
             self.chat.append({"kind": "note", "text": f"AI request {error}", "retry": True,
@@ -4370,8 +4385,17 @@ class Engine:
             msg["content"] = ""
         self.conv.append(msg)
         retry = False
+        cut_off = _CUT_OFF.get(result.finish_reason or "")
         for call in result.tool_calls:
-            if call.name == "update_hypotheses":
+            if cut_off:
+                # A reply that was cut off may have lost the end of a call, or the calls after it: a
+                # list of commands short of its last items, an item short of its risk and rollback.
+                # None of its calls is carried out; the model is told, and asked again.
+                reply, retry = (f"Not carried out: your reply was cut off {cut_off}, so this call may be incomplete. "
+                                "Nothing of it was queued or changed. Make the call again, with a shorter message "
+                                "and fewer items in one call."), True
+                self.log("tool_call_cut_off", tool=call.name, finish_reason=result.finish_reason)
+            elif call.name == "update_hypotheses":
                 try:
                     items = call.parsed()["items"]
                     if not isinstance(items, list):

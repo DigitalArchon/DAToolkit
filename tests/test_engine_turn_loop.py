@@ -248,6 +248,66 @@ async def test_an_empty_reply_says_so_and_can_be_retried(env):  # noqa: F811
     assert [m["role"] for m in engine.conv] == ["user", "assistant"]      # the empty reply is gone
 
 
+# ---------------------------------------------------------------- a reply that was cut off
+
+async def test_a_reply_cut_at_the_output_limit_says_so(env):  # noqa: F811
+    engine, fake, _ = env
+    setup(engine)
+    fake.responses.append(sse(({"role": "assistant", "content": "First check the disk, then the"}, "length")))
+    engine.send("web01 is slow")
+    await wait_turn(engine)
+    said, note = engine.chat[-2:]
+    assert said["text"] == "First check the disk, then the" and said["cut_off"] == ["length"]
+    assert note == {"kind": "note", "text": "The reply was cut off at the output limit."}
+    assert engine._last_turn_error is None
+    assert '"reply_cut_off"' in (engine.case.dir / "events.jsonl").read_text()
+
+
+async def test_a_reply_stopped_by_the_content_filter_says_so(env):  # noqa: F811
+    engine, fake, _ = env
+    setup(engine)
+    fake.responses.append(sse(({"role": "assistant", "content": "The exploit works by"}, "content_filter")))
+    engine.send("how does this CVE work?")
+    await wait_turn(engine)
+    assert engine.chat[-1]["text"] == "The reply was cut off by the provider's content filter."
+    assert engine.chat[-2]["cut_off"] == ["content_filter"]
+
+
+async def test_the_calls_of_a_reply_cut_at_the_output_limit_are_not_acted_on(env):  # noqa: F811
+    engine, fake, _ = env
+    sid = setup(engine)
+    half = {"items": [{"session_id": sid, "command": "systemctl restart nginx", "purpose": "restart", "risk": "disruptive",
+                       "rollback": "systemctl stop nginx"},
+                      {"session_id": sid, "command": "rm -rf /var/cache/nginx"}]}        # short of its risk and rollback
+    cut = sse(({"role": "assistant", "content": "Restarting it."}, None),
+              ({"tool_calls": [{"index": 0, "id": "c0", "type": "function",
+                                "function": {"name": "propose_commands", "arguments": json.dumps(half)}}]}, None),
+              ({"tool_calls": [{"index": 1, "id": "c1", "type": "function",
+                                "function": {"name": "update_hypotheses", "arguments": json.dumps(HYP[1])}}]}, None),
+              ({}, "length"))
+    whole = multi_tool_stream([("propose_commands", {"items": [{"session_id": sid, "command": "systemctl status nginx",
+                                                                "purpose": "state", "risk": "read_only"}]})], text="Again.")
+    fake.responses += [cut, whole]
+    engine.send("nginx is down")
+    await wait_turn(engine)
+    assert [p.command for p in engine.queue.items] == ["systemctl status nginx"]      # nothing of the cut reply
+    assert engine.hypotheses == []
+    replies = [m["content"] for m in fake.requests[1]["messages"] if m["role"] == "tool"]
+    assert len(replies) == 2 and all("cut off at the output limit" in r and "Nothing of it was queued" in r for r in replies)
+    said, note = engine.chat[-2:]
+    assert said["proposals"] == [1] and note["text"] == "The reply was cut off at the output limit."
+
+
+async def test_a_reply_cut_off_before_any_of_it_came_can_be_retried(env):  # noqa: F811
+    engine, fake, _ = env
+    setup(engine)
+    fake.responses.append(sse(({"role": "assistant", "content": ""}, "length")))
+    engine.send("web01 is slow")
+    await wait_turn(engine)
+    note = engine.chat[-1]
+    assert "cut off at the output limit before any of it came" in note["text"] and note["retry"] and engine.can_retry
+
+
 async def test_a_turn_out_of_rounds_with_something_to_show_says_it_stopped_there(env):  # noqa: F811
     engine, fake, _ = env
     setup(engine)
