@@ -2948,9 +2948,14 @@ async function showBaselineDiff(sess, path) {
   const r = await api("POST", "/api/baselines/diff", { session_id: sess.id, baseline: path });
   const ta = h("textarea", { class: "mono", rows: 18, spellcheck: "false", value: r.text });
   const message = h("textarea", { rows: 2, placeholder: "Message for the AI (optional)", value: "Baseline diff for this host; changed sections are leads." });
+  // where the snapshot came from, when the server says: the case it was taken in, that case's
+  // client and its sensitivity (a baseline is its host's, whichever case saved it)
+  const from = `${r.case_name ? ` in the case “${r.case_name}”` : ""}${r.client ? ` (client ${r.client})` : ""}`;
   modal({ title: `Baseline diff · ${r.host}`, wide: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
-      h("div", { class: "muted small" }, `Against the snapshot taken ${r.taken}. Changed: ${r.changed.join(", ") || "nothing"}. Unchanged: ${r.same.join(", ") || "nothing"}.`),
+      h("div", { class: "muted small baseline-from" }, `Against the snapshot taken ${r.taken}${from}`,
+        r.sensitivity ? [" ", h("span", { class: `badge ${r.sensitivity}` }, r.sensitivity)] : null,
+        `. Changed: ${r.changed.join(", ") || "nothing"}. Unchanged: ${r.same.join(", ") || "nothing"}.`),
       ta, message),
     buttons: [{ label: "Close" }, { label: "Send to AI", kind: "primary",
       onClick: () => api("POST", "/api/send", { message: message.value.trim(), snippets: [{ session_id: sess.id, text: ta.value }] }) }] });

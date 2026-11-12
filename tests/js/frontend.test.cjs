@@ -784,6 +784,20 @@ test("messages name the Settings tab as it is labelled: AI providers", async () 
   assert.ok(js.split("Settings → AI providers").length > 4);
 });
 
+test("a baseline's diff says which case, client and sensitivity the snapshot came from, when the server does", async () => {
+  const diff = { host: "fs01", taken: "2026-11-01T10:00", changed: ["services"], same: ["disks"], text: "--- services" };
+  const app = await page("a", null, { "POST /api/baselines/diff": () => ({ ...diff, case_name: "TKT-7 Acme fs01 slow", client: "Acme", sensitivity: "confidential" }) });
+  await app.call("showBaselineDiff", { id: "local" }, "/b/1.json");
+  const line = app.$(".modal .baseline-from");
+  assert.equal(line.textContent, "Against the snapshot taken 2026-11-01T10:00 in the case “TKT-7 Acme fs01 slow” (client Acme) confidential. Changed: services. Unchanged: disks.");
+  assert.equal(line.querySelector(".badge").getAttribute("class"), "badge confidential");
+  button(app.$(".modal"), "Close").click();
+  await app.clock.tick(0);
+  app.routes["POST /api/baselines/diff"] = () => diff;              // an older server, or a baseline with no case
+  await app.call("showBaselineDiff", { id: "local" }, "/b/1.json");
+  assert.equal(app.$(".modal .baseline-from").textContent, "Against the snapshot taken 2026-11-01T10:00. Changed: services. Unchanged: disks.");
+});
+
 function fakeRdp(app, sid = "rdp1") {
   const log = [];
   app.run(`S.rdps[${JSON.stringify(sid)}] = { id: ${JSON.stringify(sid)}, state: 3, host: h("div"), view: h("div", { class: "rdp-view", tabindex: 0 }),
