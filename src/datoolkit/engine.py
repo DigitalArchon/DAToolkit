@@ -1188,51 +1188,88 @@ class Engine:
                         f"{found.get('error') or 'refused since'}")
 
     @staticmethod
-    def _reply_record(result) -> tuple:
+    def _reply_record(result, tee: tuple | None = None) -> tuple:
         """What a TEE reply's check needs of it (llm/tee.py check_reply): the completion's id, the
-        receipt its headers named, the sha256 of every byte its stream carried, nano-gpt's route."""
-        return result.id, result.receipt_id, result.body_hash, result.tee_route
+        receipt its headers named, the sha256 of every byte its stream carried, nano-gpt's route.
+        Every reply of a TEE model has a record, one that named no id and no receipt too: such a
+        reply can't be looked up, and is "unchecked" (_reply_outcome), never left out.
+
+        With `tee` (what _tee_guard returned for the reply's request), the attested client that
+        request went out under comes last, and the reply is checked with that one
+        (_reply_outcome), whichever client the rest of its turn is checked with."""
+        record = result.id, result.receipt_id, result.body_hash, result.tee_route
+        return (*record, tee[0]) if tee else record
 
     async def _reply_outcome(self, key: tuple[str, str], client: tee_mod.TeeClient,
-                             record: tuple) -> tuple[str, tee_mod.TeeUpstream | None]:
+                             record: tuple) -> tuple[str, tee_mod.TeeUpstream | None, bool]:
         """Was this reply the attested enclave's, as received? Checked off the event loop (it waits
         for a receipt): "verified": its record was signed by the enclave's key, for the exact bytes
         this app got, its receipt (where read) holding; "signed": signed, the bytes not comparable;
         "failed"; "unchecked": no record could be read; "unsigned": the provider signs none (Chutes,
         unless RedPill's gateway answered instead and named its receipt: llm/tee.py signs). A
-        failed one has its model, `key`, attested again before its next request (_tee_guard).
+        failed one has its model, `key`, attested again before its next request (_tee_guard). A
+        reply that named no id and no receipt has no record to be looked up by: it is unchecked
+        too (or unsigned). Until Nov 2026 such a reply was left out, so it showed no mark of its
+        own, or took "verified" from the other replies of its turn; and what a reply names is the
+        relay's to write.
 
         With it, who ran the reply's model, by RedPill's record of it (llm/tee.py served_by), when
         Settings → Model asks ("Name the provider behind each TEE reply", off by default: that
-        lookup goes to api.redpill.ai directly); else None. It never changes the mark."""
-        rid, receipt_id, body_hash, route = record
-        upstream = None
+        lookup goes to api.redpill.ai directly); else None. It never changes the mark. And last,
+        whether the reply's receipt was read under the attested keys and held (llm/tee.py
+        ReplyCheck.receipt), for the mark's tooltip (_tee_found).
+
+        `client`: the attested client to check with, unless the record names its own (_reply_record)."""
+        rid, receipt_id, body_hash, route, *under = record
+        client = under[0] if under else client
+        upstream, receipt = None, False
         try:
             if self.cfg.settings.tee_name_upstreams:
                 found = await asyncio.to_thread(client.check, rid, receipt_id=receipt_id, body_hash=body_hash,
                                                 route=route, name_upstream=True)
-                outcome, upstream = found.mark, found.upstream
+                outcome, upstream, receipt = found.mark, found.upstream, found.receipt
             else:
-                outcome = await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
-                                                  body_hash=body_hash, route=route)
+                found = await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
+                                                body_hash=body_hash, route=route)
+                outcome, receipt = str(found), bool(getattr(found, "receipt", False))
         except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
             # signed by the keys a model attested through RedPill's gateway alone, too, which has
             # no signing address of its own
             outcome = "unchecked" if client.signs(receipt_id) else "unsigned"
         if outcome == "failed":
             self._tee_doubted.add(key)
-        return outcome, upstream
+        return outcome, upstream, receipt
 
     @staticmethod
-    def _tee_upstream_of(found: list[tuple[str, tee_mod.TeeUpstream | None]]) -> dict | None:
+    def _tee_found(found: list[tuple]) -> dict:
+        """What a turn, a research run or a write-up keeps of its replies' checks (each check's
+        (mark, upstream, receipt): _reply_outcome), as its mark shows them. "tee_signature": the
+        worst of them, so a reply that failed, or couldn't be checked, is never hidden by the
+        others; anything that is no mark at all counts as unchecked. "tee_receipt", beside
+        "verified" or "signed": whether every reply's receipt was read under the attested keys
+        and held. A model attested itself is verified without one, and its mark's tooltip then
+        says none was read (web/app.js teeBadge): until Nov 2026 it said one was, either way.
+        "tee_upstream": who ran them, where Settings asks (_tee_upstream_of)."""
+        marks = {mark if mark in TEE_OUTCOMES else "unchecked" for mark, *_ in found} or {"unchecked"}
+        result = next(o for o in TEE_OUTCOMES if o in marks)
+        kept: dict = {"tee_signature": result}
+        if result in ("verified", "signed"):
+            kept["tee_receipt"] = all(bool(receipt and receipt[0]) for _mark, _upstream, *receipt in found)
+        upstream = Engine._tee_upstream_of(found)
+        if upstream:
+            kept["tee_upstream"] = upstream
+        return kept
+
+    @staticmethod
+    def _tee_upstream_of(found: list[tuple]) -> dict | None:
         """Who ran the replies of a turn, a research run or a write-up (each check's (mark,
-        upstream): _reply_outcome), as their mark shows it: named only when every reply checked out
+        upstream, …): _reply_outcome), as their mark shows it: named only when every reply checked out
         with one and the same provider named, else why not (one reply named none, or they were run
         by different providers); None when nothing was looked up, or a reply didn't check out (the
         mark then says so, and a name would rest on nothing)."""
-        if not found or any(upstream is None or mark not in ("verified", "signed") for mark, upstream in found):
+        if not found or any(upstream is None or mark not in ("verified", "signed") for mark, upstream, *_ in found):
             return None
-        ups = [upstream for _, upstream in found]
+        ups = [upstream for _, upstream, *_ in found]
         unnamed = next((u for u in ups if not u.name), None)
         if unnamed is not None:
             return unnamed.to_dict()
@@ -1241,10 +1278,10 @@ class Engine:
         return ups[-1].to_dict()
 
     @staticmethod
-    def _log_redpill(log: Callable, model: str, found: list[tuple[str, tee_mod.TeeUpstream | None]]) -> None:
+    def _log_redpill(log: Callable, model: str, found: list[tuple]) -> None:
         """What went to api.redpill.ai for these replies, in the case's log: a session's id, nothing
         more, and what came back (llm/tee.py served_by)."""
-        for _, upstream in found:
+        for _, upstream, *_ in found:
             if upstream is not None and upstream.asked:
                 log("redpill_session_record", host="api.redpill.ai", session=upstream.session, model=model,
                     provider=upstream.name, note=upstream.note)
@@ -1260,32 +1297,31 @@ class Engine:
     def _reply_checks(self, prov: Provider, model: str, tee: tuple | None, results: list) -> list[asyncio.Task]:
         """The checks of these replies (TurnResults) of a TEE model (`tee`: what _tee_guard
         returned for it), started now and run while the work goes on, each task's result its
-        outcome (_reply_outcome). As in a turn, a reply that carried no id has nothing to be
-        looked up by. None for a model that isn't TEE."""
+        outcome (_reply_outcome). Every reply is checked, one that carried no id and no receipt
+        too: it has nothing to be looked up by, and its outcome says so ("unchecked"), which the
+        work's mark then can't be better than (_tee_found). None for a model that isn't TEE."""
         if not tee:
             return []
         key = (prov.name, model)
         return [self._tee_pending(key, asyncio.create_task(self._reply_outcome(key, tee[0], self._reply_record(r))))
-                for r in results if r is not None and (r.id or r.receipt_id)]
+                for r in results if r is not None]
 
     async def _tee_marks(self, prov: Provider, model: str, tee: tuple | None, checks: list[asyncio.Task], what: str,
                          case: Case | None = None) -> dict:
         """What a TEE model's reply outside the chat keeps, as a turn's entry does: the
         attestation it was sent under ("tee_attested") and the worst of its replies' checks
-        ("tee_signature", once `checks` are done), logged in `case` (the open one by default).
-        A failure is said. Nothing for a model that isn't TEE."""
+        ("tee_signature", once `checks` are done, and what goes with it: _tee_found), logged in
+        `case` (the open one by default). A failure is said. Nothing for a model that isn't TEE."""
         if not tee:
             return {}
         marks = self._tee_sent_under(tee)
         if checks:
             await asyncio.wait(checks)          # waited for, never cancelled: a failed one is acted on
-            found = [("unchecked", None) if t.cancelled() else t.result() for t in checks]
-            result = marks["tee_signature"] = next(o for o in TEE_OUTCOMES if o in {m for m, _ in found})
+            found = [("unchecked", None, False) if t.cancelled() else t.result() for t in checks]
+            marks.update(self._tee_found(found))
+            result, upstream = marks["tee_signature"], marks.get("tee_upstream")
             log = case.log if case else self.log
             self._log_redpill(log, model, found)
-            upstream = self._tee_upstream_of(found)
-            if upstream:
-                marks["tee_upstream"] = upstream
             log("tee_reply_signature", purpose=what, model=model, result=result, replies=len(found),
                 **({"provider": upstream["name"] or upstream["note"]} if upstream else {}))
             if result == "failed":
@@ -1312,13 +1348,16 @@ class Engine:
         """Was each reply of this turn the attested enclave's, as received (_reply_outcome)? A
         turn takes the worst of its replies, and a failure is said. `case` and `chat` are the
         turn's: the check takes seconds (a receipt is waited for), and another case may be open
-        by then. `key`: the turn's (provider, model)."""
+        by then. `key`: the turn's (provider, model). `client`: the attested client its replies
+        are checked with, but for one whose record names the client its own request went out
+        under (_reply_record): a turn takes the guard before each request, and its model may
+        have been attested again between two of them."""
         found = [await self._reply_outcome(key, client, record) for record in replies]
-        result = entry["tee_signature"] = next(o for o in TEE_OUTCOMES if o in {m for m, _ in found})
-        # who ran them, where Settings asks: on the entry, as its mark shows it (_tee_upstream_of)
-        upstream = self._tee_upstream_of(found)
-        named = {"tee_upstream": upstream} if upstream else {}
-        entry.update(named)
+        # the worst of them, and who ran them, where Settings asks: on the entry, as its mark
+        # shows it (_tee_found)
+        kept = self._tee_found(found)
+        entry.update(kept)
+        result, upstream = kept["tee_signature"], kept.get("tee_upstream")
         said = {"provider": upstream["name"] or upstream["note"]} if upstream else {}
         if result == "failed":
             self._tee_failed(entry.get("model") or key[1], "reply")
@@ -1336,11 +1375,11 @@ class Engine:
             index = next(i for i, e in enumerate(chat) if e is entry)
             if self.case and self.case.id == case.id:
                 if index < len(self.chat) and self.chat[index].get("tee_signature") == "checking":
-                    self.chat[index].update(tee_signature=result, **named)
+                    self.chat[index].update(kept)
                     self._changed()
                     self._persist()
             else:
-                case.patch_chat_entry(index, {"tee_signature": "checking"}, tee_signature=result, **named)
+                case.patch_chat_entry(index, {"tee_signature": "checking"}, **kept)
         except (OSError, ValueError, StopIteration):     # deleted meanwhile, or no longer readable
             pass
 

@@ -1974,6 +1974,28 @@ def test_intels_and_nvidias_checks_are_not_begun_once_the_time_has_passed(monkey
 # --- a reply's receipt, and a client closed -----------------------------------------------------
 
 
+def test_a_reply_says_whether_its_receipt_was_read_and_held():
+    """A model attested itself is verified by its own key's signature, with a receipt or without
+    (the rule is SealedLore's): what was read is said with the mark, for its tooltip."""
+    with_one = receipt_client(tied="statement")
+    found = with_one.check("req_9", receipt_id="rcpt-1", body_hash=streamed())
+    assert (found.mark, found.receipt) == ("verified", True)
+    mark = with_one.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed())
+    assert mark == "verified" and mark.receipt is True and type(str(mark)) is str
+    assert with_one.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True).receipt is True
+    without = receipt_client(tied="statement", with_receipt=False)
+    found = without.check("req_9", receipt_id="rcpt-1", body_hash=streamed())
+    assert (found.mark, found.receipt) == ("verified", False)          # verified all the same
+    mark = without.check_reply("req_9", receipt_id="rcpt-1", body_hash=streamed())
+    assert mark == "verified" and mark.receipt is False
+    assert without.check("req_9", receipt_id="rcpt-1", body_hash=streamed(), name_upstream=True).receipt is False
+    unread = receipt_client(tied="none")                               # a receipt came, with no keys kept to read it by
+    assert unread.check("req_9", receipt_id="rcpt-1", body_hash=streamed()).receipt is False
+    rebuilt = receipt_client("TEE/gemma-4-31b-it", tied="statement")
+    found = rebuilt.check("req_9", receipt_id="rcpt-1", body_hash=streamed(b"other bytes"))
+    assert (found.mark, found.receipt) == ("signed", True)
+
+
 def test_a_client_closed_stays_open_for_the_check_under_way_and_opens_for_one_begun_later():
     """The engine closes the client of an attestation made again, refused or forgotten, while a
     turn begun under it may still have its replies to check. Closed under a check, the check read

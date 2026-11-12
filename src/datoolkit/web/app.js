@@ -581,7 +581,21 @@ function teeRunBy(e) {
   return { text: named?.name ? ` · run by ${named.label || named.name}` : "", why: named?.words ? `\n\n${named.words}` : "" };
 }
 function teeBadge(e) {
-  const [text, cls, why] = TEE_SIGNATURE[e.tee_signature] || ["", "", ""];
+  const [text, cls, said] = TEE_SIGNATURE[e.tee_signature] || ["", "", ""];
+  // Whether a receipt was read under the attested keys and held, for every reply the mark is of
+  // (e.tee_receipt, engine.py _tee_found): a model attested itself is verified by its own key's
+  // signature, with or without one, and the tooltip said a receipt was read either way. Without
+  // one it says so, and what the signature alone shows. An entry saved before Nov 13 2026 doesn't
+  // say whether one was read, and its tooltip says that.
+  let why = said;
+  if (["verified", "signed"].includes(e.tee_signature) && e.tee_receipt !== true) {
+    const compared = e.tee_signature === "verified"
+      ? "and the record is for the exact bytes this app received"
+      : "but the reply's text can't be compared with it (NanoGPT rebuilds this model's replies), so a change on the way here wouldn't show";
+    why = e.tee_receipt === false
+      ? `Checked against the attested signing key: that key signed this reply's record, ${compared}. No receipt was read (none came with the record, or the attestation kept no receipt keys to read one by; where the mark is of several replies, at least one had none). So for a model RedPill serves, nothing here says the machine running the model was verified: the signature shows that the reply passed through the attested gateway (the top bar says what was attested).`
+      : `${said} Whether a receipt was read for this reply wasn't kept with it (it was saved by an earlier version).`;
+  }
   // "TEE gateway attested before sending" for RedPill's gateway; an entry saved before Nov 11 2026
   // has no headline: "Attested before sending", as then
   const before = e.tee_headline ? `${e.tee_headline} before sending` : "Attested before sending";

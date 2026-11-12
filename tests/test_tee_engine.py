@@ -3,6 +3,7 @@ signature-checked, wherever a reply comes from: the chat, the vision helper, wri
 opinions, compaction and the research agent. The verifier itself is tested in test_tee.py."""
 
 import asyncio
+import hashlib
 import json
 import threading
 
@@ -10,7 +11,7 @@ import httpx
 import pytest
 
 from datoolkit import creds
-from datoolkit.engine import UserError
+from datoolkit.engine import Engine, UserError
 from datoolkit.llm.client import LLMClient
 from datoolkit.llm.dcap import since_boot
 from datoolkit.llm.tee import NRAS_URL, TeeClient
@@ -941,6 +942,126 @@ async def test_why_an_attestation_failed_is_said_short_on_one_line_with_nothing_
 
 
 # ---------------------------------------------------------------- every reply, and every request
+
+def sse_no_id(*chunks) -> str:
+    """test_engine's sse, its chunks naming no completion id: what a relay may send."""
+    return sse(*chunks).replace('"id": "c1", ', "")
+
+
+async def test_a_reply_that_names_no_id_and_no_receipt_is_unchecked_not_left_out(env):  # noqa: F811
+    """Such a reply has nothing to be looked up by, and both are the relay's to write: it was
+    left out of the check, so a write-up showed a bare "TEE" with no word about its reply."""
+    engine, fake, _ = env
+    seen: list = []
+    engine._tee_factory = tee_factory(server=receipt_server, tied="statement", seen=seen)
+    engine.new_case("n", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    engine.conv = list(TALK)
+    reply = sse_no_id(({"role": "assistant", "content": "Ticket: anything at all."}, "stop"))
+    assert '"id"' not in reply
+    fake.responses.append(reply)
+    out = await engine.ticket_summary()
+    assert out["text"] == "Ticket: anything at all." and out["tee_attested"]
+    assert out["tee_signature"] == "unchecked" and "tee_receipt" not in out
+    assert not [r for r in seen if "/tee/signature/" in str(r.url)], "nothing to look up"
+    logged = _checks_logged(engine)[-1]
+    assert (logged["purpose"], logged["result"], logged["replies"]) == ("ticket summary", "unchecked", 1)
+
+
+async def test_one_reply_of_a_research_run_that_names_nothing_leaves_the_run_unchecked(env):  # noqa: F811
+    """It took "verified" from the run's other replies."""
+    turns = agent_turns()
+    turns[0] = turns[0].replace('"id": "c1", ', "")
+    streams = {f"rcpt-{i}": turn.encode() for i, turn in enumerate(turns) if i}
+    engine, fake, events, seen = _research_env(env, streams=streams)
+    fake.responses += [research_call()] + turns + [say("Per the v21 docs: Network > DHCP > Relay.")]
+    fake.receipt_ids = ["chat-1", "", *streams, "chat-2"]
+    engine.send("need a dhcp relay on the sophos")
+    await wait_turn(engine)
+    rec = engine.chat[-1]["research"][0]
+    assert rec["status"] == "done" and rec["tee_signature"] == "unchecked"
+    looked_up = sorted(str(r.url).rsplit("/", 1)[-1].split("?")[0] for r in seen if "/tee/signature/" in str(r.url))
+    assert looked_up == sorted(streams)
+    assert _checks_logged(engine)[-1] | {"replies": 3, "result": "unchecked"} == _checks_logged(engine)[-1]
+
+
+async def test_a_turn_takes_the_worst_of_its_replies_one_that_names_nothing_among_them(env):  # noqa: F811
+    """What the turn's check does with the record of a reply that named nothing, and with each
+    reply checked by the client its own request went out under (_reply_record)."""
+    engine, fake, _ = env
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    made, checked = [], []
+    plain = tee_factory(server=receipt_server, tied="statement", stream=reply.encode())
+
+    def make(base, key, model):
+        client = plain(base, key, model)
+        real = client.check_reply
+        client.check_reply = lambda rid, n=len(made), **record: checked.append((n, rid)) or real(rid, **record)
+        made.append(client)
+        return client
+    engine._tee_factory = make
+    engine.new_case("t", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    first = await engine._tee_guard(engine.cfg.provider("Fake"), "TEE/glm-5.3", "chat")
+    await engine.attest_now()                                   # attested again between two requests of a turn
+    second = await engine._tee_guard(engine.cfg.provider("Fake"), "TEE/glm-5.3", "chat")
+    assert first[0] is made[0] and second[0] is made[1]
+
+    class Reply:
+        def __init__(self, id_, receipt_id):
+            self.id, self.receipt_id, self.tee_route = id_, receipt_id, None
+            self.body_hash = "sha256:" + hashlib.sha256(reply.encode()).hexdigest()
+    good = [Engine._reply_record(Reply("c1", "rcpt-1"), first), Engine._reply_record(Reply("c1", "rcpt-2"), second)]
+    entry = {"model": "TEE/glm-5.3", "tee_signature": "checking"}
+    engine.chat.append(entry)
+    await engine._check_signatures(entry, second[0], good, engine.case, engine.chat, KEY)
+    assert (entry["tee_signature"], entry["tee_receipt"]) == ("verified", True)
+    assert checked == [(0, "c1"), (1, "c1")]                    # each by the client of its own request
+    entry = {"model": "TEE/glm-5.3", "tee_signature": "checking"}
+    engine.chat.append(entry)
+    await engine._check_signatures(entry, second[0], [*good, Engine._reply_record(Reply(None, None))],
+                                   engine.case, engine.chat, KEY)
+    assert entry["tee_signature"] == "unchecked" and "tee_receipt" not in entry
+    assert _checks_logged(engine)[-1] | {"result": "unchecked", "replies": 3} == _checks_logged(engine)[-1]
+
+
+def test_the_worst_of_several_replies_is_what_their_mark_says():
+    found = Engine._tee_found
+    assert found([("verified", None, True), ("verified", None, True)]) == {"tee_signature": "verified", "tee_receipt": True}
+    assert found([("verified", None, True), ("verified", None, False)]) == {"tee_signature": "verified", "tee_receipt": False}
+    assert found([("verified", None, True), ("signed", None, True)]) == {"tee_signature": "signed", "tee_receipt": True}
+    assert found([("verified", None, True), ("unsigned", None, False)]) == {"tee_signature": "unsigned"}
+    assert found([("verified", None, True), ("unsigned", None, False), ("unchecked", None, False)]) == {"tee_signature": "unchecked"}
+    assert found([("unchecked", None, False), ("failed", None, False), ("verified", None, True)]) == {"tee_signature": "failed"}
+    assert found([("verified", None, True), ("no such mark", None, True)]) == {"tee_signature": "unchecked"}
+    assert found([]) == {"tee_signature": "unchecked"}
+
+
+async def test_a_reply_verified_without_a_receipt_says_none_was_read(env):  # noqa: F811
+    """A model attested itself is verified by its own key's signature, with a receipt or without:
+    the mark's tooltip said a receipt was read either way. Which it was is kept with the mark."""
+    engine, fake, _ = env
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    for with_receipt in (True, False):
+        engine._tee_factory = tee_factory(server=receipt_server, tied="statement", stream=reply.encode(),
+                                          with_receipt=with_receipt)
+        engine.new_case(f"r{with_receipt}", "open")
+        engine.select_model("Fake", "TEE/glm-5.3")
+        await settled(engine)
+        fake.stream_headers = {"X-Receipt-Id": "rcpt-1"}
+        fake.responses.append(reply)
+        engine.send("VPN is down")
+        await wait_turn(engine)
+        entry = engine.chat[-1]
+        assert await signature_of(entry) == "verified"          # either way: the rule is the verifier's
+        assert entry["tee_receipt"] is with_receipt
+        engine.conv = list(TALK)
+        fake.responses.append(reply)
+        out = await engine.ticket_summary()
+        assert (out["tee_signature"], out["tee_receipt"]) == ("verified", with_receipt)
+
 
 def held_at(engine, fake, when):
     """The engine's client on a handler that holds a request, once `when(fake.requests)`, until the
