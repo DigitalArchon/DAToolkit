@@ -19,11 +19,15 @@ LAB = ROOT / "tools" / "windows-lab"
 def test_no_tool_names_the_folder_it_was_written_in():
     """lab.py started the instance from /home/<its author>/Documents/DAToolkit, and the model
     evaluation's brief sent the host agent there."""
-    for folder in ("tools", "packaging"):
-        for path in sorted((ROOT / folder).rglob("*")):
-            if path.is_file() and path.suffix in (".py", ".sh", ".md", ".toml", ".in", ""):
-                found = re.search(r"/home/\w+|/Users/\w+", path.read_text(errors="replace"))
-                assert not found, f"{path.relative_to(ROOT)}: {found.group(0)}"
+    # the files the repository holds: a run's own notes and results beside them (git-ignored) may
+    # name where they were made
+    listed = subprocess.run(["git", "ls-files", "tools", "packaging"], cwd=ROOT, capture_output=True, text=True)
+    paths = ([ROOT / line for line in listed.stdout.splitlines()] if listed.returncode == 0 and listed.stdout.strip()
+             else [p for folder in ("tools", "packaging") for p in (ROOT / folder).rglob("*")])
+    for path in sorted(paths):
+        if path.is_file() and path.suffix in (".py", ".sh", ".md", ".toml", ".in", ""):
+            found = re.search(r"/home/\w+|/Users/\w+", path.read_text(errors="replace"))
+            assert not found, f"{path.relative_to(ROOT)}: {found.group(0)}"
     assert "repository root" in (ROOT / "tools" / "model-eval" / "HOST_BRIEF.md").read_text()
 
 
