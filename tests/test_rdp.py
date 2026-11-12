@@ -803,6 +803,137 @@ def test_guacd_refusing_the_handshake_is_a_failed_connection(tmp_path, monkeypat
     assert _rdp_events(e) == [("rdp_connect_failed", {"error": "guacd: Aborted. See logs."})]
 
 
+class FakeGuacdForMany(FakeGuacd):
+    """One that takes any number of connections and records each one's `connect`."""
+
+    def __init__(self, args):
+        self.connects = []
+        super().__init__(args=args)
+
+    def serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.one, args=(conn,), daemon=True).start()
+
+    def one(self, conn):
+        conn.settimeout(5)
+        parser, got = guac.Parser(), []
+        try:
+            while not any(i[0] == "connect" for i in got):
+                data = conn.recv(65536)
+                if not data:
+                    return
+                got += parser.feed(data.decode())
+                if got and got[0][0] == "select" and len(got) == 1:
+                    conn.sendall(guac.encode("args", *self.args).encode())
+            self.connects.append(got[-1])
+            conn.sendall((guac.encode("ready", "$abc") + GUACD_13_OK).encode())
+            while conn.recv(65536):
+                pass
+        except OSError:
+            return
+        finally:
+            conn.close()
+
+
+def _reconnecting(tmp_path, monkeypatch, args, certs):
+    """Open a pinned RDP host through a fake guacd offering `args`, then let the page connect once
+    for each of `certs` (what the server presents by then). Returns (engine, guacd, the number of
+    times the certificate was read after the opening, what each connection first showed)."""
+    g = FakeGuacdForMany(args)
+    monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", g.port))
+    presented, probes, holder, shown = [GOOD_CERT], [], {}, []
+
+    async def fetch(host, port=3389, user=""):
+        probes.append((host, port))
+        return dict(presented[0])
+    monkeypatch.setattr(rdpcert, "fetch", fetch)
+
+    def make(emit):
+        from datoolkit.config import Config
+        from datoolkit.engine import Engine
+        holder["e"] = Engine(Config(hosts=[Host("dc09", "rdp", "10.250.0.9", user="bob", auth="password")]), emit,
+                             tmp_path / "rt", save_config=lambda c: None)
+        return holder["e"]
+
+    with TestClient(create_app("tok", make)) as client:
+        e = holder["e"]
+        e.new_case("reconnect", "open")
+        e.pins.pin("10.250.0.9", 3389, GOOD_CERT)
+        creds.set_secret("host", "dc09", "SAVED-PW")
+        sid = client.post("/api/sessions", json={"kind": "rdp", "host": "dc09"}, headers={"x-token": "tok"}).json()["id"]
+        assert len(probes) == 1 and not g.connects                # the opening read it once; nothing sent yet
+        probes.clear()
+        for cert in certs:                                        # the page connects; then Reconnect, or a reload
+            presented[0] = cert
+            with client.websocket_connect(f"/ws/rdp/{sid}?t=tok", subprotocols=["guacamole"]) as ws:
+                got = ws.receive_text()
+                while "error" not in got and "sync" not in got:
+                    got += ws.receive_text()
+                shown.append(guac.Parser().feed(got)[1])
+        for _ in range(100):
+            if len([k for k, _ in _rdp_events(e) if k in ("rdp_disconnected", "rdp_connect_failed")]) == len(certs):
+                break
+            threading.Event().wait(0.02)
+        return e, g, len(probes), shown
+
+
+GOOD_CERT = {"tls": True, "protocol": "nla", "sha256": "AA:BB", "sha1": "CC", "subject": "CN=srv", "issuer": "CN=srv",
+             "not_after": "2030-01-01", "self_signed": True}
+_ARGS_13 = ("VERSION_1_3_0", "hostname", "password", "security", "ignore-cert")
+
+
+def test_every_connection_through_a_guacd_that_cant_pin_reads_the_certificate_again(tmp_path, monkeypatch):
+    """guacd 1.3 connects with ignore-cert: the certificate was read once, when the session was
+    opened, and every later connection of the page (Reconnect, a reload) sent the password with
+    no check at all."""
+    e, g, probes, shown = _reconnecting(tmp_path, monkeypatch, _ARGS_13, [GOOD_CERT, GOOD_CERT, GOOD_CERT])
+    assert probes == 3 and len(g.connects) == 3
+    assert all(c == ["connect", "VERSION_1_3_0", "10.250.0.9", "SAVED-PW", "nla", "true"] for c in g.connects)
+    assert all(first[0] != "error" for first in shown)
+
+
+@pytest.mark.parametrize("now, says", [
+    ({**GOOD_CERT, "sha256": "EE:FF"}, "it now presents another (SHA-256: EE:FF)"),
+    ({"tls": False, "protocol": "rdp", "sha256": "", "subject": "", "issuer": "", "not_after": "", "self_signed": False},
+     "it now offers NO TLS at all"),
+])
+def test_a_reconnect_to_a_changed_certificate_is_refused_before_the_password_is_sent(tmp_path, monkeypatch, now, says):
+    e, g, probes, shown = _reconnecting(tmp_path, monkeypatch, _ARGS_13, [GOOD_CERT, now, GOOD_CERT])
+    assert probes == 3 and len(g.connects) == 2                   # the second never got as far as `connect`
+    assert shown[0][0] != "error" and shown[2][0] != "error"
+    op, text, code = shown[1]                                     # in the RDP tab, as other failures are
+    assert op == "error" and code == "519" and text.startswith("Not connected: 10.250.0.9:3389 presented")
+    assert "AA:BB" in text and says in text and "intercepting" in text and "remove the pin" in text
+    events = _rdp_events(e)
+    assert [k for k, _ in events] == ["rdp_connecting", "rdp_connected", "rdp_disconnected", "rdp_cert_mismatch",
+                                      "rdp_connect_failed", "rdp_connecting", "rdp_connected", "rdp_disconnected"]
+    mismatch = dict(events)["rdp_cert_mismatch"]
+    assert (mismatch["pinned"], mismatch["got"], mismatch["tls"]) == ("AA:BB", now["sha256"], now["tls"])
+
+
+def test_a_guacd_that_checks_the_pin_itself_needs_no_second_reading(tmp_path, monkeypatch):
+    e, g, probes, shown = _reconnecting(tmp_path, monkeypatch, (*_ARGS_13, "cert-fingerprints"), [GOOD_CERT, GOOD_CERT])
+    assert probes == 0 and len(g.connects) == 2
+    # FreeRDP holds the connection itself to the pin: ignore-cert off, the fingerprint handed over
+    assert g.connects[0][4:] == ["nla", "false", "sha256:aa:bb"]
+
+
+async def test_a_certificate_that_cant_be_read_again_refuses_the_reconnect(rdp_env, monkeypatch):
+    engine = rdp_env[0]
+    sess = RdpSession(id="dc09", name="dc09", params={"hostname": "10.250.0.9", "port": "3389", "username": "bob"},
+                      cert=dict(GOOD_CERT))
+
+    async def unreachable(host, port=3389, user=""):
+        raise rdpcert.CertError(f"cannot reach {host}:{port}: timed out")
+    monkeypatch.setattr(rdpcert, "fetch", unreachable)
+    with pytest.raises(UserError, match="couldn't be read again.*cannot reach 10.250.0.9:3389"):
+        await engine.rdp_recheck(sess)
+
+
 @pytest.mark.parametrize("stream, connected_at", [
     (GUACD_13_OK, "sync"), (GUACD_16_OK, "sync"), (GUACD_13_BADPASS, None), (GUACD_16_BADPASS, None),
 ])

@@ -924,7 +924,22 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         # what guacd sends is watched (never changed) for when the desktop is really connected
         # and why it wasn't: `ready` comes before the RDP connection is even tried
         watch: guac.ConnectWatch | None = guac.ConnectWatch()
-        connected, failure, pin = False, "", None
+        connected, failure, refused, pin = False, "", "", None
+
+        async def recheck(names: list[str]) -> None:
+            # A guacd that can't hold the connection to the pin itself (1.3 takes no
+            # `cert-fingerprints`) connects with ignore-cert, so the certificate is read again
+            # here, for every connection the page makes and before guacd is given the password:
+            # this one may come hours after the session was opened (Reconnect, a fit-to-window
+            # reconnect, a reload). The probe and guacd's connection are still two TLS sessions.
+            nonlocal refused
+            if sess.cert.get("tls") and not guac.enforces_pin(names, params):
+                try:
+                    await engine.rdp_recheck(sess)
+                except UserError as e:
+                    refused = str(e)
+                    raise
+
         try:
             try:
                 try:
@@ -936,10 +951,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                         raise
                     reader, writer = await guac.connect(5)
                 _, names, leftover, decoder = await guac.handshake(reader, writer, "rdp", params, width, height, dpi,
-                                                                   _local_timezone())
+                                                                   _local_timezone(), before_connect=recheck)
             except (OSError, asyncio.TimeoutError, guac.GuacError, UserError) as e:
                 failure = str(e) or type(e).__name__
-                await ws.send_text(guac.tunnel_uuid() + guac.encode("error", f"Could not start RDP via guacd: {failure}", "519"))
+                await ws.send_text(guac.tunnel_uuid() + guac.encode(
+                    "error", refused or f"Could not start RDP via guacd: {failure}", "519"))
                 return
             pin = guac.enforces_pin(names, params) if params.get("cert-fingerprints") else None
             engine.rdp_connecting(sess)

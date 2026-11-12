@@ -2197,6 +2197,30 @@ class Engine:
             raise KeyError(sid)
         return dict(sess.params)
 
+    async def rdp_recheck(self, sess: RdpSession) -> None:
+        """Before a connection of `sess` through a guacd that can't check the pin itself (1.3):
+        read the server's certificate again and hold it to the one the session was opened
+        against. The relay asks this for every connection the page makes, so a Reconnect or a
+        reload hours later is checked like the first. Raises UserError, to be shown in the
+        session's tab, when the certificate is another or the server offers no TLS any more."""
+        where = f"{sess.params.get('hostname', '')}:{sess.params.get('port', '') or 3389}"
+        try:
+            cert = await asyncio.wait_for(rdpcert.fetch(sess.params.get("hostname", ""), int(sess.params.get("port") or 3389),
+                                                        sess.params.get("username", "").split("@")[0]), rdpcert.RECHECK_TIMEOUT)
+        except (rdpcert.CertError, asyncio.TimeoutError) as e:
+            raise UserError(f"Not connected: the certificate of {where} couldn't be read again to check it against the "
+                            f"one this session was opened with ({e or 'timed out'}).") from e
+        if cert["tls"] and cert["sha256"] == sess.cert.get("sha256"):
+            return
+        self.log("rdp_cert_mismatch", session_id=sess.id, target=where, pinned=sess.cert.get("sha256", ""),
+                 got=cert["sha256"], tls=cert["tls"])
+        now = f"it now presents another (SHA-256: {cert['sha256']})" if cert["tls"] else "it now offers NO TLS at all"
+        raise UserError(f"Not connected: {where} presented the certificate with SHA-256 {sess.cert.get('sha256', '?')} when "
+                        f"this session was opened, and {now}. This can mean the server was rebuilt or its certificate "
+                        "renewed, or that someone is intercepting the connection. Nothing was sent. Verify with the "
+                        "device owner; if the change is legitimate, close this session, remove the pin under "
+                        "Settings → Hosts and open the host again.")
+
     # The audit trail of one browser connection of an RDP session (server/app.py's relay):
     # rdp_connecting when guacd has taken the parameters, then rdp_connected once the remote
     # desktop is really there (guac.ConnectWatch), and rdp_disconnected when it ends; or

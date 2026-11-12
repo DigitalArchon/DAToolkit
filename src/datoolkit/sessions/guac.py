@@ -403,10 +403,12 @@ async def _read_instruction(reader: asyncio.StreamReader, parser: Parser, decode
 
 async def handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, protocol: str,
                     params: dict[str, str], width: int, height: int, dpi: int = 96,
-                    timezone: str = "") -> tuple[str, list[str], str, object]:
+                    timezone: str = "", before_connect=None) -> tuple[str, list[str], str, object]:
     """Select the protocol, answer `args` from `params`, and wait for `ready`. Returns
     (connection id, the parameter names guacd asked for, text that arrived after `ready` and
-    must be passed on, the UTF-8 decoder holding any split character)."""
+    must be passed on, the UTF-8 decoder holding any split character). `before_connect` is
+    awaited with the names guacd asked for, once they are known and before anything of
+    `params` (the password among it) is sent: what it raises ends the handshake there."""
     parser, decoder, pending = Parser(), codecs.getincrementaldecoder("utf-8")(), []
 
     async def expect(opcode: str) -> list[str]:
@@ -420,6 +422,8 @@ async def handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, 
     writer.write(encode("select", protocol).encode())
     await writer.drain()
     names = await expect("args")
+    if before_connect:
+        await before_connect(names)
     pinned = enforces_pin(names, params)
     values = []
     for name in names:

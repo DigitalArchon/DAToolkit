@@ -4,11 +4,15 @@ guacd 1.3 (Ubuntu/Mint's package) can only ignore certificate errors, so DAToolk
 the certificate itself before every connection: it starts an RDP connection far enough to
 complete the TLS handshake (X.224 Connection Request with an RDP Negotiation Request for TLS
 or CredSSP), reads the server certificate, and compares its SHA-256 fingerprint with the pin
-saved the first time the technician accepted it. guacd then connects with ignore-cert.
+saved the first time the technician accepted it. guacd then connects with ignore-cert. Every
+connection means each one guacd makes: when the session is opened, and again whenever the page
+connects to it (the first time, Reconnect, a fit-to-window reconnect, a reload). Until Nov 2026
+only the opening was checked, and a Reconnect hours later sent the password unchecked.
 
 Limit: the check and guacd's connection are separate TLS sessions, so an attacker able to
 tell them apart could still sit in the middle of the second one. It stops the common case
-(a changed or spoofed certificate) and says so plainly."""
+(a changed or spoofed certificate) and says so plainly. guacd 1.6 and later check the pin on
+their own connection, and need none of this."""
 
 from __future__ import annotations
 
@@ -28,6 +32,9 @@ from cryptography import x509
 from ..config import config_dir, private_dir
 
 TIMEOUT = 10
+# seconds the whole of a certificate may take to read again before a reconnect: guacd, which is
+# waiting for its handshake to go on meanwhile, gives up after 15
+RECHECK_TIMEOUT = 12
 PROTOCOL_TLS, PROTOCOL_HYBRID = 0x1, 0x2
 NAME_LIMIT = 200          # characters of a certificate's subject or issuer that are shown
 # Unicode categories never shown from a certificate: controls, formatting marks, line and
