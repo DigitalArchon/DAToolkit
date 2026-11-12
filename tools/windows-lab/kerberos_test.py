@@ -57,7 +57,7 @@ async def main():
     app = App("kerberos", port=48610, extra_env=instance_env())
     app.start()
     listener = asyncio.create_task(app.listen())
-    app.rules = [(r"First connection to .*:5986", "yes"), (r"Password for dat-tech@.*\(WinRM\)", DPASS),
+    app.rules = [(r"First connection to .*:5986", "yes"), (rf"Password for {re.escape(DUSER)}@.*\(WinRM\)", DPASS),
                  (r"Password for test@.*\(WinRM\)", PASS), (r"Password for bad@.*", "x")]
     try:
         await asyncio.sleep(0.5)

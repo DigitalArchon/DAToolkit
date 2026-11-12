@@ -22,6 +22,10 @@ Run each from this folder under a memory cap, one at a time on the VM's RDP sess
 
     systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 ../../.venv/bin/python rdp_test.py
 
+`winrm_test.py`, `console_test.py`, `queue_test.py`, `rdp_test.py` and `kerberos_test.py` print
+PASS or FAIL for each check and end with status 0 only when all passed; `cert_test.py` and
+`basic_test.py` print what they saw, to be read.
+
 Needs: the VM running with WinRM, RDP and SSH as LAB.md describes; `~/.config/testlab/vm-credentials`;
 the `p330-2-win11` ssh alias (for checks on the Windows side); guacd on 127.0.0.1:4822; Firefox.
 Output (instances, screenshots, reports) goes to `~/.cache/datoolkit-winlab` (`WINLAB_WORK`).
@@ -35,7 +39,7 @@ After an RDP test the VM's `test` session is no longer on the console: give it b
 (LAB.md), and close the PowerShell windows the test opened there.
 
 Results (2026-11-10, Windows 11 Enterprise 26H2 build 26300, guacd 1.3 and the 1.6.0 image): everything
-passes on branch `windows-lab-fixes`. What Windows refuses by design is checked as refused: TLS-only and
+passed on the code released as 0.1.0b27. What Windows refuses by design is checked as refused: TLS-only and
 legacy RDP against an NLA-only server, and a wrong password, each logged as `rdp_connect_failed` with
 guacd's reason. Extended NLA isn't offered (no guacd available can speak it). Kerberos passed through the
 AppImage on Ubuntu 26.04 with the domain's DNS and no krb5.conf, and directly on Fedora 44, CachyOS and

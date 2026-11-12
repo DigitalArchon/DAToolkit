@@ -1,6 +1,6 @@
 """Queue items in Windows sessions: recipes, watch, tool transfer, capture; WinRM and SSH.
 
-    w2_queue.py winrm|ssh [recipe ids...]"""
+    queue_test.py winrm|ssh [recipe ids, "watch", "tools"...]"""
 
 import asyncio
 import hashlib
@@ -10,7 +10,10 @@ import re
 import sys
 import time
 
-from lab import PASS, SCRATCH, USER, WIN, App, Term
+if len(sys.argv) < 2 or sys.argv[1] not in ("winrm", "ssh"):
+    sys.exit(__doc__)
+
+from lab import PASS, SCRATCH, USER, WIN, App, Term  # noqa: E402
 
 KIND = sys.argv[1]
 ONLY = sys.argv[2:]
@@ -156,6 +159,7 @@ async def main():
         listener.cancel()
         app.quit()
     print(f"\n{sum(ok for ok, *_ in results)}/{len(results)} passed")
+    sys.exit(0 if all(ok for ok, *_ in results) else 1)
 
 
 asyncio.run(main())

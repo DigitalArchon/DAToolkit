@@ -13,7 +13,6 @@ from lab import PASS, SCRATCH, USER, WIN, App
 OUT = SCRATCH / "rdp"
 OUT.mkdir(exist_ok=True)
 results = []
-ONLY = sys.argv[1:]
 
 
 def check(ok, what, detail=""):
@@ -260,5 +259,6 @@ async def main():
     print(f"\n{sum(ok for ok, *_ in results)}/{len(results)} passed")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":       # (cert_test.py and basic_test.py import win_ps and open_rdp from here)
     asyncio.run(main())
+    sys.exit(0 if all(ok for ok, *_ in results) else 1)

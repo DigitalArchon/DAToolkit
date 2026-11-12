@@ -1,5 +1,5 @@
 """The WinRM console's interactive behaviour on fresh sessions: Ctrl+C (HTTP and HTTPS),
-streaming of slow output, Read-Host, multi-line paste, a watch. Run before and after a fix."""
+streaming of slow output, Read-Host, multi-line paste. Run before and after a fix."""
 
 import asyncio
 import re
@@ -10,7 +10,6 @@ from lab import PASS, USER, WIN, App, Term
 
 PROMPT = r"\[192\.168\.1\.214\]: PS [^\n]*> $"
 results = []
-REPO = sys.argv[1] if len(sys.argv) > 1 else None
 
 
 def check(ok, what, detail=""):
@@ -131,6 +130,7 @@ async def main():
         listener.cancel()
         app.quit()
     print(f"\n{sum(ok for ok, *_ in results)}/{len(results)} passed")
+    sys.exit(0 if all(ok for ok, *_ in results) else 1)
 
 
 asyncio.run(main())

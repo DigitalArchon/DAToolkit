@@ -68,3 +68,20 @@ def test_the_winrm_lab_script_expects_what_the_app_says_of_kerberos_to_an_addres
         fields = {"name": "LabK", "kind": "winrm", "host": "win11test.lab.test", "user": "dat-tech@LAB.TEST",
                   "auth": "kerberos", "winrm_ssl": True, **refused}
         assert winrm.problem(Host(**fields)), refused
+
+
+def test_a_lab_script_that_counts_its_checks_ends_by_them(tmp_path):
+    """console_test.py, queue_test.py and rdp_test.py printed "17/19 passed" and ended with status
+    0; queue_test.py without its argument was an IndexError, and its usage named another file."""
+    for name in ("winrm_test.py", "console_test.py", "queue_test.py", "rdp_test.py", "kerberos_test.py"):
+        script = (LAB / name).read_text()
+        assert 'print(("PASS " if ok else "FAIL ")' in script, name
+        assert "sys.exit(0 if all(ok for ok, *_ in results) else 1)" in script, name
+    # asked for its argument before the lab's credentials are (there are none here)
+    done = subprocess.run([sys.executable, str(LAB / "queue_test.py")], cwd=tmp_path, capture_output=True, text=True,
+                          timeout=60, env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path),
+                                           "WINLAB_CREDS": str(tmp_path), "WINLAB_WORK": str(tmp_path / "work")})
+    assert done.returncode == 1 and "queue_test.py winrm|ssh" in done.stderr and "Traceback" not in done.stderr
+    assert not (tmp_path / "work").exists()
+    # the domain user's password is offered for the domain user the lab's file names, whoever that is
+    assert r'rf"Password for {re.escape(DUSER)}@.*\(WinRM\)"' in (LAB / "kerberos_test.py").read_text()
