@@ -49,6 +49,17 @@ class Proposal:
         return d
 
 
+def _text(raw: dict, key: str, i: int) -> str:
+    """A text field of proposed item number `i`: missing or null is empty, a number is its
+    digits, and a list or an object is an error (as text it would be Python's own notation)."""
+    value = raw.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, (str, int, float)):
+        raise TypeError(f"item {i}: {key} must be a string")
+    return str(value)
+
+
 class Queue:
     def __init__(self) -> None:
         self.items: list[Proposal] = []
@@ -62,40 +73,52 @@ class Queue:
         the blast-radius rule see which session a command would cut. `dry_run_of` marks the
         items as rehearsals of that item; it is never read from `raw_items`, which may come
         from the model, because a rehearsal is classed read-only."""
-        added = []
-        for raw in raw_items:
-            command, removed = hidden.clean(str(raw.get("command", "")))
+        # The whole call is read before any of it is queued: an item that can't be read (not an
+        # object, a command that isn't text) raises here, with nothing added. Until Nov 2026 the
+        # items before it were queued already and the error then hid them from the chat and the
+        # log, and the AI, told its call was invalid, sent them again.
+        if insert_before is not None:
+            self.get(insert_before)
+        built, num = [], self._next
+        for i, raw in enumerate(raw_items, 1):
+            if not isinstance(raw, dict):
+                raise TypeError(f"item {i} is not an object")
+            if not isinstance(raw.get("command", ""), str):
+                raise TypeError(f"item {i}: command must be a string")
+            command, removed = hidden.clean(raw.get("command", ""))
             command = command.strip()
             if not command:
                 continue
-            model_risk = str(raw.get("risk", "modifying"))
-            session_id = str(raw.get("session_id") or "")
+            model_risk = _text(raw, "risk", i) or "modifying"
+            session_id = _text(raw, "session_id", i)
             if fallback_session and known_sessions is not None and session_id not in known_sessions:
                 session_id = fallback_session
             p = Proposal(
-                num=self._next,
+                num=num,
                 call_id=call_id,
                 session_id=session_id,
                 command=command,
-                purpose=str(raw.get("purpose", "")),
+                purpose=_text(raw, "purpose", i),
                 model_risk=model_risk,
                 risk="modifying",
                 original_command=command,
-                rollback=str(raw.get("rollback", "") or ""),
-                group=str(raw.get("group", "") or ""),
-                recipe=str(raw.get("recipe", "") or ""),
-                recipe_key=str(raw.get("recipe_key", "") or ""),
+                rollback=_text(raw, "rollback", i),
+                group=_text(raw, "group", i),
+                recipe=_text(raw, "recipe", i),
+                recipe_key=_text(raw, "recipe_key", i),
                 dry_run_of=dry_run_of,
                 hidden=removed,
             )
             self._classify(p, session_kinds)
-            self._next += 1
-            if insert_before is not None:
-                self.items.insert(self.items.index(self.get(insert_before)), p)
-            else:
-                self.items.append(p)
-            added.append(p)
-        return added
+            num += 1
+            built.append(p)
+        self._next = num
+        if insert_before is not None:
+            at = self.items.index(self.get(insert_before))
+            self.items[at:at] = built
+        else:
+            self.items.extend(built)
+        return built
 
     @staticmethod
     def _classify(p: Proposal, session_kinds: dict[str, str] | None) -> None:
