@@ -441,16 +441,20 @@ def _bases(base_url: str) -> list[str]:
 
 
 def _error_text(response: httpx.Response) -> str:
-    """The provider's message from an error response, or ""."""
+    """The provider's message from an error response, or "": on one line, short, and without
+    what can't be seen (`relay_said`), as everything of the relay's or the provider's that a
+    refusal quotes is. It is shown in the top bar, logged, and, when a research run on the model
+    fails, handed to the chat model as its tool's result. Until Nov 2026 only this was cut short,
+    and a refusal could carry pages of the relay's text, line breaks and hidden characters."""
     try:
         body = response.json()
-    except ValueError:
-        return (response.text or "").strip()[:200]
+    except (ValueError, RecursionError):
+        return relay_said(response.text or "")
     if isinstance(body, dict):
         error = body.get("error")
         if isinstance(error, dict):
             error = error.get("message")
-        return str(error or body.get("message") or "")[:200]
+        return relay_said(str(error or body.get("message") or ""))
     return ""
 
 
@@ -629,7 +633,7 @@ class TeeClient:
                 )
             try:
                 body = response.json()
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:    # or JSON nested past reading
                 raise ProviderError(f"{netguard.shown(base + path)} returned a non-JSON body") from exc
             if not isinstance(body, dict):
                 raise ProviderError(f"{netguard.shown(base + path)} returned {type(body).__name__}")
@@ -679,7 +683,24 @@ class TeeClient:
         Until Sept 2026 a nonce that merely came back in nano-gpt's JSON counted,
         the report data was read from nano-gpt's copy, and neither Intel's nor
         NVIDIA's signatures were checked. Anything can echo a string.
+
+        Evidence that isn't in the shape it should be (a list where an object belongs, a key
+        that isn't hex, JSON nested past reading) refuses like any other that doesn't hold, as
+        a TeeRefused that says it couldn't be read, the error it raised its cause: until Nov
+        2026 that error itself (an AttributeError, a TypeError) reached the top bar.
         """
+        try:
+            return self._attest()
+        except (ProviderError, ImportError):     # a refusal already; or no cryptography, which says so itself
+            raise
+        except Exception as exc:  # noqa: BLE001 - whatever reading the evidence raised, it is refused
+            raise TeeRefused(
+                f"{self.model}'s attestation couldn't be read: what its provider sent isn't in the "
+                f"shape it should be ({type(exc).__name__})"
+            ) from exc
+
+    def _attest(self) -> Attestation:
+        """`attest`'s checks, in their order."""
         self.signing_address = None
         self.signers = frozenset()
         self.keyset = self.keyset_digest = None
@@ -719,18 +740,19 @@ class TeeClient:
             )
             raise TeeRefused(
                 f"{self.model}'s attestation, relayed by its provider "
-                f"({body.get('attestation_type') or 'unnamed'}), was {why}, so it can't "
-                "show the enclave is live for this request"
+                f"({relay_said(str(body.get('attestation_type') or ''), 40) or 'unnamed'}), was {why}, "
+                "so it can't show the enclave is live for this request"
             )
         if body.get("signing_address") or body.get("intel_quote"):
             return self._attest_signing_key(body, nonce, gateway)
         # Nor does one that holds nothing to check (SealedLore's gateway stands in for it too),
-        # for the same reason.
+        # for the same reason. What it holds instead is the relay's to write: said short, on one
+        # line, without what can't be seen (`_error_text`).
         if body.get("error"):
-            raise TeeRefused(f"nano-gpt couldn't attest {self.model}: {body['error']}")
+            raise TeeRefused(f"nano-gpt couldn't attest {self.model}: {relay_said(str(body['error']))}")
         raise TeeRefused(
             f"{self.model}'s attestation is in a shape this app doesn't recognise "
-            f"(it holds {', '.join(sorted(body)) or 'nothing'})"
+            f"(it holds {relay_said(', '.join(sorted(body))) or 'nothing'})"
         )
 
     def _fetch_attestation(self, *, aci: bool = False) -> tuple[dict[str, Any], str]:
@@ -1047,7 +1069,7 @@ class TeeClient:
         return attestation
 
     def _check_instance(self, item: dict[str, Any], nonce: str) -> _Checks:
-        name = str(item.get("instance_id") or "an instance")[:8]
+        name = relay_said(str(item.get("instance_id") or ""), 8) or "an instance"
         try:
             raw = base64.b64decode(item["quote"])
             quote = dcap.parse_quote(raw)
@@ -1093,11 +1115,22 @@ class TeeClient:
         return check
 
     def _check_quote(self, raw: bytes, check: _Checks) -> None:
-        """Intel's verification of one quote, into `check`. Refuses a bad quote."""
+        """Intel's verification of one quote, into `check`. Refuses a bad quote, and one whose
+        verification raised anything else: it couldn't be read. Why is said short and on one
+        line (`relay_said`): a refusal can name a certificate of the quote's own chain, which
+        its sender wrote."""
         try:
             intel = self._intel(raw, self._client)
         except dcap.DcapError as exc:
-            raise TeeRefused(f"{self.model}'s Intel TDX quote failed verification: {exc}") from exc
+            raise TeeRefused(
+                f"{self.model}'s Intel TDX quote failed verification: {relay_said(str(exc), 300)}"
+            ) from exc
+        except (ProviderError, ImportError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - not verified, whatever it raised
+            raise TeeRefused(
+                f"{self.model}'s Intel TDX quote couldn't be read ({type(exc).__name__})"
+            ) from exc
         check.note(*intel.notes)
         check.tcb(intel.status)
         if not intel.collateral:
@@ -1128,7 +1161,15 @@ class TeeClient:
             check.fall_short("NVIDIA signature unchecked")
             check.note(f"{exc}, so NVIDIA's verdict is unchecked")
         except nras.NrasError as exc:
-            raise TeeRefused(f"{self.model}'s GPU attestation failed: {exc}") from exc
+            raise TeeRefused(
+                f"{self.model}'s GPU attestation failed: {relay_said(str(exc), 300)}"
+            ) from exc
+        except (ProviderError, ImportError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - not verified, whatever it raised
+            raise TeeRefused(
+                f"{self.model}'s GPU attestation couldn't be read ({type(exc).__name__})"
+            ) from exc
         else:
             check.gpus += gpus
             check.note(

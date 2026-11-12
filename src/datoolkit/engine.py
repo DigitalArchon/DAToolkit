@@ -1044,7 +1044,11 @@ class Engine:
         """Attest the enclave a model runs in: Private Mode (Tinfoil's verifier) or TEE (Intel
         TDX + NVIDIA, llm/tee.py). The chat model's and vision helper's results are shown;
         every result is logged. A TEE model's attestation is under way (`under_way`, made here
-        when not given) until it ends: a request to the model meanwhile waits for it (_tee_guard)."""
+        when not given) until it ends: a request to the model meanwhile waits for it (_tee_guard).
+
+        Why one failed is shown, logged and, when a research run on the model fails, handed to
+        the chat model: on one line, short, without what can't be seen (llm/private_mode.py
+        relay_said), whoever wrote it."""
         tee = not is_private_mode(model)
         key = (prov.name, model)
         if tee and under_way is None:
@@ -1063,7 +1067,7 @@ class Engine:
                 result = self._retired(e)
                 self.log("private_model_retired", role=slot, model=model, offered=e.offered)
             except Exception as e:  # noqa: BLE001
-                said = netguard.scrubbed(str(e))
+                said = tee_mod.relay_said(netguard.scrubbed(str(e)), 700)
                 result = {"status": "failed", "model": model, "error": said, **({"kind": "tee"} if tee else {})}
                 self.log("enclave_attestation_failed", role=slot, model=model, error=said)
         finally:
