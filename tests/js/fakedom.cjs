@@ -311,7 +311,11 @@ class Element extends Node {
     return null;
   }
 
-  focus() { if (this._doc) this._doc.activeElement = this; }
+  focus() {
+    if (!this._doc || this._doc.activeElement === this) return;
+    this._doc.activeElement = this;
+    this.dispatchEvent(new Event("focusin"));
+  }
   blur() { if (this._doc?.activeElement === this) this._doc.activeElement = this._doc.body; }
   select() {
     this.selectionStart = 0;

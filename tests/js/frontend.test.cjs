@@ -1271,6 +1271,152 @@ test("pasting spreadsheet cells pastes their text, not a picture of them", async
   assert.equal(asked, 1, "a picture on its own is attached");
 });
 
+// ------------------------------------------------------------------ dialogs
+
+test("a dialog is one to a screen reader, holds the keyboard, takes Escape wherever the focus is and gives the focus back", async () => {
+  const app = await page("a");
+  const opener = app.$("#settings-btn");
+  opener.focus();
+  opener.click();
+  await app.clock.tick(50);
+  const box = app.$(".modal");
+  assert.deepEqual([box.getAttribute("role"), box.getAttribute("aria-modal"), box.getAttribute("aria-label")], ["dialog", "true", "Settings"]);
+  assert.ok(box.contains(app.document.activeElement));
+  // Tab goes round inside it
+  const all = app.call("focusables", box);
+  assert.ok(all.length > 3 && all.every((el) => box.contains(el)));
+  all.at(-1).focus();
+  assert.equal(app.key(all.at(-1), { key: "Tab" }).defaultPrevented, true);
+  assert.ok(app.document.activeElement === all[0]);
+  assert.equal(app.key(all[0], { key: "Tab", shiftKey: true }).defaultPrevented, true);
+  assert.ok(app.document.activeElement === all.at(-1));
+  all[1].focus();
+  assert.equal(app.key(all[1], { key: "Tab" }).defaultPrevented, false, "between the ends the browser moves it");
+  // focus that lands on the page behind comes back
+  app.$("#chat-input").focus();
+  assert.ok(app.document.activeElement === box);
+  // a dialog on top is the one Escape closes, with the focus anywhere; then the one under it
+  const answer = app.call("confirmModal", "Sure?", "Really?");
+  await app.clock.tick(50);
+  assert.equal(app.$("#modal-root").querySelectorAll(".modal").length, 2);
+  app.document.activeElement = app.document.body;
+  app.key(app.document.body, { key: "Escape" });
+  await app.clock.tick(0);
+  assert.equal(await answer, false);
+  assert.deepEqual(app.$("#modal-root").querySelectorAll(".modal").map((m) => m.getAttribute("aria-label")), ["Settings"]);
+  assert.ok(app.document.activeElement === box, "back in the dialog under it");
+  app.key(app.document.body, { key: "Escape" });
+  await app.clock.tick(0);
+  assert.equal(app.$(".modal"), null);
+  assert.ok(app.document.activeElement === opener, "back on the button that opened it");
+});
+
+test("Escape or a click outside asks before closing a form with edits in it, and not otherwise", async () => {
+  const app = await page("a", null, { "POST /api/settings": () => ({ ok: true }) });
+  const outside = () => { const o = app.$(".overlay"); o.dispatchEvent(new Event("mousedown")); return app.clock.tick(50); };
+  const escape = () => { app.key(app.document.body, { key: "Escape" }); return app.clock.tick(50); };
+  const titles = () => app.$("#modal-root").querySelectorAll(".modal").map((m) => m.getAttribute("aria-label"));
+  app.call("openSettings", "general");
+  await app.clock.tick(50);
+  const field = app.$(".modal input[type=number]");
+  await app.type(field, "500");
+  await escape();
+  assert.deepEqual(titles(), ["Settings", "Close without saving?"]);
+  button(app.$("#modal-root").querySelectorAll(".modal")[1], "Cancel").click();
+  await app.clock.tick(50);
+  assert.deepEqual(titles(), ["Settings"]);
+  assert.equal(field.value, "500", "still there to save");
+  await outside();
+  assert.deepEqual(titles(), ["Settings", "Close without saving?"]);
+  await escape();                                                 // of the question: the same as Cancel
+  assert.deepEqual(titles(), ["Settings"]);
+  // another tab is another way to lose it: asked too
+  const tab = (label) => app.$(".modal .tabs-inline").querySelectorAll("button").find((b) => b.textContent === label);
+  tab("Model").click();
+  await app.clock.tick(50);
+  assert.deepEqual(titles(), ["Settings", "Close without saving?"]);
+  await escape();
+  assert.equal(tab("General").classList.contains("active"), true);
+  // saved: nothing to ask about
+  button(app.$(".modal"), "Save").click();
+  await app.clock.tick(50);
+  tab("Model").click();
+  await app.clock.tick(50);
+  assert.equal(tab("Model").classList.contains("active"), true);
+  // a control that saves itself is no unsaved edit
+  const self = app.$(".modal input.tee-upstreams");
+  self.checked = true;
+  self.dispatchEvent(new Event("change"));
+  await app.clock.tick(50);
+  await escape();
+  assert.deepEqual(titles(), []);
+  // the dialog's own buttons close without a question, and a dialog nothing was typed into just closes
+  app.call("openCaseModal", false);
+  await app.clock.tick(50);
+  await outside();
+  assert.deepEqual(titles(), []);
+  app.call("openCaseModal", false);
+  await app.clock.tick(50);
+  await app.type(app.$(".modal input[type=text]"), "TKT-9 half a name");
+  await app.type(app.$(".modal input[type=search]"), "acme");       // the list's filter isn't part of the form
+  await escape();
+  assert.deepEqual(titles(), ["Start a case", "Close without saving?"].map((t, i) => (i ? t : app.$(".modal").getAttribute("aria-label"))));
+  button(app.$("#modal-root").querySelectorAll(".modal")[1], "Discard it").click();
+  await app.clock.tick(50);
+  assert.deepEqual(titles(), []);
+});
+
+test("Send results asks before Escape discards text edited in it", async () => {
+  const app = await page("a", (s) => { Object.assign(s.queue[0], { status: "ran", ran_at: 1 }); }, {
+    "GET /api/queue/1/capture": () => ({ text: " 10:00 up 3 days" }),
+    "POST /api/preview": (c) => ({ items: c.body.texts.map((text) => ({ text, redactions: 0 })) }),
+  });
+  await app.call("openSendResults");
+  await app.clock.tick(50);
+  const text = app.$(".modal .result-block textarea");
+  assert.equal(text.value, " 10:00 up 3 days");
+  app.key(app.document.body, { key: "Escape" });
+  await app.clock.tick(50);
+  assert.equal(app.$(".modal"), null, "nothing edited: closed at once");
+  await app.call("openSendResults");
+  await app.clock.tick(50);
+  await app.type(app.$(".modal .result-block textarea"), " 10:00 up 3 days (the load is from the backup)");
+  app.key(app.document.body, { key: "Escape" });
+  await app.clock.tick(50);
+  assert.deepEqual(app.$("#modal-root").querySelectorAll(".modal").map((m) => m.getAttribute("aria-label")), ["Review results before sending", "Close without saving?"]);
+});
+
+test("a credential prompt that comes while the technician types doesn't take their keys into its field", async () => {
+  const app = await page("a", null, { "POST /api/prompts/p1": () => ({ ok: true }), "POST /api/prompts/p2": () => ({ ok: true }),
+    "POST /api/phone/claims/c1": () => ({ running: true }) });
+  const prompt = (id) => ({ id, session_id: "web01", text: "bob@web01's password:", secret: true, can_save: false });
+  const chat = app.$("#chat-input");
+  chat.focus();
+  app.key(chat, { key: "h" });
+  await app.event({ type: "prompt", prompt: prompt("p1") });
+  await app.clock.tick(50);
+  const box = app.$(".modal");
+  assert.ok(app.document.activeElement === box, "the dialog has the focus, its password field doesn't");
+  assert.match(box.querySelector(".prompt-held").textContent, /You were typing when this came up.*click the field or press Tab to answer/);
+  assert.equal(app.key(box, { key: "Enter" }).defaultPrevented, false);
+  assert.deepEqual(app.posts("/api/prompts/p1"), [], "Enter typed on answers nothing");
+  assert.equal(app.key(box, { key: "Tab" }).defaultPrevented, false, "Tab goes to the field, as the browser moves it");
+  await app.event({ type: "prompt_done", id: "p1" });
+  assert.ok(app.document.activeElement === chat, "and the focus is back where they were typing");
+  // not typing: the field is ready at once
+  await app.clock.tick(2000);
+  await app.event({ type: "prompt", prompt: prompt("p2") });
+  await app.clock.tick(50);
+  assert.equal(app.document.activeElement.type, "password");
+  assert.equal(app.$(".modal .prompt-held"), null);
+  await app.event({ type: "prompt_done", id: "p2" });
+  // a phone asking to pair, mid-sentence: Refuse isn't under the next press of Space
+  app.key(chat, { key: " " });
+  await app.event({ type: "companion_claim", claim: { id: "c1", name: "Pixel", check: "4821" } });
+  await app.clock.tick(100);
+  assert.ok(app.document.activeElement === app.$(".modal"));
+});
+
 // ------------------------------------------------------------------ the top bar
 
 test("a settings notice and a keyring problem show in the banners", async () => {

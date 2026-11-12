@@ -341,7 +341,8 @@ async function clipWrite(text) {
   try { await navigator.clipboard.writeText(text); return; } catch { /* not allowed here, or an older browser: the old way */ }
   const had = document.activeElement;
   const ta = h("textarea", { value: text, tabindex: -1, "aria-hidden": "true", style: "position:fixed;left:-9999px;top:0" });
-  document.body.append(ta);
+  (MODALS.at(-1)?.box || document.body).append(ta);       // inside an open dialog, which holds the focus
+  ta.focus();
   ta.select();
   let ok = false;
   try { ok = document.execCommand("copy"); } catch { /* not copied */ }
@@ -357,11 +358,79 @@ async function clipRead() {
 
 // ------------------------------------------------------------------ modals
 
-function modal({ title, body, buttons = [], wide = false, onClose, dismissable = true }) {
+// Dialogs stack, the newest on top. The top one is a dialog to a screen reader (role, aria-modal,
+// its title as its name) and holds the keyboard: Tab goes round inside it, focus that lands
+// elsewhere comes back, Escape reaches it wherever the focus is, and when it closes the focus
+// returns to what had it before (the button that opened it, or the dialog under it).
+//
+// guard: the dialog is a form. Once something in it was typed or changed (but for fields marked
+// data-no-guard: a filter, a control that saves itself), Escape and a click outside it ask before
+// closing, since that would discard it; its own buttons close as they always did. saved() says
+// the edits so far are saved, mayDiscard() asks the same question for another way out.
+// quiet: the dialog came by itself while the technician was typing (justTyped), so no field or
+// button of it is given the focus: the next keys go nowhere until they click or press Tab.
+// (Until Nov 2026 a dialog was a plain <div>: Tab left it for the page behind, Escape reached it
+// only with the focus inside, and a click on the backdrop closed a half-filled form unasked.)
+const MODALS = [];              // the open dialogs, the top one last
+let lastKeyAt = -Infinity;      // when a key was last pressed anywhere on the page (performance.now())
+const justTyped = () => performance.now() - lastKeyAt < 1500;
+
+function focusables(box) {
+  return [...box.querySelectorAll("a[href], button, input, select, textarea, summary, [tabindex]")].filter((el) =>
+    !el.disabled && el.getAttribute("tabindex") !== "-1" && el.type !== "hidden" && !el.closest(".hidden") && el.offsetParent !== null);
+}
+
+function dialogKeys(e) {
+  lastKeyAt = performance.now();
+  const top = MODALS.at(-1);
+  if (!top) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    top.dismiss();
+  } else if (e.key === "Tab") {
+    const all = focusables(top.box), at = document.activeElement;
+    const to = !all.length ? top.box : !top.box.contains(at) ? (e.shiftKey ? all.at(-1) : all[0])
+      : e.shiftKey && (at === all[0] || at === top.box) ? all.at(-1) : !e.shiftKey && at === all.at(-1) ? all[0] : null;
+    if (to) { e.preventDefault(); to.focus(); }
+  }
+}
+document.addEventListener("keydown", dialogKeys, true);
+document.addEventListener("focusin", (e) => {
+  const top = MODALS.at(-1);
+  if (top && e.target instanceof Element && !top.box.contains(e.target) && !$("#toasts").contains(e.target)) top.box.focus();
+});
+
+function modal({ title, body, buttons = [], wide = false, onClose, dismissable = true, guard = false, quiet = false }) {
   const root = $("#modal-root");
-  const box = h("div", { class: `modal${wide ? " wide" : ""}`, tabindex: -1 });
+  const opener = document.activeElement;
+  const box = h("div", { class: `modal${wide ? " wide" : ""}`, tabindex: -1, role: "dialog", "aria-modal": "true", "aria-label": title });
   const overlay = h("div", { class: "overlay" }, box);
-  const close = () => { overlay.remove(); onClose?.(); };
+  const m = { box, edited: false, closed: false, asking: false };
+  const close = () => {
+    if (m.closed) return;
+    m.closed = true;
+    overlay.remove();
+    MODALS.splice(MODALS.indexOf(m), 1);
+    const back = opener?.isConnected && opener !== document.body ? opener : MODALS.at(-1)?.box;
+    back?.focus?.();
+    onClose?.();
+  };
+  const mayDiscard = async () => {
+    if (!guard || !m.edited) return true;
+    if (m.asking) return false;
+    m.asking = true;
+    try {
+      return await confirmModal("Close without saving?", "What you typed or changed here hasn't been saved or sent. Closing discards it.", "Discard it", "danger");
+    } finally {
+      m.asking = false;
+    }
+  };
+  m.dismiss = async () => { if (dismissable && await mayDiscard()) close(); };
+  if (guard) {
+    const edit = (e) => { if (!e.target.closest?.("[data-no-guard]")) m.edited = true; };
+    box.addEventListener("input", edit);
+    box.addEventListener("change", edit);
+  }
   const content = h("div", { class: "content" }, body);
   const btnBar = h("div", { class: "buttons" });
   for (const b of buttons) {
@@ -391,15 +460,16 @@ function modal({ title, body, buttons = [], wide = false, onClose, dismissable =
     box.style.marginLeft = `${left}px`;
     box.style.maxWidth = `calc(100% - ${left}px)`;
   });
-  if (dismissable) {
-    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
-    overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
-  }
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) m.dismiss(); });
+  MODALS.push(m);
   root.append(overlay);
-  // a dialog with no field takes the focus itself, so Escape reaches it (not its OK button: Enter
-  // must not confirm a deletion)
-  setTimeout(() => (box.querySelector("input:not([type=checkbox]):not([type=radio]), textarea, select") || box).focus(), 30);
-  return { close, box };
+  // a dialog with no field takes the focus itself (not its OK button: Enter must not confirm a
+  // deletion); so does one that came while the technician was typing, whatever fields it has
+  setTimeout(() => {
+    if (m.closed || MODALS.at(-1) !== m) return;
+    ((!quiet && box.querySelector("input:not([type=checkbox]):not([type=radio]), textarea, select")) || box).focus();
+  }, 30);
+  return { close, box, saved: () => { m.edited = false; }, mayDiscard };
 }
 
 function fixModal(message, commands) {
@@ -2019,7 +2089,7 @@ async function rdpTypeNow(r, text, enter) {
 
 function rdpPasteText(r) {
   const ta = h("textarea", { rows: 6, class: "mono", spellcheck: "false", placeholder: "Text to send to the remote desktop" });
-  modal({ title: `Paste into ${r.id}`, body: h("div", { class: "field" }, ta,
+  modal({ title: `Paste into ${r.id}`, guard: true, body: h("div", { class: "field" }, ta,
     h("div", { class: "muted small" }, "“Remote clipboard” puts it on the remote clipboard; then press Ctrl+V there. “Type it” types it into the focused window as key presses: every line break is the Enter key there, and text with a tab in it can't be typed.")),
     buttons: [{ label: "Cancel" },
       { label: "Type it", onClick: async () => { await rdpType(r, ta.value, false); } },
@@ -2063,7 +2133,7 @@ async function pickWindow() {
     : [h("div", { class: "muted" }, "No other windows found.")]));
   name.addEventListener("input", () => { delete name.dataset.auto; });
   render();
-  modal({ title: "Open a window as a session", wide: true,
+  modal({ title: "Open a window as a session", wide: true, guard: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "muted small" }, "Pick the window to work through, for example a ScreenConnect control window. The AI can't see it until you send a screenshot (you black out anything sensitive first). Commands for it are copied to your clipboard for you to paste there."),
       list, h("div", { class: "row" }, h("label", { class: "field", style: "flex:2" }, h("span", {}, "Name"), name),
@@ -2951,7 +3021,7 @@ async function showBaselineDiff(sess, path) {
   // where the snapshot came from, when the server says: the case it was taken in, that case's
   // client and its sensitivity (a baseline is its host's, whichever case saved it)
   const from = `${r.case_name ? ` in the case “${r.case_name}”` : ""}${r.client ? ` (client ${r.client})` : ""}`;
-  modal({ title: `Baseline diff · ${r.host}`, wide: true,
+  modal({ title: `Baseline diff · ${r.host}`, wide: true, guard: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "muted small baseline-from" }, `Against the snapshot taken ${r.taken}${from}`,
         r.sensitivity ? [" ", h("span", { class: `badge ${r.sensitivity}` }, r.sensitivity)] : null,
@@ -3157,7 +3227,7 @@ function isGlobalShortcut(e) {
 }
 
 function globalKeys(e) {
-  if (!isGlobalShortcut(e) || $("#modal-root .overlay")) return;
+  if (!isGlobalShortcut(e) || MODALS.length) return;
   e.preventDefault();
   if (e.repeat) return;           // a held Ctrl+Shift+Enter would run one command after another
   if (e.altKey) {
@@ -3175,7 +3245,7 @@ function globalKeys(e) {
 function skipItem(item) {
   const note = h("textarea", { rows: 3, placeholder: "Why? (optional, sent to the AI) e.g. 'not allowed on production', 'already checked'" });
   modal({
-    title: `Skip #${item.num}`,
+    title: `Skip #${item.num}`, guard: true,
     body: h("div", { class: "field" }, h("pre", { class: "prompt-text" }, item.command), note),
     buttons: [{ label: "Cancel" },
       { label: "Skip", kind: "primary", onClick: () => api("POST", `/api/queue/${item.num}`, { status: "skipped", note: note.value.trim() }) }],
@@ -3301,7 +3371,7 @@ async function openSendResults(fill = null) {
   setTimeout(renderVision, 0);
   let sent = false;
   modal({
-    title: "Review results before sending", wide: true,
+    title: "Review results before sending", wide: true, guard: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "muted small" }, "This exact text is what the AI receives. Edit or untick anything that shouldn't be shared."),
       ...blocks.map((b) => b.include.closest(".result-block")), thumbs,
@@ -3342,7 +3412,7 @@ async function sendExcerpt(sid, text, title) {
   const ta = h("textarea", { spellcheck: "false", class: "mono", rows: 12, value: prev.text });
   const message = h("textarea", { rows: 2, placeholder: "Add a message for the AI (optional)" });
   modal({
-    title, wide: true,
+    title, wide: true, guard: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       prev.redactions || prev.truncated ? h("div", { class: "muted small" },
         [prev.redactions ? `${prev.redactions} redaction(s) applied` : "", prev.truncated ? "truncated" : ""].filter(Boolean).join(" · ")) : null,
@@ -3366,11 +3436,16 @@ function showCredentialPrompt(p) {
     answered = true;
     return api("POST", `/api/prompts/${p.id}`, { answer: value, save: doSave });
   };
+  // A prompt comes when the session asks, not when the technician does: while they are typing
+  // (into the chat, a terminal, another dialog) its field is not given the keyboard, or the rest
+  // of their sentence would go into a password box, masked, and Enter would send it.
+  const typing = justTyped();
   const m = modal({
     title: `Session ${p.session_id} is asking`,
-    dismissable: false,
+    dismissable: false, quiet: typing,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "prompt-text" }, p.text),
+      typing && input ? h("div", { class: "muted small prompt-held" }, "You were typing when this came up, so nothing you type goes into it yet: click the field or press Tab to answer.") : null,
       yesNo && !/certificate/i.test(p.text) ? h("div", { class: "muted small" }, "Verify the fingerprint with the device owner or console before accepting.") : null,
       input, save ? h("label", { class: "check" }, save, "Save to keyring for this host") : null),
     buttons: yesNo
@@ -3455,7 +3530,7 @@ function editCaseModal(c) {
         client, history: cf.history() });
     };
     const m = modal({
-      title: "Edit case",
+      title: "Edit case", guard: true,
       body: h("div", { style: "display:flex;flex-direction:column;gap:10px" },
         h("label", { class: "field" }, h("span", {}, "Case name / ticket"), name),
         cf.el,
@@ -3489,8 +3564,9 @@ function openCaseModal(first, reason = "") {
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
     st.case && st.chat.length ? h("div", { class: "muted small" }, "The current case's log stays on disk and can be resumed later. Open sessions carry over; the conversation and queue start fresh.") : null);
   const resumeList = h("div", { class: "case-list" }, h("div", { class: "muted small" }, "Loading…"));
-  const filter = h("input", { type: "search", placeholder: "Filter by name, notes or date" });
-  const selAll = h("input", { type: "checkbox", title: "Select every case shown" });
+  // (the list of earlier cases is not part of the form: filtering or ticking it is no edit to lose)
+  const filter = h("input", { type: "search", placeholder: "Filter by name, notes or date", "data-no-guard": "" });
+  const selAll = h("input", { type: "checkbox", title: "Select every case shown", "data-no-guard": "" });
   const delSel = h("button", { type: "button", class: "small danger", disabled: true }, "Delete selected");
   const tools = h("div", { class: "row case-tools" }, h("label", { class: "check" }, selAll, "All"), filter, delSel);
   const resumeBox = h("details", { class: "resume" }, h("summary", {}, "Previous cases (open, edit or delete)"), tools, resumeList);
@@ -3525,7 +3601,7 @@ function openCaseModal(first, reason = "") {
   const draw = () => {
     const vis = shown();
     resumeList.replaceChildren(...(vis.length ? vis.map((c) => {
-      const pick = h("input", { type: "checkbox", checked: chosen.has(c.id), title: "Select for deletion",
+      const pick = h("input", { type: "checkbox", checked: chosen.has(c.id), title: "Select for deletion", "data-no-guard": "",
         onchange: (e) => { if (e.target.checked) chosen.add(c.id); else chosen.delete(c.id); syncBulk(); } });
       return h("div", { class: "case-row" },
         h("label", { class: "case-pick" }, pick,
@@ -3563,7 +3639,7 @@ function openCaseModal(first, reason = "") {
     }
   });
   m = modal({
-    title: first || !st.case ? "Start a case" : "New case",
+    title: first || !st.case ? "Start a case" : "New case", guard: true,
     body,
     buttons: [{ label: first ? "Not now" : "Cancel" }, {
       label: "Start case", kind: "primary", onClick: async () => {
@@ -3702,7 +3778,7 @@ function openRouteDialog(provName, model, onSaved) {
   if (nano) api("GET", `/api/route/hosts?provider=${encodeURIComponent(provName)}&model=${encodeURIComponent(model)}`)
     .then((r) => { hosts = r; renderHosts(); }).catch((e) => { hosts = { hosts: [] }; table.replaceChildren(h("div", { class: "warnbox" }, e.message)); });
   render();
-  modal({ title: `Route for ${model}`, wide: true,
+  modal({ title: `Route for ${model}`, wide: true, guard: true,
     body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "muted small" }, nano
         ? "NanoGPT runs most open models on several hosts and picks one. A route asks for another. A host is a preference, not a pin: if it is down, another serves the call. Any route but NanoGPT's own is billed pay-as-you-go, even for a model your subscription includes. Each reply's bill shows whether the route held (on the AI's message)."
@@ -3744,11 +3820,15 @@ function modelSetting({ key, value, noneLabel, pickTitle, filter, filterNote, no
 // ------------------------------------------------------------------ settings
 
 function openSettings(tab = "providers") {
+  let m = null;
   const tabs = h("div", { class: "tabs-inline" });
   const pane = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
+  // A pane is drawn from what is saved, so drawing one leaves nothing unsaved; a form's own Save
+  // says the same (m.saved). Leaving a form with edits for another tab asks first, as closing does.
   const show = (name) => {
     for (const b of tabs.children) b.classList.toggle("active", b.dataset.tab === name);
     pane.replaceChildren(({ providers: providersPane, hosts: hostsPane, model: modelPane, tools: toolsPane, clients: clientsPane, general: generalPane })[name]());
+    m?.saved();
   };
   // The state event from a save can arrive after the HTTP reply, so fetch the config before redrawing a list.
   const reshow = async (name) => {
@@ -3756,9 +3836,9 @@ function openSettings(tab = "providers") {
     show(name);
   };
   for (const [key, label] of [["providers", "AI providers"], ["model", "Model"], ["hosts", "Hosts"], ["clients", "Clients"], ["tools", "Tool cache"], ["general", "General"]]) {
-    tabs.append(h("button", { type: "button", "data-tab": key, onclick: () => show(key) }, label));
+    tabs.append(h("button", { type: "button", "data-tab": key, onclick: async () => { if (await m.mayDiscard()) show(key); } }, label));
   }
-  const m = modal({ title: "Settings", wide: true, body: h("div", {}, pane), buttons: [{ label: "Close" }] });
+  m = modal({ title: "Settings", wide: true, guard: true, body: h("div", {}, pane), buttons: [{ label: "Close" }] });
   m.box.insertBefore(tabs, m.box.querySelector(".content"));
   show(tab);
 
@@ -3907,6 +3987,7 @@ function openSettings(tab = "providers") {
       await api("POST", "/api/providers", body);
       p = { ...p, ...body.provider, has_key: p.has_key || !!body.api_key, _new: false };
       key.value = "";
+      m.saved();
       return body.provider.name;
     };
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, datalist, sizes,
@@ -4073,7 +4154,7 @@ function openSettings(tab = "providers") {
       h("label", { class: "field" }, h("span", {}, "Notes"), f.notes), h("label", { class: "field" }, h("span", {}, "Run command"), f.run),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
         await api("POST", "/api/tools", { path: f.path.value.trim(), name: f.name.value.trim(), os: f.os.value, notes: f.notes.value, run: f.run.value });
-        toast("Tool added.", "ok"); f.path.value = f.name.value = ""; load();
+        toast("Tool added.", "ok"); f.path.value = f.name.value = ""; m.saved(); load();
       }) }, "Add")));
     load();
     return box;
@@ -4113,20 +4194,22 @@ function openSettings(tab = "providers") {
       note: "The vision helper describes each image for a chat model that can't read images. Only models that read images are listed.",
       onSaved: () => setTimeout(() => show("model"), 300) });
     const v = visionState();
-    const promptCache = h("select", {
+    // (these three save themselves as they are changed)
+    const promptCache = h("select", { "data-no-guard": "",
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { prompt_cache: e.target.value }); toast("Saved.", "ok", 2000); }) },
       [["1h", "On, kept for 1 hour"], ["5m", "On, kept for 5 minutes"], ["off", "Off"]]
         .map(([val, l]) => h("option", { value: val, selected: val === (S.state.config.settings.prompt_cache || "1h") }, l)));
-    const autoReview = h("select", { disabled: !S.state.config.settings.review_model,
+    const autoReview = h("select", { disabled: !S.state.config.settings.review_model, "data-no-guard": "",
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { auto_review: e.target.value }); toast("Saved.", "ok", 2000); }) },
       [["off", "Off"], ["disruptive", "Disruptive commands"], ["flagged", "Everything flagged (modifying, disruptive or sensitive)"]]
         .map(([val, l]) => h("option", { value: val, selected: val === (S.state.config.settings.auto_review || "off") }, l)));
     // off by default: the one lookup that goes to api.redpill.ai directly (llm/tee.py served_by)
-    const teeNames = h("input", { type: "checkbox", class: "tee-upstreams", checked: S.state.config.settings.tee_name_upstreams === true,
+    const teeNames = h("input", { type: "checkbox", class: "tee-upstreams", "data-no-guard": "", checked: S.state.config.settings.tee_name_upstreams === true,
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { tee_name_upstreams: e.target.checked }); toast("Saved.", "ok", 2000); }) });
     const save = async () => {
       const generation = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
       await api("POST", "/api/settings", { generation });
+      m.saved();
       toast("Model settings saved.", "ok");
     };
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
@@ -4257,7 +4340,7 @@ function openSettings(tab = "providers") {
         ["native", "Anthropic's own search, for Claude on an Anthropic provider (no approval per query)"]]),
     };
     const uiMode = sel(s.ui_mode || "window", [["window", "The app window (needs WebKitGTK)"], ["browser", "My default web browser"]]);
-    const testQ = h("input", { type: "text", placeholder: "Test query, e.g. OPNsense 25.1 release notes" });
+    const testQ = h("input", { type: "text", "data-no-guard": "", placeholder: "Test query, e.g. OPNsense 25.1 release notes" });
     const testOut = h("div", { class: "muted small" });
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "row" },
@@ -4297,6 +4380,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
         await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])),
           ...Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])), ui_mode: uiMode.value });
+        m.saved();
         toast("Settings saved.", "ok");
       }) }, "Save")));
   }
@@ -4318,8 +4402,9 @@ function askToPair(claim) {
   if (!claim || askedClaims.has(claim.id)) return;
   askedClaims.add(claim.id);
   let allow = false;
+  const typing = justTyped();        // asked while the technician types: no button is given their next key
   const { box } = modal({
-    title: "Allow this phone?",
+    title: "Allow this phone?", quiet: typing,
     body: h("div", {}, h("p", {}, `${claim.name} scanned the connect code and asks to follow the case. Allow it only if its screen shows this number:`),
       h("div", { class: "check-code" }, claim.check),
       h("p", { class: "small muted" }, "A number that differs, or a phone you didn't just scan with: refuse.")),
@@ -4329,7 +4414,7 @@ function askToPair(claim) {
       S.phoneDialog?.refresh();
     }),
   });
-  setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
+  if (!typing) setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
 }
 
 // Pairing takes two scans (see companion.py): the first opens a page with no secret so the
