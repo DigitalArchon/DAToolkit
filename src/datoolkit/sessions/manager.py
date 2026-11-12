@@ -235,11 +235,13 @@ class RdpSession:
 
 @dataclass
 class WindowSession:
-    """A window of another program on this desktop, found by its X window id. DA Toolkit only
-    takes screenshots of it; commands for it are pasted there by the technician."""
+    """A window of another program on this desktop, found by its X window id and known by the
+    process and class it had when picked (xwindow.WindowInfo.identity). DA Toolkit only takes
+    screenshots of it; commands for it are pasted there by the technician."""
     id: str
     name: str
     xid: int
+    pid: int = 0
     wm_class: str = ""
     title: str = ""
     kind: str = "window"

@@ -2315,8 +2315,9 @@ class Engine:
             wins = await asyncio.to_thread(xwindow.list_windows, os.getpid())
         except xwindow.WindowError as e:
             return {"available": False, "why": str(e), "windows": []}
-        taken = {s.xid for s in self.sessions.sessions.values() if isinstance(s, WindowSession) and not s.exited}
-        return {"available": True, "why": "", "windows": [{**w.to_dict(), "open": w.xid in taken} for w in wins]}
+        taken = {(s.xid, s.pid, s.wm_class) for s in self.sessions.sessions.values()
+                 if isinstance(s, WindowSession) and not s.exited}
+        return {"available": True, "why": "", "windows": [{**w.to_dict(), "open": (w.xid, *w.identity) in taken} for w in wins]}
 
     async def open_window(self, xid: int, name: str = "", os_hint: str = "") -> dict:
         self._need_case()
@@ -2330,14 +2331,18 @@ class Engine:
             raise UserError("That window has closed. Pick it again from the list.")
         for s in self.sessions.sessions.values():
             if isinstance(s, WindowSession) and s.xid == info.xid and not s.exited:
-                raise UserError(f"That window is already open as session {s.id}.")
+                if (s.pid, s.wm_class) == info.identity:
+                    raise UserError(f"That window is already open as session {s.id}.")
+                # the id is another window's now: the one that session was opened for has closed
+                self.sessions.mark_window_closed(s)
+                self.log("window_closed", session_id=s.id)
         name = name.strip() or info.short_name
         sid = self.sessions.unique_id(re.sub(r"\W+", "-", name[:40]))
-        app = info.wm_class or info.instance or "window"
+        app = info.app
         # the description the model reads: the window's own words cleaned and cut (xwindow.label)
         shown, title = xwindow.label(app, 40) or "window", xwindow.label(info.title)
         sess = self.sessions.add(WindowSession(
-            id=sid, name=name, xid=info.xid, wm_class=app, title=info.title,
+            id=sid, name=name, xid=info.xid, pid=info.pid, wm_class=app, title=info.title,
             target=f"{shown} window \"{title}\"" if title else f"{shown} window",
             os_hint=os_hint.strip() or "Windows"))
         self.log("session_opened", **sess.roster())
@@ -2352,10 +2357,18 @@ class Engine:
             raise UserError(f"{sid} is not a window session.")
         if sess.exited:
             raise UserError(f"The window of {sid} has closed.")
+        # The window is the one with this id that is still the same process's and of the same
+        # class. The X server gives a closed window's id to a later one: until Nov 2026 the
+        # session followed the bare id, and would have shown whatever window had it by then.
+        same = (sess.pid, sess.wm_class)
         try:
-            png, notes = await asyncio.to_thread(xwindow.capture, sess.xid)
+            png, notes = await asyncio.to_thread(xwindow.capture, sess.xid, same)
         except xwindow.WindowError as e:
-            if await asyncio.to_thread(xwindow.window_info, sess.xid) is None:
+            try:
+                now = await asyncio.to_thread(xwindow.window_info, sess.xid)
+            except xwindow.WindowError:          # the display can't be asked: nothing is known of the window
+                raise UserError(str(e)) from e
+            if now is None or now.identity != same:
                 self.sessions.mark_window_closed(sess)
                 self.log("window_closed", session_id=sid)
             raise UserError(str(e)) from e

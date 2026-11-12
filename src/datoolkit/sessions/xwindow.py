@@ -2,8 +2,9 @@
 
 A window session is a window of another program (a ScreenConnect, TeamViewer or AnyDesk
 control window, a VM or iDRAC console) that the technician wants the AI to see. It is found
-by its X window id, so moving or resizing it doesn't matter. Nothing is ever sent to the
-window: this module only reads.
+by its X window id, so moving or resizing it doesn't matter, and held to the process and class
+it had when it was picked: the X server hands a closed window's id to a later window, and a
+session must not follow it there. Nothing is ever sent to the window: this module only reads.
 
 It talks to the X server through libxcb with ctypes, which every X11 desktop has (libX11 is
 built on it), so there is no extra dependency. XCB rather than Xlib: Xlib reports errors
@@ -72,6 +73,17 @@ class WindowInfo:
     width: int
     height: int
     visible: bool
+
+    @property
+    def app(self) -> str:
+        """The program, as a session names it: the window's class, or its instance name."""
+        return self.wm_class or self.instance or "window"
+
+    @property
+    def identity(self) -> tuple[int, str]:
+        """What stays the same for as long as it is the same window: the process that owns it
+        and its class. An id alone doesn't say so (see the module docstring)."""
+        return (self.pid, self.app)
 
     @property
     def remote_tool(self) -> bool:
@@ -394,14 +406,17 @@ def window_info(xid: int) -> WindowInfo | None:
         return x.info(xid)
 
 
-def capture(xid: int) -> tuple[bytes, dict]:
+def capture(xid: int, identity: tuple[int, str] | None = None) -> tuple[bytes, dict]:
     """PNG of the window's contents (without the title bar and frame), and notes about the
-    capture. Raises WindowError when it can't be captured, saying what to do."""
+    capture. Raises WindowError when it can't be captured, saying what to do. With `identity`
+    (WindowInfo.identity, as it was when the window was picked), a window of that id that is
+    another process's or of another class is not that window: it has closed, and the id is
+    someone else's now. Its picture is never taken in the first one's name."""
     from PIL import Image
 
     with _Conn() as x:
         info = x.info(xid)
-        if info is None:
+        if info is None or (identity is not None and info.identity != tuple(identity)):
             raise WindowError("The window has closed.")
         if not info.visible:
             raise WindowError("The window is minimised or on another workspace: bring it back on screen, "

@@ -71,7 +71,9 @@ def xdisplay(monkeypatch):
     except ImportError:
         pytest.skip("tkinter is not available")
     n = _free_display()
-    xvfb = subprocess.Popen(["Xvfb", f":{n}", "-screen", "0", "800x600x24", "-nolisten", "tcp"],
+    # -noreset: the server doesn't start over when its last client goes (the tests close the only
+    # window and then ask about it), during which a connection is refused
+    xvfb = subprocess.Popen(["Xvfb", f":{n}", "-screen", "0", "800x600x24", "-nolisten", "tcp", "-noreset"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
@@ -196,6 +198,36 @@ async def test_open_window_session_and_screenshot(env, tkwin):  # noqa: F811
         await engine.window_shot("testpc")
     engine.close_session("testpc")
     assert "testpc" not in engine.sessions.sessions
+
+
+async def test_a_window_session_doesnt_follow_its_id_to_another_window(env, tkwin):  # noqa: F811
+    """The X server hands a closed window's id to a later window. A session knows its window by
+    the process and class it had when picked, and takes a window of that id that is another's
+    for what it is: the first one closed."""
+    engine, _, _ = env
+    _, main, other = tkwin
+    engine.new_case("ids", "open")
+    await engine.open_window(main, "TESTPC")
+    sess = engine.sessions.sessions["testpc"]
+    info = xwindow.window_info(main)
+    assert (sess.pid, sess.wm_class) == info.identity                # (Tk sets no _NET_WM_PID: 0, and the class)
+    await engine.window_shot("testpc")                               # the window it was opened for
+    # the id as it would be after that window closed and another program's got it
+    for was in ((info.pid + 1, info.app), (info.pid, "Firefox")):
+        with pytest.raises(xwindow.WindowError, match="closed"):
+            xwindow.capture(main, was)
+    sess.pid = info.pid + 1
+    assert not (await engine.list_windows())["windows"][0]["open"]   # the picker: that window isn't a session's
+    with pytest.raises(UserError, match="closed"):
+        await engine.window_shot("testpc")
+    assert sess.exited and "window_closed" in (engine.case.dir / "events.jsonl").read_text()
+    # and the window now carrying the id can be opened as a session of its own
+    sess.exited = False
+    again = await engine.open_window(main, "TESTPC")
+    assert again["id"] == "testpc-2" and sess.exited
+    assert engine.sessions.sessions["testpc-2"].pid == info.pid
+    with pytest.raises(UserError, match="already open as session testpc-2"):
+        await engine.open_window(main)
 
 
 async def test_window_items_get_window_cut_rules(env, tkwin):  # noqa: F811
