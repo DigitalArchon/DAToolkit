@@ -12,7 +12,14 @@ let TOKEN = (() => {
     return PAIR_CODE ? null : sessionStorage.getItem("dat-companion");
   } catch { return null; }
 })();
-const $ = (s) => document.querySelector(s);
+// The page's own elements, found once as this script starts and looked up from there (as app.js
+// does). What the AI, the queue and the hypotheses say is only ever written here as text.
+const FIXED = new Map([...document.querySelectorAll("[id]")].map((el) => [el.id, el]));
+function $(sel) {
+  const m = /^#([\w-]+)(?:\s+(\S.*))?$/.exec(sel);
+  const el = m ? FIXED.get(m[1]) || null : null;
+  return el && m[2] ? el.querySelector(m[2]) : el;
+}
 let lastSpoken = "", lastText = "", photosAllowed = false;
 
 function h(tag, attrs = {}, ...kids) {
@@ -98,7 +105,7 @@ function speechButtons() {
 if (!canSpeak) {
   $("#read-now").classList.add("hidden");
   $("#speak").disabled = true;
-  $(".speak").after(h("div", { class: "muted small" }, "This browser can't read aloud."));
+  $("#ai .speak").after(h("div", { class: "muted small" }, "This browser can't read aloud."));
 }
 $("#speak").addEventListener("change", (e) => {
   if (e.target.checked) {

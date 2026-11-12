@@ -3,6 +3,11 @@ index.html with a stand-in DOM (tests/js/fakedom.cjs). The page is fed snapshots
 Engine, as the events socket sends them, so a change in what the server sends reaches these
 tests too. Skipped where Node isn't installed.
 
+The stand-in DOM can't run DOMPurify, so the page's Markdown is the real marked's and the
+sanitiser's settings are checked as given. tests/js/sanitize.test.cjs runs the real DOMPurify with
+them in jsdom, which is not one of this repository's packages: those tests skip themselves unless a
+jsdom is on Node's path (NODE_PATH=<a node_modules that has jsdom>).
+
 To run them on their own, with the same caps:
 DAT_STATES=<a file of snapshots> node --max-old-space-size=512 --test --test-isolation=none tests/js/"""
 

@@ -2,7 +2,7 @@
 // A small DOM, enough to run the frontend (src/datoolkit/web/app.js) in Node with no packages.
 // The page is built from the real index.html, so an element app.js looks up that the page
 // lacks comes back null, as it would in a browser. Timers, fetch, WebSockets and the page's
-// libraries (xterm.js, Guacamole, marked, DOMPurify) are stand-ins the tests drive.
+// libraries (xterm.js, Guacamole, DOMPurify) are stand-ins the tests drive; marked is the real one.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -733,9 +733,17 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
     CSS: { escape: cssEscape },
     Terminal: FakeTerminal,
     FitAddon: { FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } activate() {} dispose() {} } },
-    marked: { parse: (text) => `<p>${escText(String(text))}</p>` },
-    // the hooks app.js adds are kept, so a test can run one on an element of its own
-    DOMPurify: { hooks: {}, addHook(name, fn) { (this.hooks[name] ||= []).push(fn); }, sanitize: (html) => html },
+    // DOMPurify needs a real DOM, so this one takes nothing out: what a message becomes here is what
+    // the page's Markdown renderer (the real marked, below) made of it. It runs the hooks app.js
+    // adds on every element, as the real one does, and keeps the options it was last given.
+    DOMPurify: { hooks: {}, addHook(name, fn) { (this.hooks[name] ||= []).push(fn); },
+      sanitize(html, options) {
+        this.options = options;
+        const holder = new Element("template", document);
+        holder.append(...parseHTML(String(html), document));
+        for (const el of holder.querySelectorAll("*")) for (const fn of this.hooks.afterSanitizeAttributes || []) fn(el);
+        return holder.innerHTML;
+      } },
     Guacamole: { Client: unavailable("Guacamole"), Keyboard: unavailable("Guacamole"), Mouse: unavailable("Guacamole"),
       WebSocketTunnel: unavailable("Guacamole"), StringReader: unavailable("Guacamole"), StringWriter: unavailable("Guacamole") },
   });
@@ -775,6 +783,11 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
     await clock.tick(0);
   };
 
+  // the page's Markdown library is the real one: it needs no DOM
+  if (page === "index.html") {
+    const marked = path.join(WEB, "vendor", "marked.min.js");
+    vm.runInContext(fs.readFileSync(marked, "utf8"), win, { filename: marked });
+  }
   vm.runInContext(source, win, { filename: path.join(WEB, script) });
   return app;
 }

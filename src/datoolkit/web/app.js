@@ -47,6 +47,8 @@ const S = {
   streaming: null,    // {text, reasoning, model, tier}
   promptModals: {},   // prompt id -> modal
   rows: new Map(),    // queue num -> row element
+  tabs: new Map(),    // session id -> its tab
+  streamEl: null,     // the bubble of the reply being written
   running: new Set(), // queue nums being run (runItem)
   cardEdits: {},      // "search:<id>" / "research:<id>" -> what the technician typed into the card
   chatHistory: [],    // messages typed by the technician this session (up-arrow recall)
@@ -54,14 +56,28 @@ const S = {
   histDraft: "",
 };
 
-const $ = (sel, root = document) => root.querySelector(sel);
+// The page's own elements, found once, as this script starts: before anything a model, a web page,
+// a host or a phone wrote is on the page. A lookup by id is answered from here, so an element that
+// came later with the same id (none should: md() makes none) could never stand in for the chat
+// box, the queue or the dialogs. $("#chat-input") is one of them and $("#chat-strip .unread") is
+// looked for inside one; $(selector, root) looks inside an element the caller holds. Nothing is looked for across
+// the whole page, where the chat comes before most of what is the page's own. (Until Nov 2026 a
+// lookup was document.querySelector, which a reply's <textarea id="chat-input"> answered first.)
+const FIXED = new Map([...document.querySelectorAll("[id]")].map((el) => [el.id, el]));
+function $(sel, root) {
+  if (root) return root.querySelector(sel);
+  const m = /^#([\w-]+)(?:\s+(\S.*))?$/.exec(sel);
+  if (!m) throw new Error(`$(${JSON.stringify(sel)}): a lookup with no element to look in starts from one of the page's own, by id`);
+  const el = FIXED.get(m[1]) || null;
+  return el && m[2] ? el.querySelector(m[2]) : el;
+}
 
+// Text only: an element's HTML is written in one place, rendered(), from md().
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === undefined || v === null || v === false) continue;
     if (k === "class") el.className = v;
-    else if (k === "html") el.innerHTML = v;
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else if (k === "value") el.value = v;
     else if (v === true) el.setAttribute(k, "");
@@ -114,12 +130,54 @@ async function guarded(fn) {
   try { return await fn(); } catch (e) { showError(e); }
 }
 
-// AI output is untrusted (it can be steered by prompt injection in command output), so it
-// must not be able to load remote resources: no images/media/embeds, and links open outside.
+// AI output is untrusted (it can be steered by prompt injection in command output), and so is what
+// a research report quotes from the web and what a phone sends: it is Markdown, never HTML. Two
+// layers hold it to that, each enough alone.
+//
+// The first is the Markdown renderer. HTML written in the text is not read as HTML at all (marked's
+// two tokenizers for it are off, and a token of that kind would be written out escaped), so
+// "<your-domain>" shows as typed and no element comes from the text: only the ones Markdown itself
+// stands for. A link is made for an http(s) or mailto address and for nothing else, an image is
+// shown as a link to it (nothing is loaded from elsewhere), a task list's box is a character.
+// (Until Nov 2026 marked passed HTML through: "<your-domain>" vanished, and a reply's
+// <textarea id="chat-input"> was an element of the page.)
+const escapeHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const LINKABLE = /^(?:https?|mailto):/i;
+const MARKDOWN = new marked.Marked({
+  breaks: true,
+  tokenizer: { html() { return undefined; }, tag() { return undefined; } },
+  renderer: {
+    html(token) { return escapeHtml(token.raw ?? token.text); },
+    link(token) {
+      const text = this.parser.parseInline(token.tokens);
+      if (!LINKABLE.test(String(token.href ?? "").trim())) return text;
+      return `<a href="${escapeHtml(token.href)}"${token.title ? ` title="${escapeHtml(token.title)}"` : ""}>${text}</a>`;
+    },
+    image(token) {
+      const text = escapeHtml(token.text || token.href);
+      return LINKABLE.test(String(token.href ?? "").trim()) ? `<a href="${escapeHtml(token.href)}">${text}</a>` : text;
+    },
+    checkbox(token) { return token.checked ? "☑" : "☐"; },
+  },
+});
+
+// The second is DOMPurify, over what the renderer wrote: the elements and attributes Markdown
+// stands for and no others. No id, class or name (the page finds and styles its own by those), no
+// data-* (the page's own marks), no form controls or dialogs, nothing that loads a remote
+// resource; links are http(s) or mailto and open outside. The lists of what is forbidden stand
+// behind the lists of what is allowed, should those ever grow.
 const MD_OPTS = {
-  FORBID_TAGS: ["img", "picture", "source", "svg", "math", "video", "audio", "iframe", "object", "embed", "form", "input", "button", "style", "link", "meta", "base"],
-  FORBID_ATTR: ["style", "srcset", "poster", "background", "ping", "formaction"],
-  ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
+  ALLOWED_TAGS: ["p", "br", "hr", "strong", "em", "del", "code", "pre", "blockquote", "ul", "ol", "li",
+    "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody", "tr", "th", "td", "a"],
+  ALLOWED_ATTR: ["href", "title", "start", "align"],
+  ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false,
+  FORBID_TAGS: ["img", "picture", "source", "svg", "math", "video", "audio", "iframe", "object", "embed", "form", "input", "button", "style", "link", "meta", "base",
+    "textarea", "select", "option", "optgroup", "datalist", "dialog", "label", "fieldset", "legend", "output", "marquee", "map", "area", "template", "slot"],
+  FORBID_ATTR: ["style", "srcset", "poster", "background", "ping", "formaction",
+    "id", "class", "name", "for", "form", "hidden", "slot", "is", "tabindex", "contenteditable", "draggable", "popover", "inert", "role"],
+  ALLOWED_URI_REGEXP: LINKABLE,
   // with a URI pattern of its own, DOMPurify checks every attribute not marked URI-safe against
   // it: numbered steps split by code blocks would all start at 1, table columns lose alignment
   ADD_URI_SAFE_ATTR: ["start", "align"],
@@ -205,9 +263,13 @@ function confirmInsecure(url) {
   });
 }
 
+// The link the technician said to open anyway is one the page made for that click, known by being
+// in this set: nothing written on an element says so, so no link can come confirmed already.
+// (Until Nov 2026 the mark was a data-confirmed attribute, which a reply's own link could carry.)
+const confirmedLinks = new WeakSet();
 function openConfirmed(url) {
   const a = h("a", { href: url, target: "_blank", rel: "noopener noreferrer" });
-  a.dataset.confirmed = "1";
+  confirmedLinks.add(a);
   document.body.append(a);
   a.click();
   a.remove();
@@ -217,7 +279,7 @@ function onLinkActivated(ev) {
   if (ev.type === "auxclick" && ev.button !== 1) return;          // a middle click opens a link too
   const a = ev.target?.closest?.("a[href]");
   const href = a?.getAttribute("href");
-  if (!a || a.dataset.confirmed || !insecureLink(href)) return;
+  if (!a || confirmedLinks.has(a) || !insecureLink(href)) return;
   ev.preventDefault();
   ev.stopPropagation();
   let url = href;
@@ -249,7 +311,16 @@ function extLink(url, text, attrs = {}) {
 }
 
 function md(text) {
-  return DOMPurify.sanitize(marked.parse(text || "", { breaks: true }), MD_OPTS);
+  return DOMPurify.sanitize(MARKDOWN.parse(String(text || "")), MD_OPTS);
+}
+
+// Text a model, a web page, a host or a phone wrote, shown as the Markdown it is: the one place
+// on the page where HTML is given to an element, and all of it is md()'s. Everything else such
+// text reaches is a text node.
+function rendered(text, cls = "body") {
+  const el = h("div", { class: cls });
+  el.innerHTML = md(text);
+  return el;
 }
 
 async function clipWrite(text) {
@@ -620,13 +691,18 @@ function renderVision() {
   b.title = v.mode === "native" ? `${v.model} reads images directly.`
     : v.mode === "helper" ? `${v.model} can't read images: ${v.helper} describes each image first and ${v.model} gets the description. Replies with images take longer. Change in Settings → Model.${hl ? `\n\nVision helper: ${hl.title}` : ""}`
     : `${v.why}\nImage features are off. Choose a vision model, or set a vision helper in Settings → Model.`;
-  for (const el of document.querySelectorAll("[data-needs-vision]")) {
-    if (!el.dataset.title) el.dataset.title = el.title;
-    el.disabled = v.mode === "none";
-    el.title = v.mode === "none" ? `Not available: ${v.why}` : v.mode === "helper"
-      ? `${el.dataset.title}\n(${v.helper} will describe it for ${v.model}; this takes a little longer.)` : el.dataset.title;
+  // the buttons that need images: under the chat box, on a session's bar, in a dialog
+  for (const root of [$("#chat-form"), $("#term-pane"), $("#modal-root")]) {
+    for (const el of root.querySelectorAll("[data-needs-vision]")) {
+      if (!visionTitles.has(el)) visionTitles.set(el, el.title);
+      const title = visionTitles.get(el);
+      el.disabled = v.mode === "none";
+      el.title = v.mode === "none" ? `Not available: ${v.why}` : v.mode === "helper"
+        ? `${title}\n(${v.helper} will describe it for ${v.model}; this takes a little longer.)` : title;
+    }
   }
 }
+const visionTitles = new WeakMap();    // such a button -> its own tooltip
 
 function needVision() {
   const v = visionState();
@@ -692,7 +768,7 @@ function renderAll(scroll = false) {
   renderBusy();
   for (const p of S.state.prompts || []) if (!S.promptModals[p.id]) showCredentialPrompt(p);
   // offered once when the app opens; closing it leaves the app usable for setting up
-  if (!S.state.case && !S.caseOffered && !document.querySelector(".case-modal")) { S.caseOffered = true; openCaseModal(true); }
+  if (!S.state.case && !S.caseOffered && !$("#modal-root .case-modal")) { S.caseOffered = true; openCaseModal(true); }
 }
 
 // ------------------------------------------------------------------ hypothesis board
@@ -731,7 +807,7 @@ function renderEntry(e, live = false) {
   }
   if (e.kind === "user") {
     const box = h("div", { class: "msg user" }, h("div", { class: "who" }, "You", e.via === "phone" ? " · 📱 from your phone" : ""));
-    if (e.text) box.append(h("div", { class: "body", html: md(e.text) }));
+    if (e.text) box.append(rendered(e.text));
     for (const r of e.results || []) {
       const label = `#${r.num} ${r.status.toUpperCase()} · ${r.session_id} · ${r.command}`;
       box.append(h("details", {}, h("summary", {}, label),
@@ -773,7 +849,7 @@ function renderEntry(e, live = false) {
     box.append(h("details", { open: !e.text ? true : false },
       h("summary", {}, noMessage ? "Reasoning (the AI wrote no message this turn)" : "Reasoning"), h("div", { class: "reasoning" }, e.reasoning)));
   }
-  box.append(h("div", { class: "body", html: md(e.text) }));
+  box.append(rendered(e.text));
   if (e.refusal) box.append(h("div", { class: "warnbox small" },
     `${e.model || "The model"} declined this request${e.refusal.category ? ` (Anthropic's ${e.refusal.category} safeguard)` : ""}. Nothing it began was queued. Rephrase it, add context about the system you are working on, or switch model.`,
     e.refusal.explanation ? h("div", { class: "muted" }, e.refusal.explanation) : null));
@@ -844,10 +920,14 @@ const SEARCH_STATE = { pending: "queued", awaiting: "waiting for your approval",
 
 // What the technician types into a card waiting for approval (a query, a brief, a URL), kept
 // across the chat's re-renders, which rebuild the card: an edit (and the caret) used to be lost
-// to any refresh that came meanwhile.
+// to any refresh that came meanwhile. Which field is which card's is kept here, not written on
+// the field, so only a field the page made is ever given the focus.
+const cardFields = new Map();       // "search:<id>" / "research:<id>" -> the field showing it now
+const cardFieldKeys = new WeakMap(); // and back
 function cardInput(key, el, initial) {
   el.value = S.cardEdits[key] ?? initial;
-  el.dataset.edit = key;
+  cardFields.set(key, el);
+  cardFieldKeys.set(el, key);
   el.addEventListener("input", () => { S.cardEdits[key] = el.value; });
   return el;
 }
@@ -855,11 +935,12 @@ function cardInput(key, el, initial) {
 // Runs `rebuild` (which replaces chat elements) and puts the focus and caret back into the card
 // field that had them.
 function keepingCardFocus(rebuild) {
-  const a = document.activeElement, key = a?.dataset?.edit;
+  const a = document.activeElement, key = a ? cardFieldKeys.get(a) : undefined;
   const range = key ? [a.selectionStart, a.selectionEnd] : null;
   rebuild();
+  for (const [k, field] of cardFields) if (!field.isConnected) cardFields.delete(k);
   if (!key) return;
-  const el = document.querySelector(`[data-edit="${CSS.escape(key)}"]`);
+  const el = cardFields.get(key);
   if (el && el !== a) {
     el.focus();
     el.setSelectionRange(...range);
@@ -942,21 +1023,25 @@ function researchCard(rec) {
   }
   if (rec.report) {
     el.append(h("details", {}, h("summary", {}, rec.status === "cached" ? `Report (from ${new Date(rec.cached_at * 1000).toLocaleDateString()})` : "Report"),
-      h("div", { class: "rreport body", html: md(rec.report) })));
+      rendered(rec.report, "rreport body")));
   }
   return el;
 }
 
 // A proposal inside the AI's message: a live view of its queue item, updated in place on
 // every queue change. Run goes through runItem, the same technician action as the queue.
+// The cards on the page are kept here with their item's number: the page fills the cards it made,
+// and never something in a message that only looks like one.
+const proposalCards = new Map();    // card element -> queue num
 function proposalCard(num) {
-  const el = h("div", { class: "pcard", "data-num": num });
+  const el = h("div", { class: "pcard" });
+  proposalCards.set(el, Number(num));
   fillProposalCard(el);
   return el;
 }
 
 function fillProposalCard(el) {
-  const num = Number(el.dataset.num);
+  const num = proposalCards.get(el);
   const item = (S.state?.queue || []).find((i) => i.num === num);
   if (!item) {
     el.className = "pcard st-sent";
@@ -999,7 +1084,9 @@ function fillProposalCard(el) {
 }
 
 function updateProposalCards() {
-  for (const el of document.querySelectorAll("#chat-log .pcard")) fillProposalCard(el);
+  for (const el of [...proposalCards.keys()]) {
+    if (el.isConnected) fillProposalCard(el); else proposalCards.delete(el);
+  }
 }
 
 function renderChat(scroll) {
@@ -1016,6 +1103,7 @@ function renderChat(scroll) {
     log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
     if (S.streaming) log.append(streamingBubble());
   });
+  for (const el of [...proposalCards.keys()]) if (!el.isConnected) proposalCards.delete(el);   // the cards just replaced
   if (!S.state.case) {
     log.append(h("div", { class: "empty" },
       h("p", {}, "No case is open. Settings, providers, models and hosts work without one; the conversation, sessions and the command queue belong to a case."),
@@ -1029,7 +1117,7 @@ function renderChat(scroll) {
 
 function streamingBubble() {
   const el = renderEntry({ ...S.streaming, streaming: true });
-  el.id = "streaming";
+  S.streamEl = el;
   el.classList.add("streaming");
   (el.querySelector(".body > :last-child") || el.querySelector(".body")).append(h("span", { class: "caret" }));
   return el;
@@ -1043,7 +1131,7 @@ function scheduleStreamRender() {
     streamPending = false;
     const log = $("#chat-log");
     const stick = nearBottom(log);
-    const old = $("#streaming");
+    const old = S.streamEl?.isConnected ? S.streamEl : null;
     keepingCardFocus(() => {
       if (old && S.streaming) old.replaceWith(streamingBubble());
       else if (S.streaming) log.append(streamingBubble());
@@ -1329,7 +1417,7 @@ function activateTab(sid, focus = true) {
   for (const [id, t] of Object.entries(S.terms)) t.host.style.display = id === sid ? "" : "none";
   for (const [id, r] of Object.entries(S.rdps)) r.host.style.display = id === sid ? "" : "none";
   for (const [id, w] of Object.entries(S.wins)) w.host.style.display = id === sid ? "" : "none";
-  for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.sid === sid);
+  for (const [id, tab] of S.tabs) tab.classList.toggle("active", id === sid);
   const t = S.terms[sid];
   if (t) { fitTerm(t, true); if (focus) t.term.focus(); }
   const r = S.rdps[sid];
@@ -1376,6 +1464,7 @@ function renderSessions() {
   for (const d of Object.keys(counts)) if (counts[d] > 1) colour[d] = DEVICE_COLOURS[Object.keys(colour).length % DEVICE_COLOURS.length];
   const list = $("#tab-list");
   list.replaceChildren();
+  S.tabs.clear();
   for (const s of sessions) {
     if (s.kind === "rdp") ensureRdp(s); else if (s.kind === "window") ensureWin(s); else ensureTerm(s);
     const linked = colour[s.device];
@@ -1386,6 +1475,7 @@ function renderSessions() {
       h("button", { class: `link${linked ? " on" : ""}`, title: linked ? "Linked to another session on the same machine: click to change" : "Link to another session on the same machine",
         onclick: (e) => { e.stopPropagation(); linkMenu(s); } }, "🔗"),
       h("button", { class: "close", title: "Close session", onclick: (e) => { e.stopPropagation(); closeSession(s); } }, "×"));
+    S.tabs.set(s.id, tab);
     list.append(tab);
   }
   $("#terms-empty").classList.toggle("hidden", sessions.length > 0);
@@ -2023,6 +2113,8 @@ function sessionOptions(item) {
   return opts;
 }
 
+const queueEmpty = h("div", { class: "empty" }, "No commands queued.");
+
 function renderQueue() {
   if (!S.state) return;
   const showDone = $("#show-done").checked;
@@ -2037,8 +2129,8 @@ function renderQueue() {
     if (list.children[idx] !== row) list.insertBefore(row, list.children[idx] || null);
   });
   if (!items.length) {
-    if (!$("#queue-empty")) list.append(h("div", { id: "queue-empty", class: "empty" }, "No commands queued."));
-  } else $("#queue-empty")?.remove();
+    if (!queueEmpty.isConnected) list.append(queueEmpty);
+  } else queueEmpty.remove();
   const pending = S.state.queue.filter((i) => i.status === "pending").length;
   const ready = readyItems().length;
   $("#queue-count").textContent = `${pending} pending · ${ready} ready to send`;
@@ -2723,7 +2815,7 @@ function isGlobalShortcut(e) {
 }
 
 function globalKeys(e) {
-  if (!isGlobalShortcut(e) || document.querySelector(".overlay")) return;
+  if (!isGlobalShortcut(e) || $("#modal-root .overlay")) return;
   e.preventDefault();
   if (e.repeat) return;           // a held Ctrl+Shift+Enter would run one command after another
   if (e.altKey) {
@@ -3041,7 +3133,7 @@ function editCaseModal(c) {
 // first: offered at startup; closing it leaves the app usable without a case. reason: why
 // it was opened instead of doing what was asked.
 function openCaseModal(first, reason = "") {
-  if (document.querySelector(".case-modal")) return;
+  if ($("#modal-root .case-modal")) return;
   const st = S.state;
   const name = h("input", { type: "text", placeholder: "e.g. TKT-1042 Acme file server slow" });
   const notes = h("textarea", { rows: 3, placeholder: "Site/client notes for the AI (optional): environment, known quirks, what's been tried…" });
@@ -4056,7 +4148,8 @@ async function doExport(act) {
 
 // ------------------------------------------------------------------ layout & wiring
 
-function hideMenus() { for (const m of document.querySelectorAll(".menu")) m.classList.add("hidden"); }
+const MENUS = [...document.querySelectorAll(".menu")];     // the page's own, as it starts
+function hideMenus() { for (const m of MENUS) m.classList.add("hidden"); }
 
 function toggleMenu(menu) {
   const wasHidden = menu.classList.contains("hidden");
