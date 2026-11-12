@@ -598,3 +598,76 @@ def test_another_vendors_thinking_is_not_sent_to_anthropic():
     assert out[1]["content"][0]["signature"] == "THEIRS"
     _, out, _, _ = anthropic_api.render(conv("kimi-k3"), "kimi-k3", False, [])            # its own endpoint: as it came
     assert out[1]["content"][0]["signature"] == "THEIRS"
+
+
+# ---------------------------------------------------------------- the history fingerprint
+
+def _whole_sha(system, tools, msgs) -> str:
+    """The fingerprint as it was computed until Nov 2026, the whole history written out at once:
+    what the turns of every stored case hold."""
+    import hashlib
+
+    strip = anthropic_api._strip
+    tools = sorted(strip(tools), key=lambda t: t.get("name", ""))
+    data = json.dumps([system, tools, strip(msgs)], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _exchange(i: int, kb: int = 0, sha: str = "") -> list[dict]:
+    """One round of a tool loop as the engine stores it: the assistant's turn with Anthropic's own
+    blocks, the tool's answer, the technician's results."""
+    blocks = [{"type": "thinking", "thinking": "", "signature": f"SIG{i}"}, {"type": "text", "text": "Next."},
+              {"type": "tool_use", "id": f"toolu_{i}", "name": "propose_commands", "input": {"items": [{"command": "journalctl -n 200"}]}}]
+    return [{"role": "assistant", "content": "Next.", "state_before": f"{prompts.STATE_HEADER}\n\nstate {i}",
+             "native": {"api": "anthropic", "model": OPUS, "content": blocks, "prefix_sha": sha},
+             "tool_calls": [{"id": f"toolu_{i}", "type": "function", "function": {"name": "propose_commands", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": f"toolu_{i}", "content": "Queued."},
+            {"role": "user", "content": f"[Results returned by the technician] {i} half an emoji \ud83d\n" + "x" * 1024 * kb}]
+
+
+def test_the_running_fingerprint_is_the_one_stored_cases_hold():
+    """Each turn's fingerprint is now read from a hash kept running through the rendering. It
+    must be the value the whole-history hash gave, or every stored case would lose its thinking
+    blocks on its next request."""
+    tools = [{"name": "propose_commands", "description": "d", "input_schema": {"type": "object"}},
+             {"name": "ask_technician", "description": "d", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}]
+    conv = [{"role": "system", "content": "SYSTEM"}, {"role": "system", "content": "more of it"},
+            {"role": "user", "content": [{"type": "text", "text": "look"},
+                                         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]
+
+    def state(i):
+        return [{"role": "system", "content": f"{prompts.STATE_HEADER}\n\nstate {i}", "_state": True}]
+
+    for i in range(6):
+        system, msgs, sent, sha = anthropic_api.render(conv + state(i), OPUS, True, tools, "1h")
+        assert sha == _whole_sha(system, tools, msgs) and sent.endswith(f"state {i}")
+        conv += _exchange(i, sha=sha)                    # the turn that answered records it, as the engine does
+    _, msgs, _, sha = anthropic_api.render(conv + state(6), OPUS, True, tools, "1h")
+    signatures = [b["signature"] for m in msgs if m["role"] == "assistant" for b in m["content"] if b["type"] == "thinking"]
+    assert signatures == [f"SIG{i}" for i in range(6)]                       # every stored fingerprint still matches
+    # ... and one edited message in the middle is still found: thinking from there on is left out
+    edited = [dict(m) for m in conv]
+    at = [i for i, m in enumerate(edited) if m["role"] == "user"][3]
+    edited[at]["content"] = "edited"
+    _, msgs, _, _ = anthropic_api.render(edited + state(6), OPUS, True, tools, "1h")
+    signatures = [b["signature"] for m in msgs if m["role"] == "assistant" for b in m["content"] if b["type"] == "thinking"]
+    assert signatures == ["SIG0", "SIG1", "SIG2"]
+
+
+def test_the_fingerprint_of_a_long_case_costs_one_pass_not_one_per_turn():
+    """The history so far was written out and hashed again at every turn of it: 1.8 s per request,
+    on the event loop, at 300 exchanges of 8 KB of output each."""
+    import time
+
+    conv = [{"role": "system", "content": "S" * 20000}, {"role": "user", "content": "start"}]
+    for i in range(300):
+        conv += _exchange(i, kb=8, sha="recorded-under-another-history")
+    conv.append({"role": "system", "content": prompts.STATE_HEADER + "\n\nstate", "_state": True})
+    tools = [{"name": "propose_commands", "description": "d", "input_schema": {"type": "object"}}]
+    took = []
+    for _ in range(3):
+        started = time.perf_counter()
+        _, msgs, _, sha = anthropic_api.render(conv, OPUS, True, tools, "1h")
+        took.append(time.perf_counter() - started)
+    assert len(msgs) == 902 and len(sha) == 64
+    assert min(took) < 0.3, took

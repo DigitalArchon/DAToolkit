@@ -237,10 +237,36 @@ def _strip(obj):
     return obj
 
 
-def _sha(system: str, tools: list[dict], msgs: list[dict]) -> str:
-    tools = sorted(_strip(tools), key=lambda t: t.get("name", ""))     # bound as a name-sorted set
-    data = json.dumps([system, tools, _strip(msgs)], sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()   # any half-emoji in it: still a fingerprint
+def _json(value) -> bytes:
+    # surrogatepass: any half-emoji in it, and it is still a fingerprint
+    return json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8", "surrogatepass")
+
+
+class _Fingerprint:
+    """The fingerprint of a history as it is rendered: the sha256 of the JSON of [system, tools,
+    messages] (each as `_strip` leaves it), which every turn records of what came before it
+    (prefix_sha) and render compares on every request.
+
+    It is kept running: each message is written into the hash once, as it is added, and the
+    fingerprint up to any point is read from a copy of the hash closed there. Until Nov 2026
+    the whole history so far was written out and hashed again at every turn of it, on every
+    request: 1.8 s of the event loop per request at 300 exchanges of 8 KB. The bytes hashed are
+    the same as then, so the fingerprints cases have stored still match."""
+
+    def __init__(self, system: str, tools: list[dict]):
+        tools = sorted(_strip(tools), key=lambda t: t.get("name", ""))     # bound as a name-sorted set
+        self._hash = hashlib.sha256(b"[" + _json(system) + b", " + _json(tools) + b", [")
+        self._count = 0
+
+    def add(self, msgs: list[dict]) -> None:
+        for m in msgs:
+            self._hash.update((b", " if self._count else b"") + _json(_strip(m)))
+            self._count += 1
+
+    def hexdigest(self) -> str:
+        closed = self._hash.copy()
+        closed.update(b"]]")
+        return closed.hexdigest()
 
 
 def native_blocks(m: dict) -> list[dict] | None:
@@ -297,6 +323,20 @@ def render(messages: list[dict], model: str, official: bool, tools: list[dict], 
             pending.clear()
 
     sys_text = lambda: "\n\n".join(system_parts)                     # noqa: E731
+    running: _Fingerprint | None = None
+    counted = 0                       # how many of `out` are in it
+
+    def fingerprint() -> str:
+        """Of everything rendered so far. Asked only where nothing in `out` can still change: before
+        an assistant turn is added (the user turn before it is closed by it), and at the end.
+        The system prompt is whole by then: it is added to only before the first message."""
+        nonlocal running, counted
+        if running is None:
+            running = _Fingerprint(sys_text(), tools)
+        running.add(_finished(out[counted:]))
+        counted = len(out)
+        return running.hexdigest()
+
     for i, m in enumerate(messages):
         role = m.get("role")
         content = m.get("content")
@@ -336,7 +376,7 @@ def render(messages: list[dict], model: str, official: bool, tools: list[dict], 
             if native is not None and official and _foreign(m):
                 blocks = [b for b in blocks if b.get("type") not in _THINKING_TYPES]
             if native is not None and mode == "clear_at" and (m.get("native") or {}).get("prefix_sha"):
-                if m["native"]["prefix_sha"] != _sha(sys_text(), tools, _finished(out)):
+                if m["native"]["prefix_sha"] != fingerprint():
                     blocks = [b for b in blocks if b.get("type") not in _THINKING_TYPES]
             if not _visible(blocks):
                 blocks.append({"type": "text", "text": NO_MESSAGE})
@@ -347,7 +387,7 @@ def render(messages: list[dict], model: str, official: bool, tools: list[dict], 
     msgs = _finished(out)
     if cache_ttl and msgs:
         _breakpoint(msgs, cache_ttl)
-    return sys_text(), msgs, state_sent, _sha(sys_text(), tools, msgs)
+    return sys_text(), msgs, state_sent, fingerprint()
 
 
 def _finished(out: list[dict]) -> list[dict]:
