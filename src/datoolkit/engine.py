@@ -2968,28 +2968,33 @@ class Engine:
         # a TEE model's summary is checked as a turn's replies are (_reply_checks)
         stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
         conv = await self._conv_for_model(self.vision_status())
-        ttl = self._cache_ttl(prov, model, tier) if whole else ""
         static, state = self._prompt_parts()
-        messages, extra = self._chat_request(static, state, conv if whole else conv[:end + 1], ttl, prov)
-        if whole:
-            nxt = groups[upto + 1]["summary"][:80]
-            scope = f'everything in this conversation before the technician\'s message that begins "{nxt}"'
-            keep = "That message and everything after it stay as they are, so leave them out of the summary. "
-        else:
-            scope, keep = "the conversation above", ""
-        instruction = prompts.COMPACT_PROMPT.format(scope=scope, keep=keep, words=int(budget * 0.75))
-        if ttl and self._api(prov) != "anthropic":      # after the state message, past the cache boundary
-            messages[-1] = {**messages[-1], "content": messages[-1]["content"] + "\n\n" + instruction}
-        else:
-            messages.append({"role": "user", "content": instruction})
         tools, tool_extra = self._chat_tools()       # as the chat sends them: cached with it
-        extra = {**extra, **tool_extra}
-        case.log("sent_to_ai", purpose="compact", provider=prov.name, model=model, tier=tier,
-                 exchanges=upto + 1, whole_conversation=whole)
-        start = self._req_conv_len if whole and self._req_conv_len <= len(self.conv) else 0
-        sent = messages[1 + start:]
+
+        def request(whole: bool) -> tuple[list[dict], dict, int, list[dict]]:
+            """(messages, extra request fields, where the logged part starts, the part to log)
+            for the whole conversation with an instruction, or for the part to compact alone."""
+            ttl = self._cache_ttl(prov, model, tier) if whole else ""
+            messages, extra = self._chat_request(static, state, conv if whole else conv[:end + 1], ttl, prov)
+            if whole:
+                nxt = groups[upto + 1]["summary"][:80]
+                scope = f'everything in this conversation before the technician\'s message that begins "{nxt}"'
+                keep = "That message and everything after it stay as they are, so leave them out of the summary. "
+            else:
+                scope, keep = "the conversation above", ""
+            instruction = prompts.COMPACT_PROMPT.format(scope=scope, keep=keep, words=int(budget * 0.75))
+            if ttl and self._api(prov) != "anthropic":      # after the state message, past the cache boundary
+                messages[-1] = {**messages[-1], "content": messages[-1]["content"] + "\n\n" + instruction}
+            else:
+                messages.append({"role": "user", "content": instruction})
+            case.log("sent_to_ai", purpose="compact", provider=prov.name, model=model, tier=tier,
+                     exchanges=upto + 1, whole_conversation=whole)
+            start = self._req_conv_len if whole and self._req_conv_len <= len(self.conv) else 0
+            return messages, {**extra, **tool_extra}, start, messages[1 + start:]
+
+        messages, extra, start, sent = request(whole)
         result = None
-        for _ in range(2):
+        for _ in range(4):
             refused = self._unsupported.get((prov.name, model), set())
             params = {**self._params(prov, model), **{k: v for k, v in extra.items() if k not in refused}}
             try:
@@ -3009,6 +3014,13 @@ class Engine:
                                   case=case)
                 if capabilities.overflow(e)[0]:
                     self._overflow_message(prov, model, e)
+                    if whole:
+                        # The whole conversation no longer fits, whatever the estimate said: once more
+                        # with only the part to compact. Until Nov 2026 this ended here, with a
+                        # message about the part to compact, which had never been tried alone.
+                        self._overflowed, whole = True, False
+                        messages, extra, start, sent = request(False)
+                        continue
                     raise UserError(f"Even the part to compact is too long for {model}. Compact fewer exchanges, "
                                     "or remove some first.") from e
                 raise UserError(f"Compaction request failed: {e}") from e
@@ -4035,6 +4047,10 @@ class Engine:
         # llm/tee.py check_reply)
         replies: list[tuple] = []
         tee = None
+        out_of_rounds = False  # the turn used all its rounds and the model was still to be asked again
+        # A conversation saved while a turn waited (the app closed during a search's approval) has a
+        # call with no answer in it: answered here, in its place, before anything is built on it.
+        self._answer_open_calls("Not done: the turn ended before this was carried out.")
         try:
             if similar_for:
                 await self._find_similar(similar_for)
@@ -4105,7 +4121,11 @@ class Engine:
                     # check). Until Nov 2026 such a reply was left out, and the turn showed the
                     # mark of its other replies, or the TEE badge with no mark at all.
                     replies.append(self._reply_record(result, tee))
-                if text_only and not text_only_retried and not result.tool_calls and not result.content.strip():
+                # Words only was for the round just answered. Until Nov 2026 it stayed set for the
+                # rest of the turn, so the round that asks the model to queue the commands it
+                # promised (PROMISE_NUDGE) went out with tool_choice "none".
+                words_only, text_only = text_only, False
+                if words_only and not text_only_retried and not result.tool_calls and not result.content.strip():
                     # live, Qwen 3.8 Max answered the words-only round with nothing at all (its tool call,
                     # presumably, dropped by the route): ask once more with the tools back
                     self._log_request("chat", model, tier, system, sent, {
@@ -4113,7 +4133,7 @@ class Engine:
                         "finish_reason": result.finish_reason, "usage": result.usage}, conv_index=start)
                     self._req_conv_len = len(self.conv)
                     self.log("text_only_empty")
-                    text_only, text_only_retried, in_flight = False, True, None
+                    text_only_retried, in_flight = True, None
                     continue
                 # Never for a Claude model, which makes its calls as calls: markup it quotes (from a
                 # page, a log, the technician's question about it) is text, and until Nov 2026 was
@@ -4175,6 +4195,8 @@ class Engine:
                 if not retry:
                     break
                 entry["text"] += "\n\n"
+            else:
+                out_of_rounds = True             # asked again after every round, and the last one too
         except asyncio.CancelledError:
             error = "stopped"
             self._log_failed_round(in_flight, model, tier, entry, error)
@@ -4202,7 +4224,14 @@ class Engine:
             overflowed = not isinstance(e, UserError) and self._overflow_message(prov, model, e)
             if overflowed:
                 error = overflowed
-                self._overflowed = True
+        shown = ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches", "research", "refusal")
+        if not error and not any(entry.get(k) if k != "text" else entry["text"].strip() for k in shown):
+            # Nothing to show for the turn: until Nov 2026 it ended without a word and without
+            # Retry, the technician left looking at their own message.
+            error = (f"ended with nothing to show: {model} was asked {MAX_TOOL_ROUNDS} times (the limit for one turn) "
+                     "and made only calls that couldn't be carried out" if out_of_rounds else
+                     f"got an empty reply: {model} sent no message and queued nothing")
+            self.log("turn_empty", model=model, out_of_rounds=out_of_rounds)
         if error:                 # a call whose handling failed is answered too, or every later request is refused
             self._answer_open_calls(f"Not done: DA Toolkit hit an error carrying it out ({error}).")
         if tee and in_flight and (len(entry["reasoning"]), len(entry["text"])) != in_flight[3:5]:
@@ -4210,8 +4239,7 @@ class Engine:
             # record to check them by: the turn is no better than "unchecked"
             replies.append((None, None, None, None, tee[0]))
         entry["text"] = entry["text"].strip()
-        if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches",
-                                      "research", "refusal")):
+        if any(entry.get(k) for k in shown):
             self.chat.append(entry)
             self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"],
                      questions=entry.get("questions", []))
@@ -4232,24 +4260,55 @@ class Engine:
                               **({"context": True} if overflowed else {}),
                               **({"retired": {"model": retired["model"], "offered": retired["offered"]}} if retired else {})})
             self.log("turn_error", error=error)
+        elif out_of_rounds:
+            self.chat.append({"kind": "note", "text": (
+                f"The AI's turn stopped at the limit of {MAX_TOOL_ROUNDS} rounds for one turn, before it said it was "
+                "done: it may not have read its last results. Send a message to let it carry on.")})
+            self.log("turn_out_of_rounds", model=model)
         if usage:
             self.last_usage = usage
-            self._overflowed = False
             self.log("usage", model=model, **{k: v for k, v in usage.items() if isinstance(v, int)})
+        # Too long for the model: said by the turn's last request, not by whether an earlier round of
+        # it went through. Until Nov 2026 a turn that overflowed in its second round was taken to
+        # fit (its first round had reported usage), and compaction then sent everything again.
+        if overflowed:
+            self._overflowed = True
+        elif usage or not error:
+            self._overflowed = False
         self._turn = None      # finished: can_retry must not see this task as still busy
         self.emit("turn_end", entry=entry, error=error, usage=usage, chat=self.chat, can_retry=self.can_retry)
         self._queue_changed()
         self._persist()
 
     def _answer_open_calls(self, why: str) -> None:
-        """Answer each tool call of the last assistant message that has no reply. A call left
-        unanswered makes an OpenAI-format API refuse this conversation in every later request."""
-        last = next((i for i in range(len(self.conv) - 1, -1, -1) if self.conv[i].get("role") == "assistant"), None)
-        if last is None:
-            return
-        answered = {m.get("tool_call_id") for m in self.conv[last + 1:] if m.get("role") == "tool"}
-        self.conv += [{"role": "tool", "tool_call_id": c.get("id"), "content": why}
-                      for c in self.conv[last].get("tool_calls") or [] if c.get("id") not in answered]
+        """Answer each tool call in the conversation that has no reply, directly after the
+        assistant message that made it. A call left unanswered makes an OpenAI-format API refuse
+        this conversation in every later request, and so does an answer that comes after another
+        message: until Nov 2026 the answers were appended at the end, which for a conversation
+        saved mid-turn and then sent on (a call open, the technician's next message after it) put
+        them behind that message, on every request from then on. A reply found there, behind a
+        later message of the same exchange, is moved back to its call."""
+        conv, out, i = self.conv, [], 0
+        while i < len(conv):
+            m = conv[i]
+            out.append(m)
+            i += 1
+            ids = [c.get("id") for c in m.get("tool_calls") or []] if m.get("role") == "assistant" else []
+            if not ids:
+                continue
+            # this message's stretch of the conversation: up to the next assistant message
+            end = next((k for k in range(i, len(conv)) if conv[k].get("role") == "assistant"), len(conv))
+            replies = {}
+            for later in conv[i:end]:
+                if later.get("role") == "tool" and later.get("tool_call_id") in ids:
+                    replies.setdefault(later.get("tool_call_id"), later)
+            out += [replies.get(cid) or {"role": "tool", "tool_call_id": cid, "content": why} for cid in dict.fromkeys(ids)]
+            out += [later for later in conv[i:end] if not any(later is r for r in replies.values())]
+            i = end
+        if len(out) != len(conv) or any(a is not b for a, b in zip(out, conv)):
+            if any(a is not b for a, b in zip(out, conv)):       # not only added at the end: logged whole again
+                self._req_conv_len = 0
+            self.conv = out
 
     def _native_search_event(self, entry: dict, found: dict) -> None:
         """A search Anthropic ran for the chat model (native search), shown on its message like the
@@ -4355,10 +4414,19 @@ class Engine:
             elif call.name != prompts.PROPOSE_TOOL["function"]["name"]:
                 reply, retry = f"Unknown tool {call.name}. Use propose_commands.", True
             else:
+                # All of a call's items are queued, or none: one item that is no object (a bare
+                # string among the objects) used to fail the call after the items before it were
+                # queued, unrecorded: no audit entry, not on the message, and queued again by the
+                # model's next try.
+                queued = list(self.queue.items)
                 try:
                     items = call.parsed()["items"]
                     if not isinstance(items, list):
                         raise TypeError("items must be an array")
+                    wrong = [f"item {n} is {'a string' if isinstance(it, str) else type(it).__name__}, not an object"
+                             for n, it in enumerate(items, 1) if not isinstance(it, dict)]
+                    if wrong:
+                        raise TypeError("; ".join(wrong[:5]))
                     open_ids = [r["id"] for r in self.sessions.roster() if not r["exited"]]
                     added = self.queue.add(call.id, items, known_sessions=set(open_ids),
                                            fallback_session=open_ids[0] if len(open_ids) == 1 else "",
@@ -4366,7 +4434,10 @@ class Engine:
                     if not added:
                         raise ValueError("no commands in items")
                 except Exception as e:  # noqa: BLE001
-                    reply, retry = f"Invalid propose_commands arguments ({e}). Call it again with valid JSON.", True
+                    self.queue.items[:] = queued         # whatever a call that failed had queued before it did
+                    reply, retry = (f"Invalid propose_commands arguments ({e}). Nothing was queued. Call it again "
+                                    "with valid JSON: every item an object with session_id, command, purpose and "
+                                    "risk."), True
                 else:
                     nums = [p.num for p in added]
                     entry["proposals"] += nums
