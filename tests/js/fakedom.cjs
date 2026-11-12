@@ -593,6 +593,7 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
   const source = fs.readFileSync(path.join(WEB, script), "utf8");
   const document = new Document(html);
   const clock = new Clock();
+  document.execCommand = () => !app.clipboardFails;
   const app = {
     document, clock, calls: [], routes: {}, sockets: [], terminals: [], clipboard: "", objectUrls: [], revoked: [],
     opened: [], observers: [], decodable: (src) => /^(data:image\/(png|jpeg|gif|webp)[;,]|blob:)/.test(src),
@@ -638,7 +639,7 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
       this.readyState = 1;
       this.onopen?.(new Event("open"));
     }
-    receive(data) { this.onmessage?.({ data: typeof data === "string" ? data : JSON.stringify(data) }); }
+    receive(data) { this.onmessage?.({ data: typeof data === "string" || data instanceof ArrayBuffer ? data : JSON.stringify(data) }); }
   }
   Object.assign(FakeWebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
 
@@ -661,6 +662,7 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
     onResize(fn) { this.resizeHandler = fn; return { dispose() {} }; }
     attachCustomKeyEventHandler(fn) { this.keyHandler = fn; }
     write(data) { this.written.push(data); }
+    reset() { this.resets = (this.resets || 0) + 1; this.written = []; }
     paste(text) { this.pasted.push(text); }
     hasSelection() { return !!this.selection; }
     getSelection() { return this.selection; }
@@ -721,7 +723,9 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
     sessionStorage: makeStorage(),
     localStorage: makeStorage(),
     navigator: { userAgent: "fakedom", platform: "Linux x86_64",
-      clipboard: { writeText: async (t) => { app.clipboard = t; }, readText: async () => app.clipboard } },
+      // app.clipboardFails: the browser refuses, as one without the permission does
+      clipboard: { writeText: async (t) => { if (app.clipboardFails) throw new Error("NotAllowedError"); app.clipboard = t; },
+        readText: async () => app.clipboard } },
     fetch, WebSocket: FakeWebSocket, Image: FakeImage,
     // nothing is laid out here, so nothing resizes by itself: app.resized(el) tells the observers of el
     ResizeObserver: class {

@@ -574,6 +574,127 @@ test("the session list goes back when the server refuses the change, and Run sav
   assert.deepEqual(app.terminals.map((t) => t.pasted), [[], ["uptime"]]);
 });
 
+// ------------------------------------------------------------------ the clipboard and the connection
+
+test("a copy that fails says so, and Copy to run doesn't mark the item run over the old clipboard", async () => {
+  const app = await page("a", (s) => {
+    s.sessions.push({ ...s.sessions[0], id: "win1", kind: "window", target: "ScreenConnect" });
+    s.queue[0].session_id = "win1";
+  }, { "POST /api/queue/1": (c) => ({ ok: true, item: { ...state("a").queue[0], session_id: "win1", ...c.body } }) });
+  app.clipboard = "what was there before";
+  app.clipboardFails = true;
+  button(row(app, 3), "Copy").click();
+  await app.clock.tick(0);
+  assert.match(app.toasts().at(-1), /Nothing was copied: the clipboard couldn't be written to/);
+  assert.ok(!app.toasts().includes("Command copied."));
+  button(row(app, 1), "Copy to run").click();
+  await app.clock.tick(50);
+  button(app.$(".modal"), "Copy it").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/queue/1"), [], "not marked run");
+  assert.equal(app.clipboard, "what was there before");
+  assert.equal(app.toasts().filter((t) => /Nothing was copied/.test(t)).length, 2);
+  // the clipboard first, then the mark
+  app.clipboardFails = false;
+  app.routes["POST /api/queue/1"] = (c) => { assert.equal(app.clipboard, "uptime"); return { ok: true, item: { ...state("a").queue[0], session_id: "win1", ...c.body } }; };
+  button(row(app, 1), "Copy to run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/queue/1").map((c) => c.body), [{ status: "ran" }]);
+  assert.match(app.toasts().at(-1), /#1 copied: paste it into win1/);
+});
+
+test("the page says when its connection to DA Toolkit is lost and when it is back, and stops at a token that is refused", async () => {
+  const app = await page("a");
+  const sockets = () => app.sockets.filter((s) => s.url.includes("/ws/events"));
+  const banner = app.$("#conn-banner");
+  assert.equal(banner.classList.contains("hidden"), true);
+  sockets()[0].close();
+  assert.equal(banner.classList.contains("hidden"), false);
+  assert.match(banner.textContent, /connection to DA Toolkit is lost; reconnecting….*nothing can be run or sent until it is back/);
+  await app.clock.tick(1500);
+  assert.equal(sockets().length, 2);
+  sockets()[1].open();
+  assert.equal(banner.classList.contains("hidden"), true);
+  // not running: asked again and again, with no socket opened to nothing
+  app.routes["GET /api/phone"] = app.routes["POST /api/stop"] = () => { throw new TypeError("fetch failed"); };
+  sockets()[1].close();
+  await app.clock.tick(6000);
+  assert.equal(sockets().length, 2);
+  assert.equal(banner.classList.contains("hidden"), false);
+  // a request made meanwhile fails in the technician's words
+  await app.call("guarded", () => app.call("api", "POST", "/api/stop"));
+  assert.match(app.toasts().at(-1), /DA Toolkit didn't answer: the connection to it is lost/);
+  // started again: another token, so this page can never connect
+  app.routes["GET /api/phone"] = () => ({ __status: 403, body: { detail: "bad token" } });
+  await app.clock.tick(1500);
+  assert.match(app.document.body.textContent, /DA Toolkit isn't open in this page\..*refused this page's access token: it has been started again/s);
+  await app.clock.tick(20000);
+  assert.equal(sockets().length, 2, "no more attempts");
+});
+
+test("a page opened with no token, or with one the server refuses, says so instead of showing an empty shell", async () => {
+  const none = loadApp({ hash: "" });
+  await none.clock.tick(0);
+  assert.match(none.document.body.textContent, /DA Toolkit isn't open in this page\..*This address carries no access token/s);
+  assert.deepEqual([none.sockets.length, none.calls.length], [0, 0]);
+  const old = loadApp({ token: "of-an-earlier-run", routes: { "GET /api/phone": () => ({ __status: 403, body: { detail: "bad token" } }) } });
+  await old.clock.tick(0);
+  old.sockets[0].close();
+  assert.match(old.document.body.textContent, /refused this page's access token/);
+  await old.clock.tick(20000);
+  assert.equal(old.sockets.length, 1);
+});
+
+test("a terminal's socket that drops is connected again, and the backlog the server replays is on the screen once", async () => {
+  const app = await page("a");
+  const term = app.terminals[0];
+  const sockets = () => app.sockets.filter((s) => s.url.includes("/ws/term/local"));
+  const bytes = (s) => new TextEncoder().encode(s).buffer;
+  const screen = () => term.written.map((w) => (typeof w === "string" ? w : new TextDecoder().decode(w))).join("");
+  sockets()[0].open();
+  sockets()[0].receive(bytes("$ uptime\r\n up 3 days\r\n"));
+  app.run("markOutput(S.terms.local, 1)");
+  sockets()[0].close();
+  assert.match(screen(), /connection to this session dropped; reconnecting/);
+  assert.equal(app.run("S.terms.local.ws"), null);
+  await app.clock.tick(1000);
+  assert.equal(sockets().length, 2);
+  sockets()[1].open();
+  sockets()[1].receive(bytes("$ uptime\r\n up 3 days\r\n"));          // all the session has printed, again
+  sockets()[1].receive(bytes("$ "));
+  assert.equal(term.resets, 1);
+  assert.equal(screen(), "$ uptime\r\n up 3 days\r\n$ ");
+  assert.equal(app.run("S.terms.local.markers.size"), 0, "marks into the screen that was cleared are gone");
+  assert.ok(app.run("S.terms.local.ws") === sockets()[1]);
+  // the server not there: tried again, further and further apart
+  sockets()[1].close();
+  await app.clock.tick(1000);
+  sockets()[2].close();
+  await app.clock.tick(1999);
+  assert.equal(sockets().length, 3);
+  await app.clock.tick(1);
+  assert.equal(sockets().length, 4);
+  // a session that was closed is left alone
+  await app.event({ type: "sessions", sessions: [] });
+  await app.clock.tick(60000);
+  assert.equal(sockets().length, 4);
+});
+
+test("a state that says the AI isn't answering clears the bubble of a reply whose end was missed", async () => {
+  const app = await page("a");
+  await app.event({ type: "turn_start", model: "m", tier: "standard" });
+  await app.event({ type: "delta", kind: "text", text: "Half an ans" });
+  await app.clock.tick(20);
+  assert.match(app.$("#chat-log .msg.streaming").textContent, /Half an ans/);
+  assert.equal(app.$("#stop-btn").classList.contains("hidden"), false);
+  await app.event({ type: "state", state: state("a") });             // as a reconnection sends: not busy
+  assert.equal(app.$("#chat-log .msg.streaming"), null);
+  assert.equal(app.$("#stop-btn").classList.contains("hidden"), true);
+  await app.event({ type: "delta", kind: "text", text: "wer" });      // a straggler draws nothing
+  await app.clock.tick(20);
+  assert.equal(app.$("#chat-log .msg.streaming"), null);
+});
+
 // ------------------------------------------------------------------ keys, terminals, remote desktops
 
 test("Ctrl+Shift+C in a terminal copies its selection, and leaves the clipboard alone with none", async () => {

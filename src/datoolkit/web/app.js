@@ -97,16 +97,25 @@ function add(el, ...children) {
 }
 
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: { "X-Token": TOKEN, "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: { "X-Token": TOKEN, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    // no answer at all: said in the technician's words, not the browser's ("Failed to fetch")
+    const err = new Error("DA Toolkit didn't answer: the connection to it is lost, so this may not have been done.");
+    err.unreachable = true;
+    throw err;
+  }
   let data = {};
   try { data = await res.json(); } catch { /* empty */ }
   if (!res.ok) {
     const err = new Error(data.error || data.detail || `${res.status} ${res.statusText}`);
     err.commands = Array.isArray(data.commands) ? data.commands : [];
+    err.status = res.status;
     throw err;
   }
   return data;
@@ -323,14 +332,22 @@ function rendered(text, cls = "body") {
   return el;
 }
 
+// Throws when nothing was copied, so no caller says "copied", or marks a command run, over a
+// clipboard that still holds what was there before. (Until Nov 2026 a failure went unsaid.)
 async function clipWrite(text) {
-  try {
-    if (DESKTOP) return await api("POST", "/api/desktop/clipboard", { text });
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = h("textarea", { value: text });
-    document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+  if (DESKTOP) {
+    try { await api("POST", "/api/desktop/clipboard", { text }); return; } catch { /* the browser's own ways, below */ }
   }
+  try { await navigator.clipboard.writeText(text); return; } catch { /* not allowed here, or an older browser: the old way */ }
+  const had = document.activeElement;
+  const ta = h("textarea", { value: text, tabindex: -1, "aria-hidden": "true", style: "position:fixed;left:-9999px;top:0" });
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { /* not copied */ }
+  ta.remove();
+  had?.focus?.();
+  if (!ok) throw new Error("Nothing was copied: the clipboard couldn't be written to. Select the text and copy it by hand.");
 }
 
 async function clipRead() {
@@ -390,7 +407,7 @@ function fixModal(message, commands) {
     title: "Needs setting up", wide: true,
     body: [h("div", {}, message), ...commands.map((c) => h("div", { class: "fix-cmd" },
       h("code", {}, c),
-      h("button", { class: "small", type: "button", onclick: async () => { await clipWrite(c); toast("Command copied.", "ok", 2000); } }, "Copy")))],
+      h("button", { class: "small", type: "button", onclick: () => guarded(async () => { await clipWrite(c); toast("Command copied.", "ok", 2000); }) }, "Copy")))],
     buttons: [{ label: "Close", kind: "primary" }],
   });
 }
@@ -423,10 +440,47 @@ function confirmModal(title, message, okLabel = "OK", kind = "primary") {
 
 // ------------------------------------------------------------------ events socket
 
+// Everything the page shows comes over this socket. When it drops, a banner says so until it is
+// back (what is on the page may be out of date by then, and nothing can be run or sent); the
+// server sends the whole state again on every connection. Before each new attempt the token is
+// tried on a small request: a token the server refuses (it was started again since this page was
+// opened) will never connect, so the page says that instead of trying for ever. (Until Nov 2026
+// the page looked the same connected or not.)
+const NO_TOKEN = "This address carries no access token, so DA Toolkit can't be used from it. Open DA Toolkit from its launcher, or with the whole address it prints when it starts.";
+const TOKEN_REFUSED = "DA Toolkit refused this page's access token: it has been started again since the page was opened, and every start has a token of its own. Close this tab and open DA Toolkit again.";
+
 function connectEvents() {
   const ws = new WebSocket(`ws://${location.host}/ws/events?t=${encodeURIComponent(TOKEN)}`);
-  ws.onmessage = (m) => handleEvent(JSON.parse(m.data));
-  ws.onclose = () => setTimeout(connectEvents, 1500);
+  ws.onopen = () => connectionLost(false);
+  ws.onmessage = (m) => { connectionLost(false); handleEvent(JSON.parse(m.data)); };
+  ws.onclose = () => {
+    if (S.ended) return;
+    connectionLost(true);
+    setTimeout(reconnectEvents, 1500);
+  };
+}
+
+async function reconnectEvents() {
+  if (S.ended) return;
+  try {
+    await api("GET", "/api/phone");
+  } catch (e) {
+    if (e.status === 403) return noAccess(TOKEN_REFUSED);
+    if (e.unreachable) return setTimeout(reconnectEvents, 1500);    // not running, or not yet: keep trying
+  }
+  connectEvents();
+}
+
+function connectionLost(lost) {
+  const banner = $("#conn-banner");
+  banner.textContent = lost ? "⚠ The connection to DA Toolkit is lost; reconnecting… What is shown here may be out of date, and nothing can be run or sent until it is back." : "";
+  banner.classList.toggle("hidden", !lost);
+}
+
+// The page can't be used: said in place of the page, where an empty shell would say nothing.
+function noAccess(why) {
+  S.ended = true;
+  document.body.replaceChildren(h("div", { class: "quit-note", role: "alert" }, h("h2", {}, "DA Toolkit isn't open in this page."), h("p", {}, why)));
 }
 
 function handleEvent(ev) {
@@ -434,6 +488,8 @@ function handleEvent(ev) {
     case "state": {
       const first = !S.state, was = S.state?.case?.id ?? null;
       S.state = ev.state;
+      // a turn that ended while the page wasn't listening (its turn_end missed) leaves no bubble
+      if (!S.state.busy) S.streaming = null;
       const switched = was !== (S.state.case?.id ?? null);
       if (switched) caseSwitched();
       loadLayout(S.state.config?.settings?.layout);
@@ -1401,17 +1457,52 @@ function ensureTerm(sess) {
     if (!e.ctrlKey || !e.shiftKey) return true;
     // Returning false only stops xterm; preventDefault also stops the browser's own
     // Ctrl+Shift+V paste, which xterm would otherwise paste a second time.
-    if (e.code === "KeyC") { e.preventDefault(); if (term.hasSelection()) clipWrite(term.getSelection()); return false; }
+    if (e.code === "KeyC") { e.preventDefault(); if (term.hasSelection()) clipWrite(term.getSelection()).catch(showError); return false; }
     if (e.code === "KeyV") { e.preventDefault(); clipRead().then((txt) => txt && term.paste(txt)).catch(() => toast("Clipboard not available", "error")); return false; }
     return true;
   });
-  const ws = new WebSocket(`ws://${location.host}/ws/term/${encodeURIComponent(sess.id)}?t=${encodeURIComponent(TOKEN)}`);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => { t.ws = ws; fitTerm(t, true); };
-  ws.onmessage = (m) => term.write(new Uint8Array(m.data));
-  ws.onclose = () => { t.ws = null; };
   S.terms[sess.id] = t;
+  connectTerm(t);
   return t;
+}
+
+// A terminal's socket, connected again when it drops for as long as the session is listed. The
+// server sends what the session has printed so far (its backlog) on every connection, so a
+// connection that isn't the first clears the screen before that arrives: the scrollback is then
+// the backlog once, not twice. The output marks of commands run before go with the screen (their
+// captures come from the transcript instead). (Until Nov 2026 a dropped socket left a terminal
+// that showed nothing more and took no keys until the page was reloaded.)
+function connectTerm(t) {
+  const ws = new WebSocket(`ws://${location.host}/ws/term/${encodeURIComponent(t.id)}?t=${encodeURIComponent(TOKEN)}`);
+  ws.binaryType = "arraybuffer";
+  let replay = t.wasOpen;
+  ws.onopen = () => { t.ws = ws; t.wasOpen = true; t.tries = 0; fitTerm(t, true); };
+  ws.onmessage = (m) => {
+    if (replay) {
+      replay = false;
+      t.markers.forEach((mark) => mark.dispose());
+      t.markers.clear();
+      t.term.reset();
+    }
+    t.term.write(new Uint8Array(m.data));
+  };
+  ws.onclose = () => {
+    if (t.ws === ws) {
+      t.ws = null;
+      if (!t.gone) t.term.write("\r\n\x1b[0;33m[The connection to this session dropped; reconnecting…]\x1b[0m\r\n");
+    }
+    if (t.gone || S.ended) return;
+    t.retry = setTimeout(() => connectTerm(t), Math.min(1000 * 2 ** (t.tries || 0), 15000));
+    t.tries = (t.tries || 0) + 1;
+  };
+}
+
+function closeTerm(t) {
+  t.gone = true;
+  clearTimeout(t.retry);
+  t.ws?.close();
+  t.term.dispose();
+  t.host.remove();
 }
 
 function termSend(t, msg) {
@@ -1461,7 +1552,7 @@ function renderSessions() {
   const sessions = S.state.sessions || [];
   const ids = new Set(sessions.map((s) => s.id));
   for (const [id, t] of Object.entries(S.terms)) {
-    if (!ids.has(id)) { t.ws?.close(); t.term.dispose(); t.host.remove(); delete S.terms[id]; }
+    if (!ids.has(id)) { closeTerm(t); delete S.terms[id]; }
   }
   for (const [id, r] of Object.entries(S.rdps)) {
     if (!ids.has(id)) { try { r.client.disconnect(); } catch { /* gone */ } r.host.remove(); delete S.rdps[id]; }
@@ -4294,7 +4385,7 @@ async function doExport(act) {
       add(content, r.tee_attested ? h("div", { class: "small" }, teeMark(r)) : null, ta,
         h("div", { class: "muted small" }, `A copy is in the case folder: ${r.path}`),
         h("div", { class: "row" },
-          h("button", { class: "primary", onclick: () => { clipWrite(ta.value); toast("Copied.", "ok"); } }, "Copy"),
+          h("button", { class: "primary", onclick: () => guarded(async () => { await clipWrite(ta.value); toast("Copied.", "ok"); }) }, "Copy"),
           h("button", { onclick: () => guarded(() => saveFile(`${S.state.case.id}-${file}.md`, new Blob([ta.value], { type: "text/markdown" }))) }, "Save as…")));
     } catch (e) {
       m.box.querySelector(".content").replaceChildren(h("div", { class: "warnbox" }, e.message));
@@ -4445,15 +4536,18 @@ function init() {
   $("#quit-btn").addEventListener("click", () => guarded(async () => {
     if (!(await confirmModal("Quit DA Toolkit", "Quit DA Toolkit? Open sessions are closed and the phone companion stops.", "Quit", "danger"))) return;
     await api("POST", "/api/quit");
+    S.ended = true;
     document.body.replaceChildren(h("div", { class: "quit-note" }, h("h2", {}, "DA Toolkit has quit."), h("p", {}, "You can close this tab.")));
   }));
   const started = () => {        // what needs the token
-    api("GET", "/api/phone").then((i) => { S.phoneRunning = i.running; S.phones = i.phones; renderPhoneBtn(); }).catch(() => {});
+    api("GET", "/api/phone").then((i) => { S.phoneRunning = i.running; S.phones = i.phones; renderPhoneBtn(); },
+      (e) => { if (e.status === 403) noAccess(TOKEN_REFUSED); });
     connectEvents();
   };
   if (LAUNCH) {
     launchToken(LAUNCH).then((t) => { TOKEN = t; started(); }, (e) => {
-      document.body.replaceChildren(h("div", { class: "quit-note" }, h("h2", {}, "This link can't open DA Toolkit."), h("p", {}, e.message)));
+      S.ended = true;
+      document.body.replaceChildren(h("div", { class: "quit-note", role: "alert" }, h("h2", {}, "This link can't open DA Toolkit."), h("p", {}, e.message)));
     });
   }
   $("#vision-btn").addEventListener("click", () => openSettings("model"));
@@ -4489,7 +4583,8 @@ function init() {
   $("#hyp-toggle").addEventListener("click", () => $("#hyp-list").classList.toggle("hidden"));
   $("#send-selection-btn").addEventListener("click", () => guarded(sendSelection));
   $("#show-done").addEventListener("change", renderQueue);
-  if (!LAUNCH) started();
+  if (!LAUNCH && !TOKEN) noAccess(NO_TOKEN);
+  else if (!LAUNCH) started();
 }
 
 init();
