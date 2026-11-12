@@ -1134,3 +1134,136 @@ async def test_a_research_run_sends_nothing_more_once_its_model_is_refused(env):
     assert rec["status"] == "failed" and "nothing was sent" in rec["error"]
     assert _to_the_agent(fake.requests) == 1 and calls == ["TEE/glm-5.3"] * 2
     assert KEY not in engine._tee and engine.chat[-1]["text"].endswith("Carrying on without the research.")
+
+
+# ---------------------------------------------------------------- the guard and the checks, request by request
+
+HYPOTHESES_ONLY = {"tool_calls": [{"index": 0, "id": "h1", "type": "function", "function": {
+    "name": "update_hypotheses", "arguments": json.dumps({"items": [{"id": "dns", "text": "DNS", "confidence": 0.5,
+                                                                      "status": "open"}]})}}]}
+
+
+def _between_rounds(engine, monkeypatch, do):
+    """Run `do()` (it may be a coroutine function) once, after the turn's first reply is recorded and
+    before its next request."""
+    real, done = engine._record_assistant, []
+
+    async def recorded(result, entry, turn=None):
+        retry = await real(result, entry, turn)
+        if not done:
+            done.append(True)
+            found = do()
+            if asyncio.iscoroutine(found):
+                await found
+        return retry
+    monkeypatch.setattr(engine, "_record_assistant", recorded)
+
+
+def _no_id(delta: dict, finish: str = "stop") -> str:
+    """A stream whose chunk names no completion id (and, with no X-Receipt-Id header, no receipt)."""
+    body = {"object": "chat.completion.chunk", "created": 0, "model": "m",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+    return f"data: {json.dumps(body)}\n\ndata: [DONE]\n\n"
+
+
+async def test_a_recheck_refused_between_two_rounds_of_a_turn_stops_the_next_round(env, monkeypatch):  # noqa: F811
+    """The guard was taken once, before the turn's first request: a Re-check refused while the turn
+    went on ("nothing is sent to it until attestation succeeds") was followed by its next round."""
+    engine, fake, _ = env
+    engine._tee_factory, state = switchable()
+    engine.new_case("m", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    assert (await settled(engine))["status"] == "verified"
+
+    async def refuse():
+        state["ok"] = False
+        assert (await engine.attest_now())["status"] == "failed"
+    _between_rounds(engine, monkeypatch, refuse)
+    # a round of tool calls and no words is followed by another, asking for the words
+    fake.responses += [sse((HYPOTHESES_ONLY, None), ({}, "tool_calls")),
+                       sse(({"role": "assistant", "content": "must never be asked for"}, "stop"))]
+    sent = len(fake.requests)
+    engine.send("names resolve slowly")
+    await wait_turn(engine)
+    assert len(fake.requests) == sent + 1, "round 2 went out under a refused attestation"
+    assert "nothing was sent" in engine._last_turn_error and engine.can_retry
+
+
+async def test_an_attestation_grown_old_mid_turn_is_made_again_and_each_reply_checked_under_its_own(env, monkeypatch):  # noqa: F811
+    engine, fake, _ = env
+    first = sse((HYPOTHESES_ONLY, None), ({}, "tool_calls"))
+    second = sse(({"role": "assistant", "content": "DNS looks likely."}, "stop"))
+    calls: list = []
+    # each attestation's server keeps the record of the one reply requested under it
+    engine._tee_factory = tee_factory(calls, server=receipt_server, tied="statement", streams={"rcpt-0": first.encode()})
+    engine.new_case("o", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    key = ("Fake", "TEE/glm-5.3")
+
+    def age():
+        client, _when, shown = engine._tee[key]
+        engine._tee[key] = (client, since_boot() - 3600, shown)
+        engine._tee_factory = tee_factory(calls, server=receipt_server, tied="statement", streams={"rcpt-1": second.encode()})
+    _between_rounds(engine, monkeypatch, age)
+    fake.receipt_ids = ["rcpt-0", "rcpt-1"]
+    fake.responses += [first, second]
+    engine.send("names resolve slowly")
+    await wait_turn(engine)
+    assert calls == ["TEE/glm-5.3"] * 2, "attested again before the second round"
+    assert engine.chat[-1]["text"] == "DNS looks likely."
+    assert await signature_of(engine.chat[-1]) == "verified"
+
+
+async def test_a_reply_with_no_id_and_no_receipt_is_unchecked_not_left_out(env):  # noqa: F811
+    """Both the id and the receipt header come from the relay: a reply without them was dropped
+    before the check, and the message showed the TEE badge with no mark."""
+    engine, fake, _ = env
+    engine._tee_factory = tee_factory()
+    engine.new_case("n", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    fake.responses.append(_no_id({"role": "assistant", "content": "Let's look."}))
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    entry = engine.chat[-1]
+    assert entry["text"] == "Let's look." and entry["tee_attested"]
+    assert await signature_of(entry) == "unchecked"
+
+
+async def test_an_unchecked_reply_wins_over_a_verified_one_of_the_same_turn(env, monkeypatch):  # noqa: F811
+    """In a two-round turn the reply with no id took "verified" from the other."""
+    engine, fake, _ = env
+    second = sse(({"role": "assistant", "content": "DNS looks likely."}, "stop"))
+    engine._tee_factory = tee_factory(server=receipt_server, tied="statement", streams={"rcpt-1": second.encode()})
+    engine.new_case("u", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    _between_rounds(engine, monkeypatch, lambda: fake.receipt_ids.append("rcpt-1"))    # only the second names a receipt
+    fake.responses += [_no_id(HYPOTHESES_ONLY, "tool_calls"), second]
+    engine.send("names resolve slowly")
+    await wait_turn(engine)
+    entry = engine.chat[-1]
+    assert entry["text"] == "DNS looks likely." and entry["hyp_changes"]
+    assert await signature_of(entry) == "unchecked"
+    logged = [json.loads(line) for line in (engine.case.dir / "events.jsonl").read_text().splitlines()]
+    assert [e["replies"] for e in logged if e["event"] == "tee_reply_signature"] == [2]
+
+
+async def test_a_tee_reply_cut_short_is_unchecked(env, monkeypatch):  # noqa: F811
+    engine, fake, _ = env
+    engine._tee_factory = tee_factory()
+    engine.new_case("p", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+
+    class Breaks:
+        async def stream(self, model, messages, tools, params, **kw):
+            yield "text", "Half an ans"
+            raise RuntimeError("connection lost")
+    monkeypatch.setattr(engine, "_client", lambda prov, model="": Breaks())
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    entry = engine.chat[-2]
+    assert entry["text"] == "Half an ans" and "connection lost" in engine._last_turn_error
+    assert await signature_of(entry) == "unchecked"

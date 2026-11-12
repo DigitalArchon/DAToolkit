@@ -4030,6 +4030,11 @@ class Engine:
         overflowed = None     # a plain explanation when the request was too long for the model
         retired = None        # the model is no longer offered: {"model", "offered": [...]} for the note
         in_flight = None      # (system, messages sent, ...) of the request being streamed, for the log
+        # A TEE model's replies this turn: (completion id, receipt id, sha256 of the stream's bytes,
+        # route, the client its request went out under), for their signed records (_reply_record;
+        # llm/tee.py check_reply)
+        replies: list[tuple] = []
+        tee = None
         try:
             if similar_for:
                 await self._find_similar(similar_for)
@@ -4044,18 +4049,20 @@ class Engine:
                     self.log("enclave_attested", **self.attestation)
                     self._changed()
                 entry["sealed"] = att.summary
-            tee = await self._tee_guard(prov, model, "chat")
-            if tee:
-                entry.update(self._tee_sent_under(tee))
-            # a TEE model's replies this turn: (completion id, receipt id, sha256 of the stream's
-            # bytes, route), for their signed records (llm/tee.py check_reply)
-            replies: list[tuple] = []
-            stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
             turn: dict = {}
             nudged = promise_nudged = text_only = hyp_continued = text_only_retried = False
             vision = self.vision_status()
             ttl = self._cache_ttl(prov, model, tier)
             for _ in range(MAX_TOOL_ROUNDS):
+                # The TEE guard is taken before every request of the turn, not once for all of them:
+                # a turn can last far longer than an attestation is good for (each approval of a
+                # search may wait five minutes), and a Re-check refused meanwhile must stop the next
+                # round. It returns at once while the attestation is fresh and undoubted. Until Nov
+                # 2026 later rounds went out under whatever held when the turn began.
+                tee = await self._tee_guard(prov, model, "chat")
+                if tee:
+                    entry.update(self._tee_sent_under(tee))
+                stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
                 static, state = self._prompt_parts()
                 messages, extra = self._chat_request(static, state, await self._conv_for_model(vision), ttl, prov)
                 system = messages[0]["content"]
@@ -4092,6 +4099,12 @@ class Engine:
                         raise
                     in_flight = None
                     continue                     # the same round again, without that setting
+                if tee:
+                    # Every reply is checked, also one that names no id and no receipt: both come
+                    # from the relay, and a reply without them is found "unchecked" (llm/tee.py
+                    # check). Until Nov 2026 such a reply was left out, and the turn showed the
+                    # mark of its other replies, or the TEE badge with no mark at all.
+                    replies.append(self._reply_record(result, tee))
                 if text_only and not text_only_retried and not result.tool_calls and not result.content.strip():
                     # live, Qwen 3.8 Max answered the words-only round with nothing at all (its tool call,
                     # presumably, dropped by the route): ask once more with the tools back
@@ -4113,8 +4126,6 @@ class Engine:
                         entry["text"] = entry["text"][:round_text] + clean
                 usage = result.usage
                 self._turn_extras(entry, prov, model, result)
-                if tee and (result.id or result.receipt_id):
-                    replies.append(self._reply_record(result))
                 self._log_request("chat", model, tier, system, sent, {
                     "content": result.content, "reasoning": entry["reasoning"][round_reasoning:],
                     "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls],
@@ -4194,19 +4205,27 @@ class Engine:
                 self._overflowed = True
         if error:                 # a call whose handling failed is answered too, or every later request is refused
             self._answer_open_calls(f"Not done: DA Toolkit hit an error carrying it out ({error}).")
+        if tee and in_flight and (len(entry["reasoning"]), len(entry["text"])) != in_flight[3:5]:
+            # a reply cut short (stopped, or the stream failed) left words on the message and no
+            # record to check them by: the turn is no better than "unchecked"
+            replies.append((None, None, None, None, tee[0]))
         entry["text"] = entry["text"].strip()
         if any(entry.get(k) for k in ("text", "proposals", "reasoning", "questions", "hyp_changes", "withdrawn", "searches",
                                       "research", "refusal")):
             self.chat.append(entry)
             self.log("assistant", model=model, tier=tier, text=entry["text"], proposals=entry["proposals"],
                      questions=entry.get("questions", []))
-            if tee and replies:
+            if replies:
                 entry["tee_signature"] = "checking"
                 key = (prov.name, model)
+                # each reply is checked by the client it was requested under, which its record
+                # names: the model may have been attested again between two requests of the turn
                 task = self._tee_pending(key, asyncio.create_task(
-                    self._check_signatures(entry, tee[0], replies, self.case, self.chat, key)))
+                    self._check_signatures(entry, replies[-1][-1], replies, self.case, self.chat, key)))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
+            elif entry.get("tee_attested"):
+                entry["tee_signature"] = "unchecked"     # nothing of it could be looked up
         self._last_turn_error = error
         if error:
             self.chat.append({"kind": "note", "text": f"AI request {error}", "retry": True,
