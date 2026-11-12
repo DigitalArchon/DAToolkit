@@ -57,7 +57,7 @@ from typing import AsyncIterator
 import anthropic
 
 from .capabilities import EFFORTS
-from .client import NO_RESULT, ToolCall, TurnResult, is_private_mode, no_reply, redirected
+from .client import NO_RESULT, ToolCall, TurnResult, is_private_mode, local_http_options, no_reply, redirected
 from .params import nearest_effort
 from .providers import is_official_anthropic
 
@@ -438,10 +438,13 @@ class AnthropicClient:
         # the SDK adds /v1/messages itself
         base = re.sub(r"/v1/?$", "", base_url.rstrip("/"))
         # never the SDK's own HTTP client, which follows redirects: a reply pointing elsewhere
-        # would get the request again, x-api-key header included (llm/client.py LLMClient)
+        # would get the request again, x-api-key header included (llm/client.py LLMClient). An
+        # Anthropic-compatible server on this machine or its network is reached directly, not
+        # through a proxy the environment names (llm/client.py local_http_options).
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key or "not-needed", base_url=base, max_retries=1, timeout=600,
-            http_client=http_client or anthropic.DefaultAsyncHttpxClient(follow_redirects=False))
+            http_client=http_client or anthropic.DefaultAsyncHttpxClient(
+                follow_redirects=False, **local_http_options(base_url)))
         self._caps = caps or {}
 
     async def list_models(self) -> list[str]:

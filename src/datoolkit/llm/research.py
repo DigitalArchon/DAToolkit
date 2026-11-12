@@ -27,6 +27,7 @@ import httpx
 from ..config import private_dir
 from ..safety.hidden import visible
 from ..safety.inject import suspicious
+from .client import local_http_options
 from .netguard import key_problem, shown
 from .websearch import clean_date, clean_sites, format_for_model
 
@@ -73,7 +74,7 @@ async def scrape(base_url: str, api_key: str, urls: list[str], stealth: bool = F
     if problem:
         raise ScrapeError(problem)
     body = {"urls": urls[:MAX_URLS_PER_SCRAPE], "stealthMode": stealth}
-    client = http or httpx.AsyncClient(timeout=SCRAPE_TIMEOUT)
+    client = http or httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, **local_http_options(base_url))
     try:
         r = await client.post(scrape_url(base_url), json=body, headers={"Authorization": f"Bearer {api_key}"},
                               timeout=SCRAPE_TIMEOUT)

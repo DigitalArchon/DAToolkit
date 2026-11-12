@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
+import httpx
 from openai import APIError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 from openai.types.chat import ChatCompletionChunk
 
@@ -59,6 +60,27 @@ def is_local_url(base_url: str) -> bool:
     # the networks netguard allows plain http to, not Python's is_private: that also counts
     # public addresses (6to4 2002::/16, Teredo 2001::/32) and reserved ranges as private
     return netguard.is_local(host)
+
+
+def local_http_options(base_url: str) -> dict:
+    """Arguments for the HTTP client (httpx's, or an SDK's) that will talk to `base_url`.
+
+    A local address stays local. For one of this machine or its network (is_local_url: what the
+    Local tier counts) the client is built with `trust_env=False`, so a proxy named in the
+    environment (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) is never handed the request. httpx exempts
+    no address of its own accord: until Nov 2026 a Sovereign case on http://localhost:11434 went,
+    key and conversation, to whatever proxy the desktop session had set. Certificates are still
+    read as the environment names them (SSL_CERT_FILE, SSL_CERT_DIR: the AppImage points the first
+    at the system's bundle so that a company's own CA stands), which `trust_env=False` alone
+    would stop. And every scheme is mounted on the client's own transport (None), because
+    Anthropic's SDK builds its default client's proxies from the environment itself, whatever
+    `trust_env` says, and lets only a mount given here stand over them.
+
+    Any other address gets nothing here, and keeps the environment's proxy as before."""
+    if not is_local_url(base_url):
+        return {}
+    return {"trust_env": False, "verify": httpx.create_ssl_context(),
+            "mounts": {"all://": None, "http://": None, "https://": None}}
 
 
 def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None = None) -> str:
@@ -189,8 +211,10 @@ class LLMClient:
         # Local servers often need no key, but the SDK insists on a value. The SDK's own HTTP
         # client follows redirects, which would send the request again to wherever a reply
         # points, plain http and other hosts included: netguard checked only the base URL.
+        # And a local server is reached directly, whatever proxy the environment names.
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1, timeout=300,
-                                   http_client=http_client or DefaultAsyncHttpxClient(follow_redirects=False))
+                                   http_client=http_client or DefaultAsyncHttpxClient(
+                                       follow_redirects=False, **local_http_options(base_url)))
 
     async def list_models(self) -> list[str]:
         page = await self._client.models.list()

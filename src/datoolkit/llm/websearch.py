@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .client import local_http_options
 from .netguard import key_problem, shown
 
 # Best first, from DA-Assistant's measurement (2026-09-21: three queries, eight results each, scored
@@ -99,7 +100,7 @@ async def web_search(base_url: str, api_key: str, query: str, provider: str = "p
             body["fromDate"] = after
         if before:
             body["toDate"] = before
-    client = http or httpx.AsyncClient(timeout=TIMEOUT)
+    client = http or httpx.AsyncClient(timeout=TIMEOUT, **local_http_options(base_url))
     try:
         r = await client.post(search_url(base_url), json=body, headers={"Authorization": f"Bearer {api_key}"})
     except httpx.HTTPError as e:

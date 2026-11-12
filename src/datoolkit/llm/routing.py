@@ -27,7 +27,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .client import is_private_mode
+from .client import is_private_mode, local_http_options
 
 PRIORITIES = ("latency", "speed", "price", "host")
 LABELS = {"": "Provider's own routing", "latency": "Fastest first word", "speed": "Fastest overall",
@@ -179,7 +179,7 @@ def hosts_url(base_url: str, model: str) -> str:
 
 async def fetch_hosts(base_url: str, model: str, http: httpx.AsyncClient | None = None) -> ModelHosts:
     """NanoGPT's hosts for `model`, with its own figures for each. Needs no key, so none is sent."""
-    client = http or httpx.AsyncClient(timeout=30, follow_redirects=False)
+    client = http or httpx.AsyncClient(timeout=30, follow_redirects=False, **local_http_options(base_url))
     try:
         r = await client.get(hosts_url(base_url, model), headers={"Accept": "application/json"})
         r.raise_for_status()

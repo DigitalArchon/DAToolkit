@@ -12,6 +12,8 @@ import re
 
 import httpx
 
+from .client import local_http_options
+
 EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
@@ -38,7 +40,8 @@ def parse(items: list[dict]) -> dict[str, dict]:
 
 
 async def fetch_nanogpt(base_url: str, api_key: str | None, http: httpx.AsyncClient | None = None) -> dict[str, dict]:
-    client = http or httpx.AsyncClient(timeout=30)
+    # as every client built for a provider's address: a local one is reached directly (local_http_options)
+    client = http or httpx.AsyncClient(timeout=30, **local_http_options(base_url))
     try:
         r = await client.get(base_url.rstrip("/") + "/models", params={"detailed": "true"},
                              headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
@@ -70,7 +73,7 @@ def parse_openrouter(items: list[dict]) -> dict[str, dict]:
 
 
 async def fetch_openrouter(base_url: str, api_key: str | None, http: httpx.AsyncClient | None = None) -> dict[str, dict]:
-    client = http or httpx.AsyncClient(timeout=30)
+    client = http or httpx.AsyncClient(timeout=30, **local_http_options(base_url))
     try:
         r = await client.get(base_url.rstrip("/") + "/models",
                              headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
