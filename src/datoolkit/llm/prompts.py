@@ -167,7 +167,8 @@ REVISE_TOOL = {
         "description": (
             "Change your mind about commands still pending in the technician's queue: withdraw ones "
             "that are wrong, superseded or no longer useful, and/or reorder the pending ones. Only "
-            "pending items can be changed; anything already run or skipped stays as it is. The "
+            "pending items that you queued can be changed; anything already run or skipped, and anything "
+            "the technician queued themselves (the queue list says which), stays as it is. The "
             "technician can restore a withdrawn item. Tell them in your message what you changed and why."
         ),
         "parameters": {
@@ -466,6 +467,14 @@ def hypotheses_text(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# The queue items the technician queued themselves, by the call id the engine gives each kind
+# (Engine.queue_recipe, dry_run_item, queue_rollbacks, transfer_tool), and what each is. Every
+# other item came from a call of the model's, and only those are the model's to withdraw or
+# reorder (Engine._revise_queue).
+TECHNICIAN_CALLS = {"recipe": "a recipe's step", "dryrun": "a dry run", "rollback": "a rollback",
+                    "tool": "a tool transfer"}
+
+
 def queue_text(queue: list[dict]) -> str:
     """The technician's queue as the model should see it: what is waiting on whom. Each command
     redacted as output is: the technician may have typed a password into one (`sshpass -p …`),
@@ -476,7 +485,10 @@ def queue_text(queue: list[dict]) -> str:
         if st in groups:
             cmd = redact(q["command"][:2000])[0]         # of a payload of megabytes, the rules read the start
             cmd = cmd if len(cmd) <= 200 else cmd[:200] + "…"
-            groups[st].append(f"  #{q['num']} on `{q['session_id']}`: `{cmd}`" + (" (edited by technician)" if q.get("edited") else ""))
+            own = TECHNICIAN_CALLS.get(q.get("call_id", ""))
+            groups[st].append(f"  #{q['num']} on `{q['session_id']}`: `{cmd}`" + (" (edited by technician)" if q.get("edited") else "")
+                              + (f" (queued by the technician, {own}: not yours to withdraw or reorder)"
+                                 if own and st == "pending" else ""))
     if not any(groups.values()):
         return "Technician's queue: nothing waiting."
     lines = ["Technician's queue now:"]

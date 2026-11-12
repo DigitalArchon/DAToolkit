@@ -4451,6 +4451,9 @@ class Engine:
                              for n, it in enumerate(items, 1) if not isinstance(it, dict)]
                     if wrong:
                         raise TypeError("; ".join(wrong[:5]))
+                    # which recipe a step is of is for queue_recipe to say: an item carrying a
+                    # baseline recipe's key would be saved and compared as that section of a baseline
+                    items = [{k: v for k, v in it.items() if k not in ("recipe", "recipe_key")} for it in items]
                     open_ids = [r["id"] for r in self.sessions.roster() if not r["exited"]]
                     added = self.queue.add(call.id, items, known_sessions=set(open_ids),
                                            fallback_session=open_ids[0] if len(open_ids) == 1 else "",
@@ -4524,10 +4527,23 @@ class Engine:
             if p.status != "pending":
                 refused.append(f"#{num} is already {p.status}" + ("; its result will reach you" if p.status in ("ran", "inserted", "skipped") else ""))
                 continue
+            if p.call_id in prompts.TECHNICIAN_CALLS:
+                refused.append(f"#{num} was queued by the technician ({prompts.TECHNICIAN_CALLS[p.call_id]}), not by "
+                               "you, so only they can remove it; say in your message why you would")
+                continue
             self.queue.update(num, status="withdrawn", note=f"Withdrawn by the AI: {reason}" if reason else "Withdrawn by the AI")
             self.log("proposal_withdrawn", num=num, reason=reason, command=p.command)
             done.append({"num": num, "reason": reason})
         order = [n for n in (order if isinstance(order, list) else []) if isinstance(n, int)]
+        # Only among the model's own items: what the technician queued (a recipe's steps, a tool's
+        # transfer and its check, a rollback, a dry run before the command it rehearses) keeps its
+        # place. Until Nov 2026 the model could withdraw and reorder those too.
+        theirs = [n for n in order if self._queued(n) and self.queue.get(n).call_id in prompts.TECHNICIAN_CALLS]
+        if theirs:
+            refused.append(", ".join(f"#{n}" for n in theirs)
+                           + (" were queued by the technician, not by you, and keep their places" if len(theirs) > 1
+                              else " was queued by the technician, not by you, and keeps its place"))
+            order = [n for n in order if n not in theirs]
         moved = self.queue.reorder(order) if len(order) > 1 else []   # one item alone cannot move
         if moved:
             self.log("queue_reordered", order=moved)
