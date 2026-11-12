@@ -2080,7 +2080,7 @@ class Engine:
             cert = await rdpcert.fetch(host.host, port, host.user.split("\\")[-1].split("@")[0])
         except rdpcert.CertError as e:
             raise UserError(str(e)) from e
-        if host.rdp_security == "rdp" and cert["tls"]:
+        if host.rdp_security == "rdp":
             # legacy security chosen for this host: the connection won't use TLS, so the certificate
             # is not what guards it, and the technician is told so as for a server offering nothing else
             cert = {**cert, "tls": False, "protocol": "rdp", "sha256": "", "chosen": True}
@@ -2116,7 +2116,22 @@ class Engine:
         must match the pin for it, or, the first time, be accepted by the technician and pinned.
         `kind` ("rdp" | "winrm") names the audit events and the hint for finding the certificate."""
         where = f"{host}:{port}"
+        pinned = self.pins.get(host, port)
         if not cert["tls"]:
+            if pinned and not cert.get("chosen"):
+                # A server whose certificate is pinned now says it has no TLS to offer. That
+                # answer is unencrypted, so anyone on the path can write it, and saying yes to the
+                # question below would send the password with nothing to check: refused like a
+                # changed certificate. (Until Nov 2026 it got the question, which never mentioned
+                # the pin.) A host the technician set to legacy security is asked as before.
+                self.log(f"{kind}_cert_mismatch", target=where, pinned=pinned["sha256"], got="", tls=False)
+                raise UserError(f"A certificate of {where} was pinned on {pinned.get('pinned', '?')} (SHA-256: "
+                                f"{pinned['sha256']}), and the server now offers NO TLS at all, only legacy RDP "
+                                "security, which has no certificate to check. This can mean the server was rebuilt or "
+                                "set to legacy security, or that someone is intercepting the connection: the answer "
+                                "that refuses TLS is unencrypted, and anyone on the way can write it. Nothing was sent. "
+                                "Verify with the device owner; if the change is legitimate, remove the pin under "
+                                "Settings → Hosts and connect again.")
             how = ("is set to legacy RDP security (Settings → Hosts)" if cert.get("chosen")
                    else "only offers legacy RDP security")
             answer = await self.ask_user(sid, (
@@ -2127,14 +2142,15 @@ class Engine:
             if answer != "yes":
                 raise UserError(f"Not connected to {where}: no TLS.")
             return
-        pinned = self.pins.get(host, port)
         if pinned and pinned["sha256"] == cert["sha256"]:
             return
-        details = (f"Subject: {cert['subject']}\nIssuer: {cert['issuer']}"
-                   f"{' (self-signed)' if cert['self_signed'] else ''}\nValid until: {cert['not_after']}\n"
-                   f"SHA-256: {cert['sha256']}"
+        # The fingerprints come first: the subject and issuer are text the server chose, and
+        # nothing it writes may stand above them (rdpcert.describe keeps each to one line).
+        details = (f"SHA-256: {cert['sha256']}"
                    # what Windows itself shows (its tools name a certificate by its SHA-1 thumbprint)
-                   + (f"\nThumbprint (SHA-1, as Windows shows it): {cert['sha1']}" if cert.get("sha1") else ""))
+                   + (f"\nThumbprint (SHA-1, as Windows shows it): {cert['sha1']}" if cert.get("sha1") else "")
+                   + f"\nSubject: {cert['subject']}\nIssuer: {cert['issuer']}"
+                   f"{' (self-signed)' if cert['self_signed'] else ''}\nValid until: {cert['not_after']}")
         if pinned:
             self.log(f"{kind}_cert_mismatch", target=where, pinned=pinned["sha256"], got=cert["sha256"])
             raise UserError(f"The certificate of {where} has CHANGED since it was pinned on {pinned.get('pinned', '?')}. "

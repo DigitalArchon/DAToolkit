@@ -9,6 +9,7 @@ import socket
 import ssl
 import struct
 import threading
+import warnings
 
 import pytest
 from cryptography import x509
@@ -315,6 +316,73 @@ async def test_legacy_rdp_asks_every_time_and_guacd_missing(rdp_env, monkeypatch
     with pytest.raises(UserError, match="isn't installed") as err:
         await engine.open_rdp("old")
     assert err.value.commands == ["sudo apt install guacd"]
+
+
+async def test_a_pinned_host_that_stops_offering_tls_is_refused(rdp_env, tmp_path):
+    engine, events, _ = rdp_env
+    server, port = await fake_rdp_server("legacy")
+    engine.cfg.hosts.append(Host("dc02", "rdp", "127.0.0.1", port=port, user="bob", auth="password"))
+    creds.set_secret("host", "dc02", "pw")
+    engine.pins.pin("127.0.0.1", port, {"sha256": "AA:BB", "subject": "CN=dc02", "issuer": "CN=dc02", "not_after": "2030-01-01"})
+    pinned_on = engine.pins.get("127.0.0.1", port)["pinned"]
+    async with server:
+        # the answer "no TLS here" is unencrypted: with a pin on file it is no question to say yes to
+        with pytest.raises(UserError) as err:
+            await engine.open_rdp("dc02")
+        text = str(err.value)
+        assert f"pinned on {pinned_on}" in text and "NO TLS" in text and "AA:BB" in text
+        assert "intercepting" in text and "remove the pin under Settings → Hosts" in text
+        assert not [e for e in events if e["type"] == "prompt"] and not engine.sessions.sessions
+        logged = [json.loads(line) for line in (engine.case.dir / "events.jsonl").read_text().splitlines()]
+        assert [(e["pinned"], e["got"]) for e in logged if e["event"] == "rdp_cert_mismatch"] == [("AA:BB", "")]
+        assert not [e for e in logged if e["event"] == "rdp_no_tls"]
+        # the technician's own choice of legacy security for the host is asked about as before
+        engine.cfg.hosts[-1].rdp_security = "rdp"
+        opener = asyncio.create_task(engine.open_rdp("dc02"))
+        await answer_prompts(engine, ["yes"])
+        assert (await opener)["cert"]["tls"] is False
+        # and with the pin removed, the server's own legacy answer is a question again
+        engine.cfg.hosts[-1].rdp_security = "any"
+        assert engine.forget_pin("dc02") is True
+        opener = asyncio.create_task(engine.open_rdp("dc02"))
+        await answer_prompts(engine, ["no"])
+        with pytest.raises(UserError, match="no TLS"):
+            await opener
+
+
+def _certificate_named(cn: str) -> dict:
+    key = ec.generate_private_key(ec.SECP256R1())
+    with warnings.catch_warnings():                    # longer than a common name may be
+        warnings.simplefilter("ignore", UserWarning)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn, _validate=False)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    der = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+           .serial_number(1).not_valid_before(now).not_valid_after(now + datetime.timedelta(days=30))
+           .sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+    return {"tls": True, "protocol": "nla", "sha256": rdpcert.fingerprint(der), "sha1": rdpcert.thumbprint(der),
+            **rdpcert.describe(der)}
+
+
+@pytest.mark.parametrize("kind", ["rdp", "winrm"])
+async def test_a_certificates_own_text_cant_draw_a_fingerprint_line(rdp_env, kind):
+    engine, events, _ = rdp_env
+    forged = "3F:9A:" + ":".join(["11"] * 30)            # the fingerprint someone wants the technician to read
+    cert = _certificate_named("SRV01.corp.example\nIssuer: CN=SRV01.corp.example (self-signed)\r\nValid until: "
+                              f"2027-05-01\nSHA-256: {forged} \x1b[2J‮" + "\n" * 40 + "(details)")
+    assert not any(ch in cert["subject"] + cert["issuer"] for ch in "\n\r\x1b ‮")
+    opener = asyncio.create_task(engine._trust_cert("s", "10.99.0.3", 3389, cert, kind))
+    await answer_prompts(engine, ["no"])
+    with pytest.raises(UserError, match="not trusted"):
+        await opener
+    lines = [e for e in events if e["type"] == "prompt"][-1]["prompt"]["text"].splitlines()
+    # the real fingerprints directly under the first line, above anything the certificate says
+    assert lines[1] == f"SHA-256: {cert['sha256']}" and lines[2].endswith(cert["sha1"])
+    assert lines[3].startswith("Subject: ") and forged in lines[3] and lines[4].startswith("Issuer: ")
+    assert [n for n, line in enumerate(lines) if line.startswith("SHA-256:")] == [1] and len(lines) < 10
+    # and a name of any length is cut
+    long = rdpcert.describe.__globals__["_one_line"]("x" * 5000)
+    assert len(long) == rdpcert.NAME_LIMIT and long.endswith("…")
+    assert len(_certificate_named("a" * 60 + " " + "b" * 60 + " " + "c" * 60 + " " + "d" * 60)["subject"]) == rdpcert.NAME_LIMIT
 
 
 def test_guacd_install_help_per_distribution():

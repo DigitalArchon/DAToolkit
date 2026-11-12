@@ -18,6 +18,7 @@ import json
 import os
 import ssl
 import struct
+import unicodedata
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,10 @@ from ..config import config_dir, private_dir
 
 TIMEOUT = 10
 PROTOCOL_TLS, PROTOCOL_HYBRID = 0x1, 0x2
+NAME_LIMIT = 200          # characters of a certificate's subject or issuer that are shown
+# Unicode categories never shown from a certificate: controls, formatting marks, line and
+# paragraph separators, surrogates, private use and unassigned
+_NOT_SHOWN = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
 
 
 class CertError(Exception):
@@ -51,12 +56,27 @@ def thumbprint(der: bytes) -> str:
     return hashlib.sha1(der, usedforsecurity=False).hexdigest().upper()
 
 
+def _one_line(text: str, limit: int = NAME_LIMIT) -> str:
+    """A name out of a certificate as it may be shown and stored: one line, with no control or
+    formatting characters (line breaks, escape sequences, the marks that reorder text), cut to
+    `limit`. Whoever made the certificate chose every character of it."""
+    text = "".join(ch if unicodedata.category(ch) not in _NOT_SHOWN else " " for ch in text)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def describe(der: bytes) -> dict:
+    """What a certificate says of itself, for the technician to read beside its fingerprint.
+    Subject and issuer are the server's own words: cleaned and cut here, so that no prompt, list
+    or log gets them with a line break (one could draw a second "SHA-256:" line above the real
+    one, as the prompt was laid out until Nov 2026)."""
     try:
-        c = x509.load_der_x509_certificate(der)
-        return {"subject": c.subject.rfc4514_string(), "issuer": c.issuer.rfc4514_string(),
-                "not_after": c.not_valid_after_utc.date().isoformat(),
-                "self_signed": c.subject == c.issuer}
+        with warnings.catch_warnings():          # a name longer than the standard allows is still read
+            warnings.simplefilter("ignore", UserWarning)
+            c = x509.load_der_x509_certificate(der)
+            return {"subject": _one_line(c.subject.rfc4514_string()), "issuer": _one_line(c.issuer.rfc4514_string()),
+                    "not_after": c.not_valid_after_utc.date().isoformat(),
+                    "self_signed": c.subject == c.issuer}
     except ValueError:
         return {"subject": "?", "issuer": "?", "not_after": "?", "self_signed": False}
 
