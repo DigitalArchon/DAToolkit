@@ -26,8 +26,10 @@ COLOUR = (0x20, 0x50, 0xC0)
 
 # Two windows: a "ScreenConnect" one filled with COLOUR, and a plain one the test can hide
 # (withdraw) by writing "hide" to stdin. Prints "ready" once both are mapped.
+# What stdin says is read on a thread and acted on by the main loop, which polls for it: Tk 9 (the
+# AppImage's Python has it) never runs an after() called from another thread, as Tk 8.6 did.
 TK_APP = r"""
-import sys, threading, tkinter as tk
+import queue, sys, threading, tkinter as tk
 root = tk.Tk(className="ScreenConnect.WindowsClient")
 root.title("ScreenConnect - TESTPC")
 root.geometry("320x200+10+10")
@@ -37,11 +39,17 @@ other.title("Notes")
 other.geometry("200x100+400+10")
 def ready():
     print("ready", flush=True)
+lines = queue.SimpleQueue()
 def listen():
     for line in sys.stdin:
-        if line.strip() == "hide":
-            root.after(0, other.withdraw)
+        lines.put(line.strip())
+def poll():
+    while not lines.empty():
+        if lines.get() == "hide":
+            other.withdraw()
+    root.after(50, poll)
 threading.Thread(target=listen, daemon=True).start()
+root.after(50, poll)
 root.after(300, ready)
 root.mainloop()
 """
