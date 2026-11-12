@@ -547,3 +547,65 @@ async def test_a_host_session_carries_its_jump_host_and_port_for_linking(tmp_pat
         assert len({x.device for x in s.values()}) == 4               # nothing here is the same machine
     finally:
         await engine.stop()
+
+
+def test_the_terminal_socket_passes_over_what_it_cant_use(tmp_path, monkeypatch):
+    """Bad JSON, a message that isn't an object, half a character, a size no terminal has: each
+    ended the socket with an unhandled exception, and the terminal tab with it."""
+    import json
+
+    from starlette.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from datoolkit.config import Config
+    from datoolkit.engine import Engine
+    from datoolkit.server.app import create_app
+    from datoolkit.sessions.manager import RdpSession
+
+    monkeypatch.setenv("SHELL", "/bin/cat")               # the "shell" of the local session: echoes
+    holder = {}
+
+    def make(emit):
+        holder["e"] = Engine(Config(), emit, tmp_path / "rt", save_config=lambda c: None)
+        return holder["e"]
+
+    with TestClient(create_app("tok", make)) as client:
+        engine = holder["e"]
+        engine.new_case("term", "open")
+        sid = client.post("/api/sessions", json={"kind": "local"}, headers={"X-Token": "tok"}).json()["id"]
+        sess = engine.sessions.sessions[sid]
+        resized = []
+        monkeypatch.setattr(sess.proc, "setwinsize", lambda rows, cols: resized.append((cols, rows)))
+        with client.websocket_connect(f"/ws/term/{sid}?t=tok") as ws:
+            for bad in ("{not json", "", "[1, 2]", '"input"', "null", "7", "[" * 100000,
+                        json.dumps({"type": "input"}), json.dumps({"type": "input", "data": 5}),
+                        json.dumps({"type": "input", "data": ["ls"]}),
+                        json.dumps({"type": "resize", "cols": 70000, "rows": 30}),      # no terminal is that wide
+                        json.dumps({"type": "resize", "cols": 1001, "rows": 30}),
+                        json.dumps({"type": "resize", "cols": 100, "rows": 0}),
+                        json.dumps({"type": "resize", "cols": -5, "rows": 30}),
+                        json.dumps({"type": "resize", "cols": "100", "rows": 30}),
+                        json.dumps({"type": "resize", "cols": 100.5, "rows": 30}),
+                        json.dumps({"type": "resize", "cols": True, "rows": 30}),
+                        json.dumps({"type": "resize", "rows": 30}), json.dumps({"type": "nonsense"})):
+                ws.send_text(bad)
+            ws.send_bytes(b"\x00\x01")                                              # a binary frame
+            ws.send_text('{"type": "input", "data": "half \\ud83d a character\\n"}')     # a lone surrogate
+            ws.send_text(json.dumps({"type": "resize", "cols": 1000, "rows": 1}))
+            ws.send_text(json.dumps({"type": "input", "data": "still here\n"}))
+            got = b""
+            while got.count(b"still here") < 2:                                     # the echo, and cat's line
+                got += ws.receive_bytes()
+        assert b"half  a character" in got and resized == [(1000, 1)]
+        # a session with no terminal: refused, not an exception after the socket is open
+        engine.sessions.add(RdpSession(id="dc01", name="dc01", params={}))
+        with pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect("/ws/term/dc01?t=tok") as ws:
+                ws.receive_bytes()
+        assert closed.value.code == 4404
+        # and the manager itself takes input and sizes for sessions that can't use them
+        engine.sessions.write("dc01", b"x")
+        engine.sessions.resize("dc01", 80, 24)
+        engine.sessions.write("gone", b"x")
+        engine.sessions.resize(sid, 70000, 24)
+        assert resized == [(1000, 1)]

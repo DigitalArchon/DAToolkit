@@ -1013,33 +1013,57 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.websocket("/ws/term/{sid}")
     async def ws_term(ws: WebSocket, sid: str):
+        """One viewer of a terminal session: its output out, input and resizes in. A message
+        that isn't one of ours (not JSON, not an object, a size no terminal has) is passed over;
+        until Nov 2026 each of those ended the socket with an unhandled exception, and the tab
+        with it."""
         engine: Engine = app.state.engine
         if not check(ws.query_params.get("t")) or sid not in engine.sessions.sessions:
             await ws.close(code=4403)
+            return
+        if getattr(engine.sessions.sessions[sid], "proc", None) is None:
+            await ws.close(code=4404)        # a remote desktop or a window: no terminal to attach to
             return
         await ws.accept()
         backlog, q = engine.sessions.subscribe(sid)
 
         async def pump_out():
-            if backlog:
-                await ws.send_bytes(backlog)
-            while True:
-                data = await q.get()
-                if data is None:
-                    await ws.close()
-                    return
-                await ws.send_bytes(data)
+            try:
+                if backlog:
+                    await ws.send_bytes(backlog)
+                while True:
+                    data = await q.get()
+                    if data is None:
+                        await ws.close()
+                        return
+                    await ws.send_bytes(data)
+            except (WebSocketDisconnect, RuntimeError):     # the page went first
+                pass
+
+        def size(value) -> int:          # columns or rows a terminal may have: 1 to 1000
+            return value if type(value) is int and 1 <= value <= 1000 else 0
 
         out_task = asyncio.create_task(pump_out())
         try:
             while True:
-                msg = json.loads(await ws.receive_text())
+                try:
+                    text = await ws.receive_text()
+                except KeyError:             # a binary frame
+                    continue
                 if sid not in engine.sessions.sessions:
                     break
-                if msg.get("type") == "input":
-                    engine.sessions.write(sid, msg["data"].encode())
-                elif msg.get("type") == "resize":
-                    engine.sessions.resize(sid, int(msg["cols"]), int(msg["rows"]))
+                try:
+                    msg = json.loads(text)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "input" and isinstance(msg.get("data"), str):
+                    # half a surrogate pair (a string cut in the middle of a character) has no
+                    # encoding: left out, the rest typed
+                    engine.sessions.write(sid, msg["data"].encode("utf-8", "ignore"))
+                elif msg.get("type") == "resize" and size(msg.get("cols")) and size(msg.get("rows")):
+                    engine.sessions.resize(sid, msg["cols"], msg["rows"])
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:

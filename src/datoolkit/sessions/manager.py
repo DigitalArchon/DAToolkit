@@ -555,8 +555,8 @@ class SessionManager:
         """Input for the program. What the PTY doesn't take at once (its input buffer is a few
         KB, and a program that isn't reading never empties it) waits in `pending` and goes in
         as the PTY accepts it, so a long paste never stalls the event loop."""
-        sess = self.sessions[sid]
-        if sess.exited:
+        sess = self.sessions.get(sid)
+        if not isinstance(sess, Session) or sess.exited or not data:
             return
         if sess.pending:
             sess.pending += data
@@ -565,6 +565,8 @@ class SessionManager:
             n = os.write(sess.proc.fd, data)
         except BlockingIOError:
             n = 0
+        except OSError:                  # the PTY is gone: the reader sees EOF and ends the session
+            return
         if n < len(data):
             sess.pending += data[n:]
             asyncio.get_running_loop().add_writer(sess.proc.fd, self._on_writable, sess)
@@ -589,9 +591,12 @@ class SessionManager:
                 pass
 
     def resize(self, sid: str, cols: int, rows: int) -> None:
-        sess = self.sessions[sid]
-        if not sess.exited and cols > 0 and rows > 0:
-            sess.proc.setwinsize(rows, cols)
+        sess = self.sessions.get(sid)
+        if isinstance(sess, Session) and not sess.exited and 0 < cols <= 0xFFFF and 0 < rows <= 0xFFFF:
+            try:
+                sess.proc.setwinsize(rows, cols)
+            except OSError:              # the PTY is gone
+                pass
 
     def close(self, sid: str) -> None:
         sess = self.sessions.pop(sid, None)
