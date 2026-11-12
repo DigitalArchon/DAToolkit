@@ -47,6 +47,23 @@ def _password(cfg: dict) -> str | None:
     return request(f"Password for {cfg.get('user')}@{cfg['host']} (WinRM):", kind="password")
 
 
+def _report(status: str) -> str:
+    """Tell the app how the login went (askpass.AUTHENTICATED, REFUSED or FAILED): a password
+    the technician ticked to save is saved only once the server has accepted it, and one from
+    the keyring that the server refused is said to be that. Returns a line to show, or ""."""
+    from datoolkit.sessions.askpass import request
+
+    try:
+        return request(status, kind="status") or ""
+    except (OSError, ValueError):          # the app has gone: nothing to tell
+        return ""
+
+
+def _refused(e: Exception) -> bool:
+    """Whether a failed connection was the server (or the domain) refusing the credentials."""
+    return type(e).__name__ == "AuthenticationError" or "Preauthentication failed" in str(e)
+
+
 class _Printer:
     """Prints what a running command has produced so far, each stream from where it left off.
     Output lines come one at a time (Out-String -Stream); blank lines are held back until
@@ -221,6 +238,8 @@ def connection(cfg: dict, password: str):
 def main() -> int:
     from pypsrp.powershell import RunspacePool
 
+    from datoolkit.sessions.askpass import AUTHENTICATED, FAILED, REFUSED
+
     cfg = json.loads(os.environ["DATOOLKIT_PSRP"])
     host = cfg["host"]
     ssl = bool(cfg.get("ssl", True))
@@ -232,6 +251,7 @@ def main() -> int:
 
     print(f"{DIM}Connecting to {host}:{port} over {'HTTPS' if ssl else 'HTTP'} ({cfg.get('auth', 'negotiate')})...{RESET}")
     signal.signal(signal.SIGINT, signal.default_int_handler)
+    connected = False
     try:
         wsman = connection(cfg, password)
         if ssl and cfg.get("pin"):
@@ -241,6 +261,8 @@ def main() -> int:
             return 1
         with wsman, RunspacePool(wsman) as pool:
             del password
+            connected = True
+            _report(AUTHENTICATED)
             # from here on the server is never cut off mid-request (see the module docstring)
             signal.signal(signal.SIGINT, _interrupt)
             print("Connected. Type PowerShell commands (single line). 'exit' to disconnect.\n")
@@ -266,6 +288,10 @@ def main() -> int:
         return 130
     except Exception as e:  # noqa: BLE001
         print(f"{RED}Connection failed: {_connection_problem(e, cfg.get('auth', 'negotiate'), ssl)}{RESET}")
+        if not connected:
+            said = _report(REFUSED if _refused(e) else FAILED)
+            if said:
+                print(f"{YELLOW}{said}{RESET}")
         return 1
     print("Disconnected.")
     return 0

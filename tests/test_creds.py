@@ -94,5 +94,8 @@ async def test_a_password_ticked_to_be_saved_is_used_even_when_it_cannot_be(plai
         await asyncio.sleep(0.01)
     engine.answer_prompt(next(iter(engine._prompts)), "hunter2", save=True)
     assert await asking == "hunter2"
+    # it is saved once the connection it was typed for has authenticated: here, the remote desktop is there
+    from datoolkit.sessions.manager import RdpSession
+    engine.rdp_connected(RdpSession(id="s1", name="dc01", params={}, host_name="dc01"), None)
     assert backend.written == {}
     assert any(e.get("type") == "toast" and "password for dc01 wasn't saved" in e.get("text", "") for e in events)

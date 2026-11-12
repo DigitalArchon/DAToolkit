@@ -16,6 +16,7 @@ import codecs
 import ipaddress
 import os
 import re
+import termios
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,6 +188,7 @@ class Session:
     transcript_error: str = ""      # why the transcript was switched off (it couldn't be written)
     child_fd: int = -1              # a pidfd of the program: readable once it has exited
     used_stored_password: bool = False
+    keyring_password: bool = False  # the password it was last given came from the keyring, not the technician
     address: str = ""          # host address used for automatic device linking,
     jump: str = ""             # with the jump hosts it is reached through (Host.jump)
     port: int = 0              # and its port (see link_key)
@@ -218,6 +220,7 @@ class RdpSession:
     device: str = ""
     link: str = "auto"
     cert: dict = field(default_factory=dict)
+    keyring_password: bool = False     # its password came from the keyring, not the technician
     connected: bool = False
     pin_enforced: bool | None = None   # guacd checked the pin on the connection itself (1.6+)
     relay: object = None        # the task relaying the current browser connection
@@ -256,6 +259,17 @@ class WindowSession:
                 "shell": self.shell, "os_hint": self.os_hint, "exited": self.exited,
                 "host_name": self.host_name, "device": self.device, "link": self.link,
                 "xid": self.xid, "wm_class": self.wm_class, "title": self.title}
+
+
+def _raw(fd: int) -> bool:
+    """Whether the program on this PTY has put its terminal in raw mode. For ssh that is the
+    sign of a login that succeeded: it asks for passwords through the askpass helper and leaves
+    the terminal alone until the server has let it in and the remote shell's session begins
+    (a session with no terminal of its own, RequestTTY=no, never shows it)."""
+    try:
+        return not termios.tcgetattr(fd)[3] & termios.ICANON
+    except (termios.error, OSError):
+        return False
 
 
 def _is_loopback(address: str) -> bool:
@@ -297,6 +311,12 @@ class SessionManager:
         self._devices = 0
         self._tasks: set[asyncio.Task] = set()     # reaping and terminating, off the event loop
         self._reserved: set[str] = set()           # ids of sessions still opening (see reserve)
+        # Passwords the technician ticked "save" on, by session id: (host name, password). Kept
+        # here, in memory, until the connection each was typed for has authenticated; one the
+        # server refuses, or whose session ends first, is dropped and never reaches the keyring.
+        self.unsaved: dict[str, tuple[str, str]] = {}
+        # called with the id of an ssh session once it has logged in, while a password of its is in `unsaved`
+        self.on_logged_in: Callable[[str], None] | None = None
 
     def set_transcript_paths(self, path_for: Callable[[str], Path | None]) -> None:
         self._transcript_dir = path_for
@@ -438,6 +458,8 @@ class SessionManager:
             self._mark_exited(sess)
             return
         self._publish(sess, data)
+        if sess.id in self.unsaved and sess.kind == "ssh" and self.on_logged_in and _raw(sess.proc.fd):
+            self.on_logged_in(sess.id)
 
     def _publish(self, sess: Session, data: bytes) -> None:
         self._show(sess, data)
@@ -497,6 +519,7 @@ class SessionManager:
         loop.remove_reader(sess.proc.fd)
         self._unwatch_child(sess)
         self._drop_pending(sess)
+        self.unsaved.pop(sess.id, None)      # it ended before it was seen to log in
         sess.exited = True
         sess.proc.close()
         self._on_change()
@@ -570,6 +593,7 @@ class SessionManager:
 
     def close(self, sid: str) -> None:
         sess = self.sessions.pop(sid, None)
+        self.unsaved.pop(sid, None)
         if sess is None:
             return
         if isinstance(sess, (RdpSession, WindowSession)):

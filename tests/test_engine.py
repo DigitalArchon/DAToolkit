@@ -219,7 +219,73 @@ async def test_askpass_uses_keyring_once_then_asks(env):
     assert prompt["secret"] and prompt["can_save"]
     engine.answer_prompt(prompt["id"], "pw2", save=True)
     assert await task == "pw2"
+    # ticked "save": kept once ssh has logged in with it (its terminal goes over to the remote shell), not before
+    assert creds.get_secret("host", "web01") == "pw1"
+    await logs_in(engine, "web01")
     assert creds.get_secret("host", "web01") == "pw2"
+
+
+async def logs_in(engine, sid):
+    """What a session's terminal shows of ssh having authenticated: raw mode, then the remote shell's output."""
+    import tty
+
+    sess = engine.sessions.sessions[sid]
+    tty.setraw(sess.proc.fd)
+    engine.sessions.write(sid, b"$ ")
+    for _ in range(200):
+        if b"$ " in sess.backlog and sid not in engine.sessions.unsaved:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the session wasn't seen to log in")
+
+
+async def test_a_password_ticked_save_is_kept_only_once_the_host_has_accepted_it(env):
+    """It went to the keyring before ssh had tried it: a mistyped one was saved, and sent to the
+    host again by every session after."""
+    engine, _, events = env
+    engine.new_case("x", "open")
+    sess = engine.sessions.spawn("web01", ["/bin/cat"], {}, name="web01", kind="ssh", host_name="web01")
+
+    async def typed(password):
+        events.clear()
+        task = asyncio.create_task(engine._askpass("web01", "bob@web01.lan's password: ", "askpass"))
+        prompt = await prompt_of(events)
+        engine.answer_prompt(prompt["id"], password, save=True)
+        assert await task == password
+
+    await typed("mistyped")
+    engine.sessions.write("web01", b"Permission denied, please try again.\n")    # output alone is no login
+    for _ in range(100):
+        if b"Permission denied" in sess.backlog:
+            break
+        await asyncio.sleep(0.01)
+    assert creds.get_secret("host", "web01") is None and "web01" in engine.sessions.unsaved
+    await typed("right")                                   # asked again: the first was refused, and is dropped
+    assert engine.sessions.unsaved["web01"] == ("web01", "right") and creds.get_secret("host", "web01") is None
+    await logs_in(engine, "web01")
+    assert creds.get_secret("host", "web01") == "right" and not engine.sessions.unsaved
+    assert "mistyped" not in (engine.case.dir / "events.jsonl").read_text() + str(engine.snapshot())
+    assert "right" not in (engine.case.dir / "events.jsonl").read_text()
+    # a session that ends, or is closed, before it logs in saves nothing
+    for end in ("exit", "close"):
+        sid = f"web01-{end}"
+        engine.sessions.spawn(sid, ["/bin/cat"], {}, name="web01", kind="ssh", host_name="web01")
+        assert await engine._askpass(sid, "bob@web01.lan's password: ", "askpass") == "right"   # the saved one, refused
+        events.clear()
+        task = asyncio.create_task(engine._askpass(sid, "bob@web01.lan's password: ", "askpass"))
+        prompt = await prompt_of(events)
+        engine.answer_prompt(prompt["id"], "never tried", save=True)
+        await task
+        assert sid in engine.sessions.unsaved
+        if end == "exit":
+            engine.sessions.write(sid, b"\x04")            # ssh gives up: "Permission denied", and exits
+            for _ in range(200):
+                if engine.sessions.sessions[sid].exited:
+                    break
+                await asyncio.sleep(0.01)
+        else:
+            engine.close_session(sid)
+        assert sid not in engine.sessions.unsaved and creds.get_secret("host", "web01") == "right"
 
 
 async def test_askpass_jump_host_prompt_not_answered_from_keyring(env):
@@ -423,7 +489,10 @@ async def test_a_password_asked_before_its_session_exists_is_saved_under_its_hos
                                                host_name="dc01"))
     prompt = await prompt_of(events)
     engine.answer_prompt(prompt["id"], "s3cret", save=True)
-    assert await task == "s3cret" and creds.get_secret("host", "dc01") == "s3cret"
+    assert await task == "s3cret" and creds.get_secret("host", "dc01") is None     # not before it has been tried
+    from datoolkit.sessions.manager import RdpSession
+    engine.rdp_connected(RdpSession(id="rdp-dc01", name="dc01", params={}, host_name="dc01"), None)
+    assert creds.get_secret("host", "dc01") == "s3cret"
 
 
 async def test_missing_session_id_defaults_to_only_open_session(env):

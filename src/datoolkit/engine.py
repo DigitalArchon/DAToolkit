@@ -2111,6 +2111,7 @@ class Engine:
         if "\\" in user:
             domain, user = user.split("\\", 1)
         password = self._get_secret_safe("host", host.name)
+        from_keyring = bool(password)
         if not password:
             password = await self.ask_user(sid, f"RDP password for {host.user or 'the user'}@{host.host}",
                                            secret=True, can_save=True, host_name=host.name)
@@ -2129,7 +2130,8 @@ class Engine:
             params["cert-fingerprints"] = guac.fingerprint_param(cert["sha256"])
         sess = self.sessions.add(RdpSession(
             id=sid, name=host.name, params=params, target=f"{host.user + '@' if host.user else ''}{host.host}:{port}",
-            os_hint=host.os_hint or "Windows", host_name=host.name, address=host.host, port=port, cert=cert))
+            os_hint=host.os_hint or "Windows", host_name=host.name, address=host.host, port=port, cert=cert,
+            keyring_password=from_keyring))
         self.log("session_opened", **sess.roster())
         return sess.roster()
 
@@ -2274,6 +2276,7 @@ class Engine:
         connection (guacd 1.6+), or only DA Toolkit's probe did (None: no certificate)."""
         sess.connected = True
         sess.pin_enforced = pin_enforced
+        self._password_accepted(sess.id)      # the desktop is there: a password ticked "save" is kept now
         self.log("rdp_connected", session_id=sess.id, pin_enforced=pin_enforced)
         self._sessions_changed()
 
@@ -2288,6 +2291,15 @@ class Engine:
         else:
             self.log("rdp_connect_failed", session_id=sess.id,
                      **(detail or {"error": "closed before the remote desktop connected"}))
+            if code == guac.UNAUTHORIZED:
+                # The server refused the login. A password typed for this session and ticked
+                # "save" is not kept; one the keyring supplied is named as that, with the way to
+                # replace it: guacd's own "Authentication failure" doesn't say a saved one was used.
+                self._password_refused(sess.id)
+                if sess.keyring_password and sess.host_name:
+                    from .sessions import askpass
+                    self.log("credential_refused", session_id=sess.id, source="keyring")
+                    self.emit("toast", level="error", text=askpass.saved_password_refused(sess.host_name))
         if current:
             sess.connected = False
             self._sessions_changed()
@@ -2377,12 +2389,17 @@ class Engine:
             self.log("credential_notice", session_id=sid, prompt=prompt)
             return ""
         sess = self.sessions.sessions.get(sid)
+        if kind == "status":          # the WinRM console says how its login went (askpass.AUTHENTICATED and the rest)
+            return self._login_status(sid, sess, prompt)
         host = self.cfg.host(sess.host_name) if sess and sess.host_name else None
         secret = kind == "password" or bool(re.search(r"password|passphrase|passcode|\bpin\b|secret", prompt, re.I))
         # only a password prompt gets the host's password: a key passphrase, a smart card's or
         # security key's PIN, or a one-time passcode is something else (a wrong PIN counts
         # against the card's few tries)
         is_password = kind == "password" or bool(re.search(r"\bpassword\b", prompt, re.I))
+        if is_password:
+            # asked again: what was typed for this session before was refused, so it isn't saved
+            self._password_refused(sid)
         # A prompt from some other host (a jump host on the way, judged by the whole name,
         # not a part of it) is not ours to answer from the keyring, and what the technician
         # types for it is not this host's password: it is never offered for saving under it.
@@ -2409,9 +2426,11 @@ class Engine:
         if sess and host and is_password and not other_host and not sess.used_stored_password:
             stored = self._get_secret_safe("host", host.name)
             if stored:
-                sess.used_stored_password = True
+                sess.used_stored_password = sess.keyring_password = True
                 self.log("credential_supplied", session_id=sid, source="keyring")
                 return stored
+        if sess and is_password:
+            sess.keyring_password = False
         try:
             answer = await self.ask_user(sid, prompt, secret=secret, can_save=bool(host and is_password and not other_host))
         except asyncio.CancelledError:       # the program that asked has gone (the bridge saw its helper end)
@@ -2444,7 +2463,10 @@ class Engine:
 
     async def ask_user(self, sid: str, prompt: str, secret: bool, can_save: bool, host_name: str = "") -> str | None:
         """Ask the technician. With `can_save`, a "save" tick keeps the answer as the password of
-        `host_name`, or of the session's host (an RDP session is asked before it exists)."""
+        `host_name`, or of the session's host (an RDP session is asked before it exists): not at
+        once, but when the connection it was typed for has authenticated (_password_accepted).
+        Until Nov 2026 it went to the keyring before it was tried, and a mistyped one was sent to
+        the host again by every later session."""
         pid = str(next(self._prompt_ids))
         fut = asyncio.get_running_loop().create_future()
         info = {"id": pid, "session_id": sid, "text": prompt.strip(), "secret": secret, "can_save": can_save}
@@ -2461,15 +2483,44 @@ class Engine:
             sess = self.sessions.sessions.get(sid)
             name = host_name or (sess.host_name if sess else "")
             if name:
-                try:
-                    creds.set_secret("host", name, answer)
-                except creds.KeyringUnavailable as e:   # used all the same, just not kept
-                    self.emit("toast", level="error", text=f"The password for {name} wasn't saved. {e}")
-                    return answer
+                self.sessions.unsaved[sid] = (name, answer)
+                self.sessions.on_logged_in = self._password_accepted      # an ssh session's sign of it
                 if sess:
                     sess.used_stored_password = True
-                self._secrets_changed()
         return answer
+
+    def _password_accepted(self, sid: str) -> None:
+        """The connection of session `sid` has authenticated: an ssh session's terminal went
+        over to the remote shell (SessionManager.on_logged_in), the WinRM console said so, or the
+        remote desktop is there. A password the technician ticked "save" on for it is saved now."""
+        name, password = self.sessions.unsaved.pop(sid, ("", ""))
+        if not name:
+            return
+        try:
+            creds.set_secret("host", name, password)
+        except creds.KeyringUnavailable as e:   # used all the same, just not kept
+            self.emit("toast", level="error", text=f"The password for {name} wasn't saved. {e}")
+            return
+        self.log("credential_saved", session_id=sid, host=name)
+        self._secrets_changed()
+
+    def _password_refused(self, sid: str) -> None:
+        """The server refused what session `sid` was given: nothing typed for it is saved."""
+        self.sessions.unsaved.pop(sid, None)
+
+    def _login_status(self, sid: str, sess, status: str) -> str | None:
+        """What the WinRM console reports of its login, and the line it should show for it."""
+        from .sessions import askpass
+        if getattr(sess, "kind", "") != "winrm":
+            return None
+        if status == askpass.AUTHENTICATED:
+            self._password_accepted(sid)
+            return ""
+        self._password_refused(sid)
+        if status == askpass.REFUSED and sess.keyring_password and sess.host_name:
+            self.log("credential_refused", session_id=sid, source="keyring")
+            return askpass.saved_password_refused(sess.host_name)
+        return ""
 
     def answer_prompt(self, pid: str, answer: str | None, save: bool = False) -> None:
         entry = self._prompts.get(pid)

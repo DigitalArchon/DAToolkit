@@ -21,6 +21,17 @@ from typing import Awaitable, Callable
 
 # (session_id, prompt, kind) -> answer or None to refuse
 Handler = Callable[[str, str, str], Awaitable[str | None]]
+# kind "status": not a question but the WinRM console saying how its login went, the prompt being
+# one of these; the answer is a line for the console to show, or ""
+AUTHENTICATED, REFUSED, FAILED = "authenticated", "refused", "failed"
+
+
+def saved_password_refused(host_name: str) -> str:
+    """What the technician is told when a server refuses the password the keyring supplied:
+    nothing had said a saved one was used, or how to be rid of it, and every new session to the
+    host sent the same wrong one."""
+    return (f"The password saved for {host_name} was used, and the server refused it. To replace it: Settings → "
+            f"Hosts → {host_name} → Forget stored password, then open the session again and type the new one.")
 
 
 class AskpassBridge:

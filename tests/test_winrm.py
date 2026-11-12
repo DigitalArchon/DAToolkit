@@ -298,6 +298,105 @@ def test_a_pinned_hosts_console_is_given_the_pin():
     assert "pin" not in json.loads(winrm.console_config(Host("dc", "winrm", "dc.lan")))
 
 
+async def test_a_winrm_password_is_saved_when_accepted_and_a_saved_one_refused_is_named(env):  # noqa: F811
+    """A wrong saved password was sent by every new session, and nothing said a saved one was in
+    use; one typed and ticked "save" went to the keyring before the server had seen it."""
+    from datoolkit import creds
+    from datoolkit.sessions import askpass
+
+    engine, _, events = env
+    engine.new_case("c", "open")
+    engine.cfg.hosts.append(Host("win", "winrm", "192.168.250.7", user="bob", auth="ntlm", winrm_ssl=False))
+    asks = "Password for bob@192.168.250.7 (WinRM):"
+
+    def console(sid):
+        return engine.sessions.spawn(sid, ["/bin/cat"], {}, name="win", kind="winrm", host_name="win")
+
+    async def typed(sid, password):
+        events.clear()
+        task = asyncio.create_task(engine._askpass(sid, asks, "password"))
+        for _ in range(500):
+            if engine._prompts:
+                break
+            await asyncio.sleep(0.01)
+        engine.answer_prompt(next(iter(engine._prompts)), password, save=True)
+        assert await task == password
+
+    # typed and ticked "save", and refused: not saved, and nothing to say about a saved one
+    console("win")
+    await typed("win", "mistyped")
+    assert creds.get_secret("host", "win") is None
+    assert await engine._askpass("win", askpass.REFUSED, "status") == ""
+    assert creds.get_secret("host", "win") is None and not engine.sessions.unsaved
+    # typed, ticked and accepted: saved when the console says it is in
+    console("win-2")
+    await typed("win-2", "right")
+    assert creds.get_secret("host", "win") is None
+    assert await engine._askpass("win-2", askpass.AUTHENTICATED, "status") == ""
+    assert creds.get_secret("host", "win") == "right"
+    # the saved one, refused by the server (changed there since): said, with the way to replace it
+    console("win-3")
+    assert await engine._askpass("win-3", asks, "password") == "right"
+    said = await engine._askpass("win-3", askpass.REFUSED, "status")
+    assert said == ("The password saved for win was used, and the server refused it. To replace it: Settings → Hosts → win → "
+                    "Forget stored password, then open the session again and type the new one.")
+    assert await engine._askpass("win-3", askpass.FAILED, "status") == ""        # the network, not the password
+    # only a WinRM console's word counts: an ssh session's helper can't have a password saved
+    engine.sessions.spawn("web01", ["/bin/cat"], {}, name="web01", kind="ssh", host_name="web01")
+    engine.sessions.unsaved["web01"] = ("web01", "x")
+    assert await engine._askpass("web01", askpass.AUTHENTICATED, "status") is None
+    assert creds.get_secret("host", "web01") is None
+    log = (engine.case.dir / "events.jsonl").read_text()
+    assert "mistyped" not in log and "right" not in log and '"credential_refused"' in log
+
+
+@pytest.mark.parametrize("error, status", [("AuthenticationError", "refused"), ("ConnectionError", "failed"), (None, "authenticated")])
+def test_the_console_tells_the_app_how_its_login_went(monkeypatch, capsys, error, status):
+    import pypsrp.exceptions
+    import pypsrp.powershell
+
+    from datoolkit.sessions import askpass, psrp_console
+
+    asked = []
+
+    def request(prompt, kind="askpass"):
+        asked.append((prompt, kind))
+        return "pw" if kind == "password" else ("The password saved for win was used." if prompt == "refused" else "")
+    monkeypatch.setattr(askpass, "request", request)
+
+    class Connection:
+        def __enter__(self):
+            if error == "AuthenticationError":
+                raise pypsrp.exceptions.AuthenticationError("Failed to authenticate the user bob with ntlm")
+            if error:
+                raise ConnectionError("no route to host")
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class Pool(Connection):
+        def __init__(self, wsman):
+            pass
+
+        def __enter__(self):
+            return self
+    monkeypatch.setattr(psrp_console, "connection", lambda cfg, password: Connection())
+    monkeypatch.setattr(pypsrp.powershell, "RunspacePool", Pool)
+    monkeypatch.setattr(psrp_console, "current_location", lambda pool: "C:\\")
+    monkeypatch.setattr(psrp_console, "_read_line", lambda prompt: "exit")
+    monkeypatch.setenv("DATOOLKIT_PSRP", '{"host": "192.168.250.7", "user": "bob", "auth": "ntlm", "ssl": false}')
+    import signal
+    handler = signal.getsignal(signal.SIGINT)
+    try:
+        assert psrp_console.main() == (1 if error else 0)
+    finally:
+        signal.signal(signal.SIGINT, handler)              # the console takes Ctrl+C for itself
+    assert asked == [("Password for bob@192.168.250.7 (WinRM):", "password"), (status, "status")]
+    out = capsys.readouterr().out
+    assert ("The password saved for win was used." in out) == (status == "refused")
+
+
 def test_the_console_prints_write_host_and_verbose_output(monkeypatch, capsys):
     from types import SimpleNamespace
 

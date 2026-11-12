@@ -1018,6 +1018,47 @@ def test_guacd_refusing_the_handshake_is_a_failed_connection(tmp_path, monkeypat
     assert _rdp_events(e) == [("rdp_connect_failed", {"error": "guacd: Aborted. See logs."})]
 
 
+@pytest.mark.parametrize("stream, from_keyring, kept, told", [
+    (GUACD_13_BADPASS, True, None, True),       # the saved password, refused: said to be that, with the way out
+    (GUACD_16_BADPASS, False, None, False),     # one just typed and ticked "save", refused: not saved
+    (GUACD_13_OK, False, "typed-pw", False),    # accepted: saved now
+])
+def test_an_rdp_password_is_saved_when_accepted_and_a_saved_one_refused_is_named(tmp_path, monkeypatch, stream, from_keyring,
+                                                                                kept, told):
+    g = FakeGuacd(after=stream)
+    monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", g.port))
+    holder, emitted = {}, []
+
+    def make(emit):
+        from datoolkit.config import Config
+        from datoolkit.engine import Engine
+        holder["e"] = Engine(Config(), lambda event: (emitted.append(event), emit(event)), tmp_path / "rt",
+                             save_config=lambda c: None)
+        return holder["e"]
+
+    last = guac.encode(*guac.Parser().feed(stream)[-1])
+    with TestClient(create_app("tok", make)) as client:
+        e = holder["e"]
+        e.new_case("relay", "open")
+        e.sessions.add(RdpSession(id="dc01", name="dc01", host_name="dc01", keyring_password=from_keyring,
+                                  params={"hostname": "dc01", "password": "typed-pw", "ignore-cert": "true"}))
+        if not from_keyring:
+            e.sessions.unsaved["dc01"] = ("dc01", "typed-pw")       # as ask_user leaves one ticked "save"
+        with client.websocket_connect("/ws/rdp/dc01?t=tok", subprotocols=["guacamole"]) as ws:
+            got = ""
+            while last not in got:
+                got += ws.receive_text()
+        for _ in range(100):
+            if any(k in ("rdp_disconnected", "rdp_connect_failed") for k, _ in _rdp_events(e)):
+                break
+            threading.Event().wait(0.02)
+        assert creds.get_secret("host", "dc01") == kept and not e.sessions.unsaved
+        toasts = [x["text"] for x in emitted if x["type"] == "toast"]
+        assert (["The password saved for dc01 was used, and the server refused it. To replace it: Settings → Hosts → dc01 → "
+                 "Forget stored password, then open the session again and type the new one."] if told else []) == toasts
+        assert "typed-pw" not in (e.case.dir / "events.jsonl").read_text()
+
+
 class FakeGuacdForMany(FakeGuacd):
     """One that takes any number of connections and records each one's `connect`."""
 

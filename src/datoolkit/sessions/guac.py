@@ -28,6 +28,7 @@ from pathlib import Path
 from ..hostenv import host_env
 
 INTERNAL = ""          # opcode of tunnel-internal instructions (uuid, ping)
+UNAUTHORIZED = "769"   # guacd's status code for a login the server refused (a wrong password)
 HANDSHAKE_TIMEOUT = 20
 # Always this machine, on guacd's default port. The link to guacd is plain, unauthenticated
 # TCP carrying the password and the whole session, so it is never made over a network.
