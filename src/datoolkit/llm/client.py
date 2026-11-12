@@ -541,10 +541,10 @@ class StreamAccumulator:
         return events
 
     def _call_for(self, tc) -> ToolCall:
-        """The call a delta continues, or a new one it begins. A delta with no index continues the
-        last call. Some routes number every call 0, so a delta at an index that already holds a
-        call begins another when it brings an id of its own, a name, and the call there has all
-        its arguments. Other routes give one call a new id with every piece (and some repeat the
+        """The call a delta continues, or a new one it begins. A delta is read against the call at
+        its index, or the last call when it has no index. Some routes number every call 0, so a
+        delta begins another call when it brings an id of its own, a name, and the call there has
+        all its arguments. Other routes give one call a new id with every piece (and some repeat the
         name each time): a piece that brings no name, or arrives while the arguments so far are
         not yet whole JSON, belongs to the call being written. Until Nov 2026 any new id began a
         call, so such a call came apart into one with half its arguments and one with no name."""

@@ -142,6 +142,23 @@ def test_which_addresses_stay_off_the_proxy():
             assert client._client._client.trust_env is True, other
 
 
+def test_the_attestation_client_keeps_a_server_on_the_network_off_the_proxy_too():
+    """llm/secure_http.py make_client (the TEE verifier's) did so for loopback only: a model on
+    the local network whose tier the technician set to "tee" was attested through the proxy."""
+    from datoolkit.llm.secure_http import make_client
+
+    for local in ("http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "http://[::1]:1234/v1", "http://10.0.0.5/v1",
+                  "http://192.168.1.50:11434/v1", "https://192.168.1.50/v1", "http://[fd12:3456:789a::1]/v1",
+                  "https://enclave.local/v1"):
+        with make_client(local) as client:
+            assert client.trust_env is False, local
+    for other in ("https://nano-gpt.com/api/v1", "https://192.0.2.7/v1", "https://[not-an-address"):
+        with make_client(other) as client:
+            assert client.trust_env is True, other
+    with make_client("https://nano-gpt.com/api/v1", trust_env=False) as client:       # what the caller asks for stands
+        assert client.trust_env is False
+
+
 def test_a_local_https_server_is_still_checked_against_the_environments_certificates(tmp_path, monkeypatch):
     """`trust_env=False` alone would also stop SSL_CERT_FILE being read, which the AppImage sets
     to the system's bundle so that a company's own CA stands for a server on its network."""

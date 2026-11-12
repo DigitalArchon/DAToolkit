@@ -2,9 +2,10 @@
 
 Ported from SealedLore (providers/http.py), where the verifier comes from:
 
-- **A local server stays local.** A loopback endpoint is built with `trust_env=False`, so
-  proxy variables never route it elsewhere; anything else keeps the environment's proxies
-  and certificate settings.
+- **A local server stays local.** An endpoint on this machine or its network (netguard.is_local:
+  loopback only, until Nov 2026) is built with `trust_env=False`, so proxy variables never route
+  it elsewhere; anything else keeps the environment's proxies. Either keeps the environment's
+  certificate settings. The chat clients do the same (llm/client.py local_http_options).
 - **A redirect never downgrades.** The response hook refuses a redirect whose target isn't
   https (or http on loopback), whether or not the client follows redirects, and one from a
   server out on the internet into this computer or its network.
@@ -79,9 +80,12 @@ def refuse_insecure_redirect(response: httpx.Response) -> None:
 
 
 def make_client(base_url: str, **kwargs: Any) -> httpx.Client:
-    """An httpx client for `base_url`: no proxies for a loopback endpoint, and the redirect
-    guard. `kwargs` go to `httpx.Client` as they are."""
-    kwargs.setdefault("trust_env", not is_loopback(base_url))
+    """An httpx client for `base_url`: no proxies for an endpoint on this machine or its network,
+    and the redirect guard. `kwargs` go to `httpx.Client` as they are."""
+    local = netguard.is_local(_host(base_url))
+    if kwargs.setdefault("trust_env", not local) is False and local:
+        # certificates still as the environment names them, which trust_env=False alone would stop
+        kwargs.setdefault("verify", httpx.create_ssl_context())
     hooks = dict(kwargs.pop("event_hooks", None) or {})
     hooks["response"] = [*hooks.get("response", ()), refuse_insecure_redirect]
     return httpx.Client(event_hooks=hooks, **kwargs)
