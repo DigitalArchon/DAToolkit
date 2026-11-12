@@ -42,7 +42,13 @@ DIST=/elsewhere packaging/build-appimage.sh build   # the results somewhere othe
 
 Only committed files are built: HEAD's, read from git's own objects exactly as committed, so no
 `core.autocrlf`, filter or `tar.umask` of the machine's changes them (as `git archive` would),
-and every timestamp is HEAD's commit time (`SOURCE_DATE_EPOCH`). The lock run reads
+and every timestamp is HEAD's commit time (`SOURCE_DATE_EPOCH`). What builds them is the
+commit's too. `build.sh`, the locks and the pins come out of the commit with the sources;
+`build-appimage.sh` itself is the file that was run, and it reads `pins.sh` and the
+Containerfile from the working tree to make the builder image, so it first compares itself and
+everything in `packaging/appimage/` with HEAD's, byte for byte, and builds nothing while any of
+them differs: it names the files, to be committed or put aside. Other uncommitted changes are
+not built, and a note says so. The lock run reads
 `pyproject.toml` and the `*.in` files as they are in the working tree, so a requirement is
 locked before it is committed, and keeps every pin the current locks hold but what the change
 moves. Builds run in `packaging/appimage/Containerfile`: Ubuntu 24.04 pinned

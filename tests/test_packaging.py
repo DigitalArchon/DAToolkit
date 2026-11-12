@@ -1,6 +1,7 @@
 """The AppImage build's scripts (packaging/): what they take from the machine they run on, and
-what they let in. Neither script is run whole here (one builds with Podman, the other runs inside
-its container), but the parts of them that read the machine or fetch are. From DA Assistant's
+what they let in. No build is run here (it takes Podman and the network, and build.sh runs inside
+the container), but the parts of the scripts that read the machine or fetch are; the wrapper is
+run whole against a Podman that only notes what it is asked. From DA Assistant's
 tests/test_appimage_packaging.py and test_build_scripts.py (Nov 2026)."""
 
 import os
@@ -299,3 +300,127 @@ def test_the_lock_meets_every_floor_pyproject_sets():
     for name, floor in floors:
         assert key(name) in locked, f"{name} is not in the AppImage lock"
         assert version(locked[key(name)]) >= version(floor), f"{name}=={locked[key(name)]}, under its floor {floor}"
+
+
+# ---------------------------------------------------------------- the build's definition, as committed
+
+# Stands in for Podman: the builder image "exists", and a run is only noted. A lock run leaves
+# a lock nobody has committed yet in its /out.
+_PODMAN = """#!/bin/sh
+printf '%s\\n' "$*" >> "$PODMAN_LOG"
+if [ "$1" = run ]; then
+    for arg in "$@"; do
+        case "$arg" in *:/out:Z) out="${arg%:/out:Z}" ;; esac
+        mode="$arg"
+    done
+    if [ "$mode" = lock ]; then echo "pytest==9.9.9" > "$out/test-requirements.lock"; fi
+fi
+exit 0
+"""
+
+
+def _stub(folder: Path, name: str, script: str) -> None:
+    folder.mkdir(exist_ok=True)
+    (folder / name).write_text(script if script.startswith("#!") else f"#!/bin/sh\n{script}\n")
+    os.chmod(folder / name, 0o755)
+
+
+def _git_env(tmp_path: Path, bin_dir: Path) -> dict:
+    """git with no settings of this machine's, the stand-ins first on the path, and the build's
+    cache and results under the test's own folder."""
+    (tmp_path / "gitconfig").write_text("[user]\n\tname = T\n\temail = t@example.org\n")
+    return {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}", "HOME": str(tmp_path), "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "XDG_CACHE_HOME": str(tmp_path / "cache"),
+            "DIST": str(tmp_path / "dist"), "PODMAN_LOG": str(tmp_path / "podman.log")}
+
+
+def _commit_all(repo: Path, env: dict) -> None:
+    for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "files")):
+        subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+
+
+@pytest.fixture
+def build_repo(tmp_path):
+    """A repository with the wrapper and a build definition committed (the real pins and
+    Containerfile), and the Podman above. Gives the repository, and a function that runs the
+    wrapper there and returns how it ended and what Podman was asked."""
+    if not shutil.which("git"):
+        pytest.skip("no git")
+    repo = tmp_path / "repo"
+    (repo / "packaging" / "appimage").mkdir(parents=True)
+    shutil.copy(ROOT / "packaging" / "build-appimage.sh", repo / "packaging")
+    for name in ("pins.sh", "Containerfile", "build.sh", "sdists.lock"):
+        shutil.copy(PACKAGING / name, repo / "packaging" / "appimage")
+    (repo / "pyproject.toml").write_text('[project]\nname = "app"\nversion = "1.2.3"\n')
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("print('a')\n")
+    _stub(tmp_path / "bin", "podman", _PODMAN)
+    env = _git_env(tmp_path, tmp_path / "bin")
+    _commit_all(repo, env)
+
+    def build(mode, script="packaging/build-appimage.sh"):
+        log = tmp_path / "podman.log"
+        log.unlink(missing_ok=True)
+        done = subprocess.run(["bash", script, mode], cwd=repo, env=env, capture_output=True, text=True, timeout=120)
+        return done, (log.read_text().splitlines() if log.exists() else [])
+
+    return repo, build
+
+
+def _named(stderr: str) -> list[str]:
+    return [line.strip() for line in stderr.splitlines() if line.startswith("  ")]
+
+
+def test_a_commit_is_built_by_its_own_definition_in_the_builder_made_here(build_repo):
+    repo, build = build_repo
+    done, podman = build("build")
+    assert done.returncode == 0, done.stderr
+    assert "Nothing built" not in done.stderr and "Note:" not in done.stderr
+    assert len(podman) == 2 and re.fullmatch(r"image exists datoolkit-appimage-builder:[0-9a-f]{12}", podman[0])
+    assert podman[1].startswith("run --rm ") and podman[1].endswith(" build")
+    assert f" {podman[0].split()[-1]} bash -c " in podman[1] and " -e VERSION=1.2.3 " in podman[1]
+    # a source changed and not committed is not built, which the note says; nor is a file git doesn't
+    # track any of the definition
+    (repo / "src" / "app.py").write_text("print('b')\n")
+    (repo / "packaging" / "appimage" / "notes.txt").write_text("to do\n")
+    done, podman = build("build")
+    assert done.returncode == 0 and len(podman) == 2
+    assert "Note: uncommitted changes are not built" in done.stderr and "Nothing built" not in done.stderr
+
+
+@pytest.mark.parametrize("mode", ["build", "check"])
+def test_a_build_definition_that_is_not_the_commits_is_refused(build_repo, mode):
+    """The wrapper read pins.sh (the base image's digest, the apt snapshot) and the Containerfile
+    from the working tree to make the builder, and said "uncommitted changes are not built"."""
+    repo, build = build_repo
+    appimage = repo / "packaging" / "appimage"
+    with open(appimage / "pins.sh", "a") as f:
+        f.write('APT_SNAPSHOT="20270101T000000Z"\n')
+    with open(appimage / "Containerfile", "a") as f:
+        f.write("RUN true\n")
+    (appimage / "sdists.lock").unlink()
+    done, podman = build(mode)
+    assert done.returncode == 1 and podman == [] and done.stdout == ""
+    assert done.stderr.startswith("Nothing built.") and "HEAD (" in done.stderr and "git stash" in done.stderr
+    assert _named(done.stderr) == ["packaging/appimage/Containerfile", "packaging/appimage/pins.sh",
+                                   "packaging/appimage/sdists.lock"]
+    assert not (repo.parent / "dist").exists() or not os.listdir(repo.parent / "dist")
+
+
+def test_the_script_that_runs_must_be_the_commits_too(build_repo, tmp_path):
+    repo, build = build_repo
+    committed = (repo / "packaging" / "build-appimage.sh").read_text()
+    elsewhere = tmp_path / "another-checkout.sh"
+    elsewhere.write_text(committed.replace('mode="${1:-build}"', 'mode="${1:-check}"'))
+    assert elsewhere.read_text() != committed
+    done, podman = build("build", script=str(elsewhere))       # run from this repository, which is clean
+    assert done.returncode == 1 and podman == [] and _named(done.stderr) == ["packaging/build-appimage.sh"]
+    (repo / "packaging" / "build-appimage.sh").write_text(committed + "# changed\n")
+    done, podman = build("build")
+    assert done.returncode == 1 and podman == [] and _named(done.stderr) == ["packaging/build-appimage.sh"]
+
+
+def test_an_unknown_mode_is_said_before_anything_is_made(build_repo):
+    _, build = build_repo
+    done, podman = build("--help")
+    assert done.returncode == 2 and "usage: " in done.stderr and podman == []

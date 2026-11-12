@@ -6,16 +6,58 @@
 #                                       re-resolve everything); review, then commit
 # DIST=dir puts the results somewhere other than dist/.
 # Only committed files are built (HEAD's, as committed); SOURCE_DATE_EPOCH is HEAD's commit time.
+# What builds them is HEAD's too: with this script or anything in packaging/appimage changed
+# since, nothing is built, and the changed files are named.
 # lock reads pyproject.toml and the *.in files as they are in the working tree.
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
-. packaging/appimage/pins.sh
-mode="${1:-build}"
 
+mode="${1:-build}"
+case "$mode" in
+    build|check|lock) ;;
+    *) echo "usage: $0 build|check|lock" >&2; exit 2 ;;
+esac
 command -v podman >/dev/null || { echo "Podman is needed: sudo apt install podman (or dnf/pacman)" >&2; exit 1; }
-if [ "$mode" != lock ] && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    echo "Note: uncommitted changes are not built; this builds HEAD ($(git rev-parse --short HEAD))." >&2
+self="$(realpath -- "${BASH_SOURCE[0]}")"
+top="$(git rev-parse --show-toplevel)"
+cd "$top"
+
+# What builds the AppImage is taken as committed, as what is built is. build.sh, the locks and
+# the pins the container reads come out of the commit with the sources (export_head, below); but
+# this script is the file that was run, and it reads the Containerfile and pins.sh (the base
+# image's digest, the apt snapshot) from the working tree to make the builder image. Until Nov
+# 2026 a changed one of those went into the build while the note below said uncommitted changes
+# are not built. Now the build's definition, this script and everything in packaging/appimage,
+# is compared with HEAD's byte for byte (no filter or line-ending setting of the machine's in
+# between), and a build is refused while any of it differs: so what the working tree's files
+# make is what the commit's would.
+changed_definition() {  # this-script -> the files of the build's definition that are not HEAD's
+    local self=$1 entry oid path
+    if [ "$(git hash-object --no-filters -- "$self")" != "$(git rev-parse -q --verify HEAD:packaging/build-appimage.sh)" ]; then
+        printf '%s\n' packaging/build-appimage.sh
+    fi
+    git ls-tree -r -z HEAD -- packaging/appimage | while IFS= read -r -d '' entry; do
+        oid="${entry%%$'\t'*}"
+        oid="${oid##* }"
+        path="${entry#*$'\t'}"
+        if [ ! -f "$path" ] || [ "$(git hash-object --no-filters -- "$path")" != "$oid" ]; then
+            printf '%s\n' "$path"
+        fi
+    done
+}
+if [ "$mode" != lock ]; then
+    changed="$(changed_definition "$self")"
+    if [ -n "$changed" ]; then
+        echo "Nothing built. The build is defined by the commit it builds, HEAD ($(git rev-parse --short HEAD))," \
+             "and these are not as committed there:" >&2
+        while IFS= read -r line; do echo "  $line" >&2; done <<< "$changed"
+        echo "Commit the changes, or put them aside (git stash), and build again." >&2
+        exit 1
+    fi
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        echo "Note: uncommitted changes are not built; this builds HEAD ($(git rev-parse --short HEAD))." >&2
+    fi
 fi
+. packaging/appimage/pins.sh
 # The host's CA bundle, for apt in the builder to reach the package snapshot over https: the
 # first of these this machine has, where Debian and its kin, Fedora and RHEL, openSUSE and the
 # rest keep it, in the order AppRun looks. Only the builder image is made with it, and apt
@@ -111,6 +153,4 @@ case "$mode" in
         run "$WORK/lock" lock
         cp "$WORK"/lock/*.lock packaging/appimage/
         git --no-pager diff --stat -- packaging/appimage/*.lock ;;
-    *)
-        echo "usage: $0 build|check|lock" >&2; exit 2 ;;
 esac
