@@ -29,7 +29,10 @@ type 2 runtime, so it doesn't need `libfuse2`.
 
 ## Building
 
-You need rootless [Podman](https://podman.io) (`sudo apt install podman`).
+The machine that builds needs four things, and `build-appimage.sh` says which is missing before
+it starts: rootless [Podman](https://podman.io) (`sudo apt install podman`), git, GNU tar (its
+`--sort=name` packs the commit's files in one order) and python3 3.11 or newer (its `tomllib`
+reads the version from `pyproject.toml`). Everything else the build uses is in the container.
 
 ```bash
 packaging/build-appimage.sh build    # dist/DAToolkit-<version>-x86_64.AppImage (+ .sha256)
@@ -56,7 +59,8 @@ by digest, with packages from the Ubuntu archive as it was at a fixed moment
 ([snapshot.ubuntu.com](https://snapshot.ubuntu.com)). The host's CA bundle goes into the
 builder image's build as a copy (looked for where AppRun looks: Debian's, Fedora's, openSUSE's
 and the rest), for apt to reach the snapshot over https, and is removed again; it is in no byte
-of the AppImage. Downloads are https only, redirects included, cached in
+of the AppImage. The builder image is made on the machine and run from there (`--pull=never`:
+no registry is asked for it). Downloads are https only, redirects included, cached in
 `~/.cache/datoolkit-appimage` and verified on every build.
 
 ## What is pinned, and where
@@ -73,6 +77,11 @@ Changing any of these changes the AppImage, which is the point: an update is a r
 Nothing of the build machine gets in: bytecode is unchecked-hash and names its source as it is
 inside the image (`/usr/python/lib/...`), pip's console scripts (which would name the build's
 Python) are left out, and the build stops if any file still names the folder it was built in.
+Each package's `RECORD` is then made to say what is in the image (`appimage/records.py`): the
+lines of files left out are dropped (the console scripts, Pillow's font module, and
+`direct_url.json`, whose line carried a hash that followed from the bytes of a wheel archive
+made during the build), and an extension stripped after it was installed is listed with the hash
+and size it has. Nothing in the image depends on a file that is not in it.
 Most runtime packages are installed only as prebuilt wheels; the few without one
 (`SDIST_ONLY` in `appimage/build.sh`) are built from their pinned sources with the pinned tools.
 Two of them, gssapi and krb5, are Cython: Cython 3.3.0 picks between equally valid C by the order

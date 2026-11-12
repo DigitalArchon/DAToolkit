@@ -192,6 +192,14 @@ for t in $(dpkg -L gir1.2-freedesktop | grep '\.typelib$'); do
 done
 find "$W/AppDir" -name direct_url.json -delete    # build paths
 find "$W/AppDir" -name __pycache__ -type d -prune -exec rm -rf {} +
+# Each package's RECORD still lists what was taken out above (direct_url.json, the console
+# scripts, Pillow's font module), and gives the stripped extensions the hashes they had before.
+# direct_url.json's line was more than untidy: it carries the hash of a file that holds the hash
+# of the wheel archive pip installed from, and for the six packages built here that archive is
+# made in this container, so the image depended on the bytes of a zip that is in none of its
+# files. records.py drops the lines of files that are gone and gives a changed file the hash and
+# size it has, leaving every other line as it was: RECORD says what is in the image. (Nov 2026)
+"$W/buildpy/bin/python3" "$P/records.py" "$W"/AppDir/usr/python/lib/python3.*/site-packages
 # Bytecode that stores the source's hash where its date would go, unchecked: Python loads it
 # without looking at the source again, which on a read-only mount nobody can change, and it comes
 # out the same from every build. -s/-p name each source as it is inside the image

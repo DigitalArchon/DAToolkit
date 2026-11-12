@@ -9,14 +9,36 @@
 # What builds them is HEAD's too: with this script or anything in packaging/appimage changed
 # since, nothing is built, and the changed files are named.
 # lock reads pyproject.toml and the *.in files as they are in the working tree.
+# This machine needs rootless Podman, git, GNU tar and python3 3.11 or newer.
 set -euo pipefail
+
+# What this script itself runs, looked for before anything else, so that a machine without one
+# is told so in a sentence: git's absence was "command not found" from the first line, and a
+# python3 before 3.11 a traceback about tomllib once the builder image had been made.
+missing_host_tools() {  # -> a line for each this machine lacks
+    command -v git >/dev/null || echo "git"
+    command -v podman >/dev/null || echo "Podman, rootless: sudo apt install podman (or dnf/pacman)"
+    # --sort=name, which packs the commit's files in one order whatever order the file system
+    # gives them in, is GNU tar's
+    case "$(tar --version 2>/dev/null || true)" in
+        *"GNU tar"*) ;;
+        *) echo "GNU tar (bsdtar and BusyBox's tar have no --sort=name)" ;;
+    esac
+    python3 -c 'import tomllib' 2>/dev/null \
+        || echo "python3 3.11 or newer (its tomllib reads the version from pyproject.toml)"
+}
+missing="$(missing_host_tools)"
+if [ -n "$missing" ]; then
+    echo "Nothing built. $0 needs these, which this machine lacks:" >&2
+    while IFS= read -r line; do echo "  $line" >&2; done <<< "$missing"
+    exit 1
+fi
 
 mode="${1:-build}"
 case "$mode" in
     build|check|lock) ;;
     *) echo "usage: $0 build|check|lock" >&2; exit 2 ;;
 esac
-command -v podman >/dev/null || { echo "Podman is needed: sudo apt install podman (or dnf/pacman)" >&2; exit 1; }
 self="$(realpath -- "${BASH_SOURCE[0]}")"
 top="$(git rev-parse --show-toplevel)"
 cd "$top"
@@ -123,7 +145,9 @@ mkdir -p "$CACHE"
 
 run() {  # out-dir mode
     mkdir -p "$1"
-    podman run --rm -v "$WORK/src.tar:/src.tar:ro,Z" -v "$CACHE:/cache:Z" -v "$1:/out:Z" \
+    # --pull=never: the builder is the image made above, on this machine, and no registry is
+    # ever asked for one of its name
+    podman run --rm --pull=never -v "$WORK/src.tar:/src.tar:ro,Z" -v "$CACHE:/cache:Z" -v "$1:/out:Z" \
         -e SOURCE_DATE_EPOCH="$EPOCH" -e VERSION="$VERSION" -e UPGRADE="${UPGRADE:-0}" "$TAG" \
         bash -c 'tar -xOf /src.tar packaging/appimage/build.sh > /tmp/build.sh && bash /tmp/build.sh "$0"' "$2"
 }

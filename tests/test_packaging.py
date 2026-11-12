@@ -4,11 +4,16 @@ the container), but the parts of the scripts that read the machine or fetch are;
 run whole against a Podman that only notes what it is asked. From DA Assistant's
 tests/test_appimage_packaging.py and test_build_scripts.py (Nov 2026)."""
 
+import base64
+import csv
+import hashlib
+import io
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +23,7 @@ PACKAGING = ROOT / "packaging" / "appimage"
 WRAPPER = (ROOT / "packaging" / "build-appimage.sh").read_text()
 BUILD = (PACKAGING / "build.sh").read_text()
 APPRUN = (PACKAGING / "AppRun").read_text()
+README = (ROOT / "packaging" / "README.md").read_text()
 
 
 def _function(script: str, name: str) -> str:
@@ -377,7 +383,8 @@ def test_a_commit_is_built_by_its_own_definition_in_the_builder_made_here(build_
     assert done.returncode == 0, done.stderr
     assert "Nothing built" not in done.stderr and "Note:" not in done.stderr
     assert len(podman) == 2 and re.fullmatch(r"image exists datoolkit-appimage-builder:[0-9a-f]{12}", podman[0])
-    assert podman[1].startswith("run --rm ") and podman[1].endswith(" build")
+    # the image of that name on this machine and no other: Podman is never to ask a registry for it
+    assert podman[1].startswith("run --rm --pull=never ") and podman[1].endswith(" build")
     assert f" {podman[0].split()[-1]} bash -c " in podman[1] and " -e VERSION=1.2.3 " in podman[1]
     # a source changed and not committed is not built, which the note says; nor is a file git doesn't
     # track any of the definition
@@ -424,3 +431,111 @@ def test_an_unknown_mode_is_said_before_anything_is_made(build_repo):
     _, build = build_repo
     done, podman = build("--help")
     assert done.returncode == 2 and "usage: " in done.stderr and podman == []
+
+
+def test_a_machine_without_what_the_wrapper_needs_is_told_which(tmp_path):
+    """git, Podman, GNU tar and a python3 with tomllib: without git the first line failed with
+    "command not found", and a python3 before 3.11 with a traceback after the builder was made."""
+    bash = shutil.which("bash")
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    done = subprocess.run([bash, str(ROOT / "packaging" / "build-appimage.sh"), "build"], cwd=tmp_path,
+                          env={"PATH": str(tools)}, capture_output=True, text=True, timeout=30)
+    assert done.returncode == 1 and done.stdout == ""
+    said = done.stderr.splitlines()
+    assert said[0].startswith("Nothing built.") and "this machine lacks" in said[0]
+    assert [line.split()[0] for line in said[1:]] == ["git", "Podman,", "GNU", "python3"]
+    assert "3.11" in said[4] and "tomllib" in said[4]
+
+    def lacking(**stubs):
+        for name, script in stubs.items():
+            _stub(tools, name, script)
+        script = "set -euo pipefail\n" + _function(WRAPPER, "missing_host_tools") + "missing_host_tools"
+        found = subprocess.run([bash, "-c", script], env={"PATH": str(tools)}, capture_output=True, text=True,
+                               timeout=30)
+        assert found.returncode == 0 and found.stderr == ""
+        return [line.split()[0] for line in found.stdout.splitlines()]
+
+    # another tar, and a python3 that has no tomllib to import
+    assert lacking(git="exit 0", podman="exit 0", tar='echo "bsdtar 3.7.2 - libarchive 3.7.2"',
+                   python3="exit 1") == ["GNU", "python3"]
+    assert lacking(tar='echo "tar (GNU tar) 1.35"', python3="exit 0") == []
+    for needed in ("Podman", "git", "GNU tar", "python3 3.11"):
+        assert needed in README.split("## Building")[1].split("```")[0], needed
+
+
+# ---------------------------------------------------------------- RECORD, of what is in the image
+
+RECORDS = PACKAGING / "records.py"
+
+
+def _record_hash(data: bytes) -> str:
+    return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+
+
+def _installed(site: Path, name: str, files: dict[str, bytes]) -> Path:
+    """A package as pip leaves it: its files, and a RECORD of them as pip writes one (the csv
+    module's default dialect, sorted, lines ending \\r\\n, its own line last and bare)."""
+    info = f"{name}-1.0.dist-info"
+    rows = []
+    for path, data in files.items():
+        (site / path).parent.mkdir(parents=True, exist_ok=True)
+        (site / path).write_bytes(data)
+        rows.append((path, _record_hash(data), str(len(data))))
+    out = io.StringIO(newline="")
+    csv.writer(out).writerows(sorted(rows) + [(f"{info}/RECORD", "", "")])
+    (site / info / "RECORD").write_bytes(out.getvalue().encode())
+    return site / info / "RECORD"
+
+
+def test_a_record_lists_what_is_in_the_image_and_nothing_of_the_wheel_it_came_from(tmp_path):
+    """Six RECORDs still listed direct_url.json, with the hash of a file that held the hash of a
+    wheel archive made in the build; others listed console scripts and Pillow libraries that were
+    left out, and stripped extensions by the hashes they had before."""
+    site = tmp_path / "usr" / "python" / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    built = _installed(site, "built", {
+        "built/__init__.py": b"x = 1\n",
+        "built/_ext.abi3.so": b"\x7fELFcode" + b"debug information" * 40,
+        "built/odd, name.txt": b"a name with a comma is quoted\n",
+        "built-1.0.dist-info/METADATA": b"Name: built\n",
+        "built-1.0.dist-info/direct_url.json":
+            b'{"archive_info": {"hash": "sha256=0d1e"}, "url": "file:///work/wheels/built-1.0-py3-none-any.whl"}',
+        "../../../bin/built": b"#!/work/AppDir/usr/python/bin/python3\nimport built\n"})
+    wheel = _installed(site, "wheel", {"wheel.py": b"y = 2\n", "wheel-1.0.dist-info/METADATA": b"Name: wheel\n"})
+    before, untouched = built.read_bytes(), (wheel.read_bytes(), os.stat(wheel).st_mtime_ns)
+    assert before.count(b"\r\n") == 7 and b'"built/odd, name.txt",sha256=' in before
+    # what build.sh does to them once pip is done
+    (site / "built-1.0.dist-info" / "direct_url.json").unlink()
+    (tmp_path / "usr" / "python" / "bin" / "built").unlink()
+    (site / "built" / "_ext.abi3.so").write_bytes(b"\x7fELFcode")              # stripped
+
+    clean = [sys.executable, "-I", str(RECORDS), str(site)]
+    done = subprocess.run(clean, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert "2 lines of files left out dropped, 1 brought up to date, in 2 packages" in done.stdout
+    expected = [line for line in before.split(b"\r\n")
+                if not line.startswith((b"../../../bin/built,", b"built-1.0.dist-info/direct_url.json,"))]
+    at = next(i for i, line in enumerate(expected) if line.startswith(b"built/_ext.abi3.so,"))
+    expected[at] = b"built/_ext.abi3.so," + _record_hash(b"\x7fELFcode").encode() + b",8"
+    after = built.read_bytes()
+    assert after == b"\r\n".join(expected)                  # every other line as it was, in its place
+    assert b"direct_url" not in after and b"/bin/" not in after
+    # a RECORD with nothing to change is not written, and a second run finds nothing more to do
+    assert (wheel.read_bytes(), os.stat(wheel).st_mtime_ns) == untouched
+    again = subprocess.run(clean, capture_output=True, text=True, timeout=60)
+    assert "0 lines of files left out dropped, 0 brought up to date" in again.stdout and built.read_bytes() == after
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    nothing = subprocess.run([sys.executable, "-I", str(RECORDS), str(empty)], capture_output=True, text=True)
+    assert nothing.returncode != 0 and "no package's RECORD" in nothing.stderr
+
+
+def test_records_are_brought_up_to_date_once_everything_is_left_out_and_before_the_bytecode():
+    at = BUILD.index('"$W/buildpy/bin/python3" "$P/records.py" "$W"/AppDir/usr/python/lib/python3.*/site-packages')
+    for earlier in ("-m pip uninstall -q -y pip", "-exec strip --strip-unneeded", 'rm "$script"',
+                    'rm -f "$site"/PIL/_imagingft', "-name direct_url.json -delete",
+                    "-name __pycache__ -type d -prune"):
+        assert BUILD.index(earlier) < at, earlier
+    assert at < BUILD.index("-m compileall") < BUILD.index("mksquashfs")
