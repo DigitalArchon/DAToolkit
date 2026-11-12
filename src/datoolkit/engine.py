@@ -209,6 +209,16 @@ def _elide(text: str, limit: int) -> str:
     return f"{text[:head]}… [{len(text) - head - tail:,} characters left out] …{text[-tail:]}"
 
 
+def _for_model(command: str, limit: int) -> str:
+    """A queued command's text as a model is given it: redacted as a command's output is, then
+    cut to `limit` (_elide). The technician may have typed a password into the box (`mysql -p…`,
+    `sshpass -p …`), and the queue, the audit log and the terminal keep the command as it is;
+    until Nov 2026 the result header, the reviewer's request and the queue state carried it too.
+    A payload of megabytes is cut to ten times the limit before the rules read it, far from
+    what the last cut keeps."""
+    return _elide(redact(_elide(command, limit * 10))[0], limit)
+
+
 # Extended NLA (guacd's "nla-ext", RDP's HYBRID_EX) can't work with any guacd DA Toolkit can use:
 # Ubuntu's 1.3, Fedora's 1.6.0 and upstream's 1.6.0 image are all built on FreeRDP 2, which asks
 # the server for it and then has no code to speak it (nego_security_connect). FreeRDP 3 has, but
@@ -2659,25 +2669,37 @@ class Engine:
         current = self._baseline_items(sid)
         if not current:
             raise UserError("No ran baseline-recipe items for that session. Queue the Baseline snapshot recipe and run it first.")
+        # Shown for sending to the AI, so redacted, as Send results and selections are: each text
+        # before the two are compared, because a rule that reads a line from its start
+        # (`password …`, `pass = …`, a .netrc line) doesn't know it behind a diff's + or -. Until
+        # Nov 2026 the finished diff was redacted, and showed the old and the new password with
+        # "0 redactions". The count is of the masks in what is shown.
         parts, changed, same, missing = [], [], [], []
         for k, (cmd, now) in current.items():
             old = base.get("sections", {}).get(k)
             if old is None:
                 missing.append(k)
                 continue
-            diff = list(difflib.unified_diff(old["text"].splitlines(), now.splitlines(),
+            was, now_shown = redact(str(old.get("text", "")))[0], redact(now)[0]
+            diff = list(difflib.unified_diff(was.splitlines(), now_shown.splitlines(),
                                              fromfile=f"{k} @ {base.get('taken', '?')}", tofile=f"{k} now", lineterm="", n=1))
             if diff:
                 changed.append(k)
                 parts.append("\n".join(diff))
+            elif str(old.get("text", "")) != now:
+                # the same once redacted: a secret changed, which is a lead though its value is not shown
+                changed.append(k)
+                parts.append(f"--- {k} @ {base.get('taken', '?')}\n+++ {k} now\n"
+                             "(differs only in values that were redacted: a password, key or other secret changed)")
             else:
                 same.append(k)
         summary = (f"Baseline diff for {key} against snapshot taken {base.get('taken', '?')} (case {base.get('case', '?')}).\n"
                    f"Changed sections: {', '.join(changed) or 'none'}. Unchanged: {', '.join(same) or 'none'}."
                    + (f" Not in baseline: {', '.join(missing)}." if missing else ""))
-        # shown for sending to the AI, so redacted first, as Send results and selections are, and
         # with the app's own marker made harmless in what the host printed
-        text, redactions = redact(summary + ("\n\n" + defang("\n\n".join(parts)) if parts else ""))
+        body = defang("\n\n".join(parts))
+        text = summary + ("\n\n" + body if parts else "")
+        redactions = len(re.findall(r"\[REDACTED(?: [A-Z ]+)?\]", body))
         self.log("baseline_diffed", host=key, baseline=str(path), changed=changed)
         return {"host": key, "baseline": str(path), "taken": base.get("taken"), "changed": changed, "same": same,
                 "missing": missing, "text": text, "redactions": redactions}
@@ -3645,8 +3667,8 @@ class Engine:
             status = p.status if p.status in ("ran", "inserted", "skipped") else "ran"
             note = str(r["note"] if "note" in r else p.note or "").strip()    # an emptied note is no note
             text = str(r.get("text", ""))
-            label = {"ran": "RAN", "inserted": "RAN (edited in terminal)", "skipped": "SKIPPED"}[status]
-            head = f"#{p.num} on session `{p.session_id}` {label}: `{_elide(p.command, 2000)}`"
+            status_word = {"ran": "RAN", "inserted": "RAN (edited in terminal)", "skipped": "SKIPPED"}[status]
+            head = f"#{p.num} on session `{p.session_id}` {status_word}: `{_for_model(p.command, 2000)}`"
             if p.ran_at:
                 head += f" (started {datetime.fromtimestamp(p.ran_at):%H:%M:%S})"
             if p.group:
@@ -3654,7 +3676,7 @@ class Engine:
             if p.watch:
                 head += " [watch: only changed iterations shown]"
             if p.edited:
-                head += f" (edited by technician; originally `{_elide(p.original_command, 2000)}`)"
+                head += f" (edited by technician; originally `{_for_model(p.original_command, 2000)}`)"
             block = [head]
             if note:
                 block.append(f"Technician's note: {note}")
@@ -4622,9 +4644,11 @@ class Engine:
                            f"{label(sess.os_hint, 80) or 'unknown'}; shell: {label(sess.shell)}")
         if self.hypotheses:
             context.append(prompts.hypotheses_text(self.hypotheses))
-        context.append(f"Command (#{p.num}, labelled {p.risk}): {_elide(p.command, 20000)}\nStated purpose: {p.purpose}")
+        # redacted, as everything of a command that goes to a model (_for_model): the reviewer judges
+        # what the command does, which the password typed into it adds nothing to
+        context.append(f"Command (#{p.num}, labelled {p.risk}): {_for_model(p.command, 20000)}\nStated purpose: {p.purpose}")
         if p.rollback:
-            context.append(f"Stated rollback: {p.rollback}")
+            context.append(f"Stated rollback: {_for_model(p.rollback, 4000)}")
         if p.cuts_session:
             context.append(f"Local rule says: {p.cuts_session}")
         if p.sensitive:

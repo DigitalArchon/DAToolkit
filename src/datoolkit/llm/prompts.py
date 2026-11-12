@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..safety.hidden import visible
 from ..safety.inject import defang, label, suspicious
+from ..safety.redact import redact
 
 PROPOSE_TOOL = {
     "type": "function",
@@ -466,12 +467,15 @@ def hypotheses_text(items: list[dict]) -> str:
 
 
 def queue_text(queue: list[dict]) -> str:
-    """The technician's queue as the model should see it: what is waiting on whom."""
+    """The technician's queue as the model should see it: what is waiting on whom. Each command
+    redacted as output is: the technician may have typed a password into one (`sshpass -p …`),
+    which the queue keeps for the terminal and no model is sent."""
     groups = {"pending": [], "ran": [], "skipped": []}
     for q in queue:
         st = {"inserted": "ran"}.get(q["status"], q["status"])
         if st in groups:
-            cmd = q["command"] if len(q["command"]) <= 200 else q["command"][:200] + "…"
+            cmd = redact(q["command"][:2000])[0]         # of a payload of megabytes, the rules read the start
+            cmd = cmd if len(cmd) <= 200 else cmd[:200] + "…"
             groups[st].append(f"  #{q['num']} on `{q['session_id']}`: `{cmd}`" + (" (edited by technician)" if q.get("edited") else ""))
     if not any(groups.values()):
         return "Technician's queue: nothing waiting."
