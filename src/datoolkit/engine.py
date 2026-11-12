@@ -1092,7 +1092,13 @@ class Engine:
 
         The client gives the whole attempt llm/tee.py's ATTEMPT_SECONDS; one request's timeout
         after that it is given up here whatever it is doing (Intel's or NVIDIA's service
-        answering a byte at a time), as a refusal: the top bar never says "attesting…" for longer."""
+        answering a byte at a time), as a refusal: the top bar never says "attesting…" for longer.
+
+        An attestation is of the address it was made at. One that was under way while its
+        provider's address was changed in Settings (or the provider renamed or removed) isn't
+        kept: until Nov 2026 it was, under the provider's name, and requests to the new address
+        went out under it. The client of an attestation made again, refused or not kept is
+        closed (it waits for the reply checks still using it: llm/tee.py close)."""
         self._secure(prov)
         key = self._provider_key(prov) or ""
         make = self._tee_factory or tee_mod.TeeClient
@@ -1103,16 +1109,28 @@ class Engine:
         except BaseException as e:
             client.close()
             if not isinstance(e, asyncio.CancelledError):       # cancelled is no refusal
-                self._tee.pop((prov.name, model), None)
+                before = self._tee.pop((prov.name, model), None)
+                if before:
+                    before[0].close()
             if isinstance(e, TimeoutError):
                 raise UserError(f"{model}'s attestation wasn't done within {limit / 60:g} minutes, and was given "
                                 "up; this may pass if tried again") from e
             raise
+        now = self.cfg.provider(prov.name)
+        if now is None or now.base_url != prov.base_url:
+            client.close()
+            raise UserError(f"{prov.name} was changed in Settings while {model} was being attested at its address "
+                            "as it was, so that attestation isn't kept; the model is attested again before "
+                            "anything is sent to it")
+        before = self._tee.get((prov.name, model))
         self._tee[(prov.name, model)] = (client, since_boot(), att.to_dict())
+        if before:
+            before[0].close()
         self._tee_doubted.discard((prov.name, model))
         return att
 
-    async def _tee_guard(self, prov: Provider, model: str, slot: str) -> tuple[tee_mod.TeeClient, dict] | None:
+    async def _tee_guard(self, prov: Provider, model: str, slot: str, *,
+                         own: list | tuple = ()) -> tuple[tee_mod.TeeClient, dict] | None:
         """Nothing goes to a TEE model whose enclave hasn't attested (as SealedLore). An
         attestation older than TEE_REATTEST_SECONDS, or one a reply of failed its check under, is
         made again first; a check of its replies still running is waited for, since what it finds
@@ -1125,26 +1143,49 @@ class Engine:
         (the model chosen, or chosen again, or Re-check) is waited for, and what it finds decides,
         not the one before it; a refused one leaves none in force (_attest_tee). Until Nov 2026 a
         request made within 15 minutes of an attestation that held went out under it all the
-        same (SealedLore 0721878 closed the like in its archive, rebuild and merge paths)."""
+        same (SealedLore 0721878 closed the like in its archive, rebuild and merge paths).
+
+        It is taken before each request, not once for a piece of work: a turn or a research run
+        lasts minutes, and its model may be attested again, or refused, or grow old, meanwhile.
+        So it costs nothing while the attestation kept is fresh and undoubted and none is under
+        way: it returns at once, without waiting for anything. `own`: the checks of the asking
+        work's own earlier replies, which it doesn't wait for (a research run checks each reply
+        while it goes on, and waits for them all at its end: _research_complete, _tee_marks).
+
+        After an attestation it waited for ends it looks again, and decides only when none is
+        under way: a Re-check begun while a request waited for the attestation before it is
+        waited for too. Until Nov 2026 the request went out as soon as the first one held.
+
+        An attestation counts only at the address it was made at: one kept from before the
+        provider's address changed (`prov` is the provider as the request will use it) is no
+        attestation, and the model is attested at this address first."""
         if detect_tier(model, prov.base_url, prov.tier_overrides) != "tee":
             return None
         key = (prov.name, model)
-        checking = [t for t in self._tee_checking.get(key, ()) if not t.done()]
-        if checking:
-            await asyncio.wait(checking)
-        doubted = key in self._tee_doubted
-        under_way = None if doubted else self._tee_attesting.get(key)
-        result = await asyncio.shield(under_way) if under_way is not None else None
-        if result is None:          # none under way, or cancelled (another model chosen meanwhile)
+        found = None            # what the last attestation waited for found: None if none, or it was cancelled
+        attested = False        # this request has had the model attested itself
+        while True:
+            checking = [t for t in self._tee_checking.get(key, ()) if not t.done() and t not in own]
+            if checking:
+                await asyncio.wait(checking)
+                continue
+            doubted = key in self._tee_doubted
+            under_way = None if doubted else self._tee_attesting.get(key)
+            if under_way is not None and not under_way.done():
+                found = await asyncio.shield(under_way)     # None: cancelled (another model chosen meanwhile)
+                continue
+            if found is not None and found["status"] != "verified":
+                break
             hit = self._tee.get(key)
-            if hit and key not in self._tee_doubted and since_boot() - hit[1] < TEE_REATTEST_SECONDS:
+            if hit is not None and getattr(hit[0], "base_url", None) != prov.base_url:
+                hit = None
+            if hit and not doubted and since_boot() - hit[1] < TEE_REATTEST_SECONDS:
                 return hit[0], hit[2]
-            result = await self._attest(prov, model, slot)
-        hit = self._tee.get(key)
-        if result["status"] != "verified" or hit is None:
-            raise UserError(f"{model}'s TEE attestation didn't hold, so nothing was sent to it: "
-                            f"{result.get('error') or 'refused since'}")
-        return hit[0], hit[2]
+            if attested:
+                break
+            found, attested = await self._attest(prov, model, slot), True
+        raise UserError(f"{model}'s TEE attestation didn't hold, so nothing was sent to it: "
+                        f"{found.get('error') or 'refused since'}")
 
     @staticmethod
     def _reply_record(result) -> tuple:
@@ -3201,20 +3242,32 @@ class Engine:
         prompt caching, the generation settings less any the model refuses, every request
         logged), and what _tee_guard returned for its model. A TEE model's replies are checked as
         a turn's are, each as it comes, while the agent goes on: the checks go in `checks`
-        (_reply_checks), for _tee_marks."""
+        (_reply_checks), for _tee_marks.
+
+        The guard is taken before each request of the run, which lasts minutes: its model may be
+        attested again meanwhile (Re-check, another request to it, a reply that failed its
+        check) or refused, and then nothing more goes to it. Until Nov 2026 it was taken once,
+        and every request of the run went out under the attestation it began with. Each reply
+        is checked with the client its own request went out under; what is returned (a list,
+        read as _tee_guard's pair) is the attestation of the last request sent."""
         client = self._client(prov, model)
         if isinstance(client, PrivateModeClient):
             await client.attest(model)
         tee = await self._tee_guard(prov, model, "research")
+        under = list(tee) if tee else None
         stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
         logged = 1
 
         async def collect(params, messages, tools):
+            # not waiting for the checks of the run's own replies, which go on beside it
+            now = await self._tee_guard(prov, model, "research", own=checks) if under else None
+            if now:
+                under[:] = now
             result = None
             async for kind, val in client.stream(model, messages, tools, params, **stream_kw):
                 if kind == "done":
                     result = val
-            checks.extend(self._reply_checks(prov, model, tee, [result]))
+            checks.extend(self._reply_checks(prov, model, now, [result]))
             return result
 
         def params_for(tool_choice: str | None) -> dict:
@@ -3242,7 +3295,7 @@ class Engine:
                 "finish_reason": result.finish_reason, "usage": result.usage})
             logged = len(messages)
             return result
-        return complete, tee
+        return complete, under
 
     def _research_cache(self) -> research.ReportCache:
         return research.ReportCache(data_dir() / "research")

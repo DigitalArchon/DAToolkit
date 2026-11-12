@@ -9,7 +9,9 @@ import threading
 import httpx
 import pytest
 
+from datoolkit import creds
 from datoolkit.engine import UserError
+from datoolkit.llm.client import LLMClient
 from datoolkit.llm.dcap import since_boot
 from datoolkit.llm.tee import NRAS_URL, TeeClient
 
@@ -774,6 +776,114 @@ KEY = ("Fake", "TEE/glm-5.3")
 TALK = [{"role": "user", "content": "VPN down"}, {"role": "assistant", "content": "Restarted it."}]
 
 
+@pytest.mark.parametrize("holds", [False, True])
+async def test_a_recheck_begun_while_a_request_waits_for_an_earlier_attestation_is_waited_for_too(env, holds):  # noqa: F811
+    """The guard waited for the attestation that was under way when it looked: a Re-check begun
+    meanwhile wasn't waited for, and the request went out as soon as the first one held, the
+    second still under way, and then refused."""
+    engine, fake, _ = env
+    calls: list = []
+    engine._tee_factory, state = switchable(calls)
+    engine.new_case("w", "open")
+    first = state["gate"] = threading.Event()
+    engine.select_model("Fake", "TEE/glm-5.3")                 # the first attestation, held
+    await asyncio.sleep(0.05)
+    engine.conv = list(TALK)
+    fake.responses.append(sse(({"role": "assistant", "content": "Ticket."}, "stop")))
+    request = asyncio.create_task(engine.ticket_summary())     # waits for it
+    await asyncio.sleep(0.05)
+    second = state["gate"] = threading.Event()
+    state["ok"] = holds
+    recheck = asyncio.create_task(engine.attest_now())         # Re-check: a second one, held
+    await asyncio.sleep(0.05)
+    first.set()                                                # the first holds
+    await asyncio.sleep(0.3)
+    assert not recheck.done() and not request.done() and not fake.requests, "held while the Re-check is under way"
+    second.set()
+    assert (await recheck)["status"] == ("verified" if holds else "failed")
+    if holds:
+        assert (await request)["text"] == "Ticket." and len(fake.requests) == 1
+    else:
+        with pytest.raises(UserError, match="nothing was sent"):
+            await request
+        assert not fake.requests
+    assert calls == ["TEE/glm-5.3"] * 2                        # the request attested nothing itself
+
+
+async def test_an_attestation_under_way_when_its_providers_address_changes_is_not_kept(env):  # noqa: F811
+    """It was kept under the provider's name, and the next request, to the new address, went out
+    under an attestation made at the old one."""
+    engine, fake, _ = env
+    calls: list = []
+    engine._tee_factory, state = switchable(calls)
+    engine.new_case("p", "open")
+    gate = state["gate"] = threading.Event()
+    engine.select_model("Fake", "TEE/glm-5.3")                 # attested at the address as it is, held
+    await asyncio.sleep(0.05)
+    made: list = []
+    plain = engine._tee_factory
+
+    def make(base, key, model):
+        made.append(plain(base, key, model))
+        return made[-1]
+    engine._tee_factory = make
+    old = engine.cfg.provider("Fake")
+    engine.save_provider({"name": "Fake", "base_url": "https://other.example/api/v1",
+                          "default_model": old.default_model}, original_name="Fake")
+    state["gate"] = None
+    gate.set()
+    att = await settled(engine)
+    assert att["status"] == "failed" and "changed in Settings" in att["error"]
+    assert KEY not in engine._tee and calls == ["TEE/glm-5.3"]
+    client, shown = await engine._tee_guard(engine.cfg.provider("Fake"), "TEE/glm-5.3", "chat")
+    assert client is made[0] and client.base_url == "https://other.example/api/v1"     # attested where it is now
+    assert calls == ["TEE/glm-5.3"] * 2 and engine._tee[KEY][0] is client
+
+
+async def test_an_attestation_kept_from_another_address_is_no_attestation(env):  # noqa: F811
+    """config.toml edited by hand, or anything else that leaves an attestation under a provider's
+    name whose address has changed: the guard goes by the address the request will use."""
+    engine, fake, _ = env
+    calls: list = []
+    engine._tee_factory = tee_factory(calls)
+    engine.new_case("k", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    prov = engine.cfg.provider("Fake")
+    kept = engine._tee[KEY][0]
+    guard = engine._tee_guard(prov, "TEE/glm-5.3", "chat")
+    with pytest.raises(StopIteration) as at_once:              # fresh and undoubted: nothing is waited for
+        guard.send(None)
+    assert at_once.value.value[0] is kept and calls == ["TEE/glm-5.3"]
+    prov.base_url = "https://other.example/api/v1"
+    client, _shown = await engine._tee_guard(prov, "TEE/glm-5.3", "chat")
+    assert client is not kept and client.base_url == "https://other.example/api/v1"
+    assert calls == ["TEE/glm-5.3"] * 2
+
+
+async def test_the_client_of_an_attestation_made_again_or_refused_is_closed(env):  # noqa: F811
+    """One replaced was never closed. (What a check still using it does: test_tee.py.)"""
+    engine, fake, _ = env
+    plain, state = switchable()
+    made, closed = [], []
+
+    def make(base, key, model):
+        client = plain(base, key, model)
+        client.close = lambda n=len(made): closed.append(n)
+        made.append(client)
+        return client
+    engine._tee_factory = make
+    engine.new_case("c", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    assert closed == []
+    assert (await engine.attest_now())["status"] == "verified"
+    assert closed == [0] and engine._tee[KEY][0] is made[1]
+    state["ok"] = False
+    assert (await engine.attest_now())["status"] == "failed"
+    assert sorted(closed) == [0, 1, 2] and KEY not in engine._tee      # the one refused, and the one before it
+
+
 async def test_an_attestation_that_doesnt_end_is_given_up_and_nothing_sent(env, monkeypatch):  # noqa: F811
     """The client gives an attempt llm/tee.py's ATTEMPT_SECONDS; the engine waits one request's
     timeout longer, and then says it was refused, whatever the attempt is doing."""
@@ -828,3 +938,78 @@ async def test_why_an_attestation_failed_is_said_short_on_one_line_with_nothing_
     with pytest.raises(UserError, match="nothing was sent") as refused:
         await engine.ticket_summary()
     assert "\n" not in str(refused.value) and len(str(refused.value)) < 800
+
+
+# ---------------------------------------------------------------- every reply, and every request
+
+def held_at(engine, fake, when):
+    """The engine's client on a handler that holds a request, once `when(fake.requests)`, until the
+    returned `gate` is set; `reached` is set when it is held."""
+    gate, reached = asyncio.Event(), asyncio.Event()
+
+    async def handler(request):
+        response = fake.handler(request)
+        if not request.url.path.endswith("/models") and when(fake.requests):
+            reached.set()
+            await gate.wait()
+        return response
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    engine._client = lambda prov, model="": LLMClient(prov.base_url, creds.get_secret("provider", prov.name), http)
+    return gate, reached
+
+
+def _to_the_agent(requests) -> int:
+    return sum(r["model"] == "TEE/glm-5.3" for r in requests)
+
+
+async def test_a_research_run_takes_the_guard_before_each_request_and_checks_each_reply_under_its_own(env):  # noqa: F811
+    """The guard was taken once, when the run began: every later request of it went out under
+    that attestation, however old it had grown (a run lasts minutes) and whatever had been found
+    since."""
+    turns = agent_turns()
+    streams = {f"rcpt-{i}": turn.encode() for i, turn in enumerate(turns)}
+    engine, fake, events, seen = _research_env(env, streams=streams)
+    plain, made, checked = engine._tee_factory, [], []
+
+    def make(base, key, model):
+        client = plain(base, key, model)
+        real = client.check_reply
+        client.check_reply = lambda rid, n=len(made), **record: checked.append((n, record["receipt_id"])) or real(rid, **record)
+        made.append(client)
+        return client
+    engine._tee_factory = make
+    gate, reached = held_at(engine, fake, lambda requests: _to_the_agent(requests) == 1)
+    fake.responses += [research_call()] + turns + [say("Per the v21 docs: Network > DHCP > Relay.")]
+    fake.receipt_ids = ["chat-1", *streams, "chat-2"]
+    engine.send("need a dhcp relay on the sophos")
+    await asyncio.wait_for(reached.wait(), 5)                   # the agent's first request is on the wire
+    assert len(made) == 1
+    client, at, shown = engine._tee[KEY]
+    engine._tee[KEY] = (client, at - 3600, shown)               # and its attestation an hour old by the second
+    gate.set()
+    await wait_turn(engine)
+    rec = engine.chat[-1]["research"][0]
+    assert rec["status"] == "done" and rec["tee_signature"] == "verified" and rec["tee_attested"]
+    assert len(made) == 2 and _to_the_agent(fake.requests) == 3     # attested again, once, before the second
+    assert sorted(checked) == [(0, "rcpt-0"), (1, "rcpt-1"), (1, "rcpt-2")]
+
+
+async def test_a_research_run_sends_nothing_more_once_its_model_is_refused(env):  # noqa: F811
+    turns = agent_turns()
+    engine, fake, events, _ = _research_env(env)
+    calls: list = []
+    state = {"ok": True}
+    engine._tee_factory = tee_factory(calls, server=lambda **_: tee_server(nonce_bound=state["ok"], reply=turns[0].encode()))
+    gate, reached = held_at(engine, fake, lambda requests: _to_the_agent(requests) == 1)
+    fake.responses += [research_call(), turns[0], say("Carrying on without the research.")]
+    engine.send("need a dhcp relay on the sophos")
+    await asyncio.wait_for(reached.wait(), 5)
+    client, at, shown = engine._tee[KEY]
+    engine._tee[KEY] = (client, at - 3600, shown)               # grown old, and refused when made again
+    state["ok"] = False
+    gate.set()
+    await wait_turn(engine)
+    rec = engine.chat[-1]["research"][0]
+    assert rec["status"] == "failed" and "nothing was sent" in rec["error"]
+    assert _to_the_agent(fake.requests) == 1 and calls == ["TEE/glm-5.3"] * 2
+    assert KEY not in engine._tee and engine.chat[-1]["text"].endswith("Carrying on without the research.")

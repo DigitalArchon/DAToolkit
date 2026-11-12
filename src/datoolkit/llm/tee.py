@@ -73,8 +73,9 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -599,10 +600,40 @@ class TeeClient:
         self._nvidia = nvidia or nras.verify
         # When the attestation under way must be over (time.monotonic; `ATTEMPT_SECONDS`), else None.
         self._deadline: float | None = None
+        # The checks of replies under way, and whether `close` was called: the http client is
+        # closed once none uses it (`_in_use`).
+        self._using = 0
+        self._closed = False
+        self._lock = threading.Lock()
 
     def close(self) -> None:
-        if self._owns:
-            self._client.close()
+        """Close the http client, once no check of a reply still uses it. The engine closes a
+        client whose attestation was made again, refused or forgotten, while a turn that began
+        under it may still have its replies to check: a check under way keeps the client until it
+        ends, and one begun after it was closed opens it again for as long as it runs
+        (`_in_use`). Until Nov 2026 a client replaced was never closed, and one forgotten was
+        closed under the checks still using it, which then read as "unchecked"."""
+        if not self._owns:
+            return
+        with self._lock:
+            self._closed = True
+            if not self._using:
+                self._client.close()
+
+    @contextmanager
+    def _in_use(self) -> Iterator[None]:
+        """While a reply is checked: the http client is open, and stays so (`close`)."""
+        with self._lock:
+            if self._owns and self._client.is_closed:
+                self._client = make_client(self.base_url, timeout=httpx.Timeout(TIMEOUT_SECONDS))
+            self._using += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._using -= 1
+                if self._owns and self._closed and not self._using:
+                    self._client.close()
 
     def _left(self, wanted: float = TIMEOUT_SECONDS) -> float:
         """How long a request of the attestation under way may wait: `wanted`, or what is left of
@@ -1298,6 +1329,18 @@ class TeeClient:
         checks out with its receipt read under the attested keys, who ran its
         model too (`served_by`: a lookup on api.redpill.ai). It never changes
         the mark."""
+        with self._in_use():
+            return self._check(response_id, receipt_id, body_hash, route, name_upstream)
+
+    def _check(
+        self,
+        response_id: str | None,
+        receipt_id: str | None,
+        body_hash: str | None,
+        route: str | None,
+        name_upstream: bool,
+    ) -> ReplyCheck:
+        """`check`, with the http client held open (`_in_use`)."""
         lookup = receipt_id or response_id
         if not lookup:
             raise ProviderError("the reply carried no id to check")

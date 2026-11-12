@@ -1969,3 +1969,46 @@ def test_intels_and_nvidias_checks_are_not_begun_once_the_time_has_passed(monkey
     with pytest.raises(TeeRefused, match="wasn't done within 3 minutes"):
         client.attest()
     assert asked == ["intel"]
+
+
+# --- a reply's receipt, and a client closed -----------------------------------------------------
+
+
+def test_a_client_closed_stays_open_for_the_check_under_way_and_opens_for_one_begun_later():
+    """The engine closes the client of an attestation made again, refused or forgotten, while a
+    turn begun under it may still have its replies to check. Closed under a check, the check read
+    as "unchecked"; never closed, each attestation left its connections behind."""
+    import threading
+
+    from datoolkit.llm.tee import ReplyCheck
+
+    client = TeeClient("https://fake.example/api/v1", "k", "TEE/x")     # its own http client; nothing is requested
+    first = client._client
+    began, go, seen = threading.Event(), threading.Event(), []
+
+    def held(*record):
+        began.set()
+        go.wait(5)
+        seen.append(client._client.is_closed)
+        return ReplyCheck("verified")
+
+    client._check = held
+    check = threading.Thread(target=client.check, args=("req_1",))
+    check.start()
+    assert began.wait(5)
+    client.close()
+    assert not first.is_closed                          # the check under way still uses it
+    go.set()
+    check.join(5)
+    assert seen == [False] and first.is_closed          # closed when it ended
+    client._check = lambda *record: seen.append(client._client.is_closed) or ReplyCheck("signed")
+    assert client.check("req_2").mark == "signed"       # begun after: opened for it, and closed after it
+    assert seen == [False, False] and client._client is not first and client._client.is_closed
+    client.close()                                      # closing twice is nothing
+
+    idle = TeeClient("https://fake.example/api/v1", "k", "TEE/x")
+    idle.close()
+    assert idle._client.is_closed                       # nothing using it: closed at once
+    handed = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+    TeeClient("https://fake.example/api/v1", "k", "TEE/x", client=handed).close()
+    assert not handed.is_closed                         # one it was given isn't its to close
