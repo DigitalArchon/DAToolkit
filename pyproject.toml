@@ -17,7 +17,15 @@ dependencies = [
     # 1.13.0 was the newest that had been out for two weeks when it was adopted (Oct 2026)
     "anthropic>=1.13,<2",
     "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
+    # uvicorn with the three packages of its "standard" extra that it uses here: websockets (the
+    # events, terminal and remote-desktop sockets), httptools and uvloop (which it picks up when
+    # they are there). The extra's other three, python-dotenv, pyyaml and watchfiles, are for env
+    # files, YAML log configs and --reload, none of which DA Toolkit uses: until Nov 2026 the
+    # AppImage carried them.
+    "uvicorn>=0.29",
+    "websockets>=12",
+    "httptools>=0.6",
+    "uvloop>=0.19",
     "pywebview>=5",
     "pypsrp>=0.8",
     "keyring>=25",
