@@ -1040,15 +1040,16 @@ class Engine:
             self.helper_attestation = value
 
     async def _attest(self, prov: Provider, model: str, slot: str = "chat",
-                      under_way: asyncio.Future | None = None) -> dict:
+                      under_way: asyncio.Future | None = None, fresh: bool = False) -> dict:
         """Attest the enclave a model runs in: Private Mode (Tinfoil's verifier) or TEE (Intel
         TDX + NVIDIA, llm/tee.py). The chat model's and vision helper's results are shown;
         every result is logged. A TEE model's attestation is under way (`under_way`, made here
         when not given) until it ends: a request to the model meanwhile waits for it (_tee_guard).
 
-        Why one failed is shown, logged and, when a research run on the model fails, handed to
-        the chat model: on one line, short, without what can't be seen (llm/private_mode.py
-        relay_said), whoever wrote it."""
+        `fresh` (Re-check): a private/ model's enclave is attested now, whatever is kept
+        (llm/private_mode.py Enclave.current); a TEE model's always is. Why one failed is shown,
+        logged and, when a research run on the model fails, handed to the chat model: on one
+        line, short, without what can't be seen (llm/private_mode.py relay_said), whoever wrote it."""
         tee = not is_private_mode(model)
         key = (prov.name, model)
         if tee and under_way is None:
@@ -1060,7 +1061,9 @@ class Engine:
                     result = {"status": "verified", "kind": "tee", "model": model,
                               **(await self._attest_tee(prov, model)).to_dict()}
                 else:
-                    att = await self._client(prov, model).attest(model)   # a retired model is not attested
+                    client = self._client(prov, model)
+                    # a retired model is not attested
+                    att = await (client.attest(model, fresh=True) if fresh else client.attest(model))
                     result = {"status": "verified", "model": model, **att.to_dict()}
                 self.log("enclave_attested", role=slot, **result)
             except ModelRetired as e:
@@ -1406,15 +1409,19 @@ class Engine:
                                          detect_tier(model, prov.base_url, prov.tier_overrides) == "tee")
 
     async def attest_now(self, slot: str = "chat") -> dict:
+        """Re-check (the top bar's "Click to re-check"): the chat model's enclave, or the vision
+        helper's, attested now. A private/ model's too, whose enclave is otherwise attested once
+        in five minutes: until Nov 2026 a Re-check within those showed the attestation kept, and
+        checked nothing."""
         if slot == "helper":
             helper = self._vision_helper()
             if not isinstance(helper, tuple) or not self._attestable(helper[0], helper[1]):
                 raise UserError("The vision helper isn't an end-to-end encrypted (private/) or TEE model.")
-            return await self._attest(helper[0], helper[1], "helper")
+            return await self._attest(helper[0], helper[1], "helper", fresh=True)
         prov = self.cfg.provider(self.cfg.active_provider)
         if not self._attestable(prov, self.cfg.active_model):
             raise UserError("The active model isn't an end-to-end encrypted (private/) or TEE model.")
-        return await self._attest(prov, self.cfg.active_model)
+        return await self._attest(prov, self.cfg.active_model, fresh=True)
 
     def active_tier(self) -> str | None:
         prov = self.cfg.provider(self.cfg.active_provider)

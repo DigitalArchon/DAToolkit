@@ -32,10 +32,11 @@ pinned exactly in pyproject.toml. The design follows SealedLore's providers/priv
    relay's an error quotes (a preflight refusal, an attestation bundle, the title of a key
    mismatch) goes the same way, through `relay_said`, without what can't be seen.
 
-The attestation is redone once it is five minutes old, and once more if the enclave says the
-key has changed. Its age is read off a clock that runs on while the machine sleeps
-(dcap.since_boot): time.monotonic stops, so a laptop woken after hours took an attestation made
-before it slept for minutes old.
+The attestation is redone once it is five minutes old, once more if the enclave says the key
+has changed, and whenever the technician asks (the top bar's "Click to re-check":
+`Enclave.current(fresh=True)`). Its age is read off a clock that runs on while the machine
+sleeps (dcap.since_boot): time.monotonic stops, so a laptop woken after hours took an
+attestation made before it slept for minutes old.
 
 **Retired models.** The enclave is Tinfoil's router whatever the model, so a `private/` model
 NanoGPT no longer offers (private/glm-5-3-flash, Oct 2026) attests fine, and its first message
@@ -255,10 +256,13 @@ class Enclave:
     def attestation(self) -> Attestation | None:
         return self._verified.attestation if self._verified else None
 
-    async def current(self) -> Verified:
+    async def current(self, fresh: bool = False) -> Verified:
+        """The enclave as attested: now, when the last attestation is MAX_AGE_SECONDS old or
+        `fresh` asks for one (Re-check, which until Nov 2026 showed the kept one again for five
+        minutes, having checked nothing). One that fails leaves none kept."""
         async with self._lock:
-            fresh = self._verified is not None and 0 <= self._clock() - self._at < MAX_AGE_SECONDS
-            if not fresh:
+            kept = self._verified is not None and 0 <= self._clock() - self._at < MAX_AGE_SECONDS
+            if fresh or not kept:
                 self._verified = None
                 try:
                     self._verified = await asyncio.to_thread(self._verifier, self.relay, self.cache_secret)
@@ -342,12 +346,13 @@ class PrivateModeClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
 
-    async def attest(self, model: str = "") -> Attestation:
+    async def attest(self, model: str = "", fresh: bool = False) -> Attestation:
         """Attest the enclave. With `model`, first make sure NanoGPT still offers it: the enclave
-        is Tinfoil's router whatever the model, so a retired one would attest."""
+        is Tinfoil's router whatever the model, so a retired one would attest. `fresh`: attested
+        now, whatever attestation is kept (Re-check: `Enclave.current`)."""
         if model:
             await self.check_offered(model)
-        return (await self.enclave.current()).attestation
+        return (await self.enclave.current(fresh)).attestation
 
     async def _read_private_ids(self) -> list[str]:
         """NanoGPT's list of Private Mode models: public, so no key is sent. [] when it can't

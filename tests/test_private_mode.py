@@ -254,6 +254,56 @@ async def test_the_enclave_is_attested_again_after_a_sleep(suspend):
     assert relay.verifies == 2
 
 
+async def test_a_recheck_attests_the_enclave_again_whatever_is_kept():
+    """"Click to re-check" asked for the attestation kept, which is good for five minutes: it
+    showed that one again, and nothing had been checked."""
+    relay = Relay(replies=[(200, TOOL_REPLY)])
+    enclave = Enclave(RELAY, verifier=relay.verifier)
+    client = relay.client(enclave)
+    for _ in range(3):
+        await client.attest("private/glm-5-3")
+    assert relay.verifies == 1                         # kept, for a request
+    kept = enclave.attestation
+    for _ in range(3):
+        assert await client.attest("private/glm-5-3", fresh=True) == verified().attestation
+    assert relay.verifies == 4 and enclave.attestation is not kept
+    await collect(client)                              # and a request goes out under the one just made
+    assert relay.verifies == 4
+
+    def refuses(relay_, secret):
+        raise RuntimeError("measurement mismatch")
+    enclave._verifier = refuses
+    with pytest.raises(PrivateModeError, match="couldn't be attested"):
+        await client.attest("private/glm-5-3", fresh=True)
+    assert enclave.attestation is None                 # one that fails leaves none kept
+
+
+async def test_the_engines_recheck_of_a_private_model_runs_the_verifier_each_time(tmp_path, monkeypatch):
+    from datoolkit import creds
+    from datoolkit.config import Config, Provider
+    from datoolkit.engine import Engine
+
+    relay = Relay()
+    engine = Engine(Config(providers=[Provider("NanoGPT", BASE)]), lambda e: None, tmp_path / "rt", save_config=lambda c: None)
+    creds.set_secret("provider", "NanoGPT", "sk-test")
+    enclave = Enclave(RELAY, verifier=relay.verifier)
+    monkeypatch.setattr(engine, "_client", lambda prov, model="": relay.client(enclave))
+    await engine.start()
+    try:
+        engine.select_model("NanoGPT", "private/glm-5-3")
+        for _ in range(200):
+            if (engine.attestation or {}).get("status") == "verified":
+                break
+            await asyncio.sleep(0.01)
+        assert relay.verifies == 1
+        for n in (2, 3, 4):
+            assert (await engine.attest_now())["status"] == "verified"
+            assert relay.verifies == n
+        assert relay.lists == 1                        # the relay's list is kept as it was
+    finally:
+        await engine.stop()
+
+
 async def test_plain_client_refuses_private_models():
     with pytest.raises(RuntimeError, match="only ever sent sealed"):
         async for _ in LLMClient(BASE, "sk").stream("private/glm-5-3", []):
