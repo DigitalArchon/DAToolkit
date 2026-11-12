@@ -170,6 +170,19 @@ COMPANION_HEADERS = {
 }
 
 
+# On every response of the window's own app. Its page carries its Content-Security-Policy in a meta
+# element, which is the one place frame-ancestors is not honoured: the header says it, so no other
+# page can put this one in a frame, and nothing served here is sniffed into another type or named
+# in a referrer.
+WINDOW_HEADERS = {
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+
+
 class SecurityHeaders:
     """ASGI middleware: `headers` set on every HTTP response, whoever made it."""
 
@@ -247,6 +260,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     # auth above still stands behind it on every route. The one request without the token is the
     # browser's exchange of its one-time code for it (Launches), held to MAX_LAUNCH_BODY.
     app.add_middleware(TokenGate, check=check, limit=window_limit, open_paths=(LAUNCH_PATH,))
+    app.add_middleware(SecurityHeaders, headers=WINDOW_HEADERS)           # outermost: on the gate's refusals too
 
     def auth_companion(request: Request) -> Engine:
         if not companion.check(request.headers.get("x-token")):
@@ -256,7 +270,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     def companion_view(e: Engine) -> dict:
         snap = e.snapshot()
         vision = e.vision_status()
-        return {"case": snap["case"], "chat": snap["chat"][-30:], "queue": snap["queue"], "busy": snap["busy"],
+        # of the case, its name and sensitivity, which is all the phone's page shows: not its notes,
+        # its client or the folder it is kept in
+        case = {k: snap["case"].get(k) for k in ("name", "sensitivity")} if snap["case"] else None
+        return {"case": case, "chat": snap["chat"][-30:], "queue": snap["queue"], "busy": snap["busy"],
                 "photos": {"ok": vision["mode"] != "none", "why": vision.get("why", "")},
                 "hypotheses": snap["hypotheses"], "sessions": [{k: s[k] for k in ("id", "kind", "target", "exited")}
                                                                for s in snap["sessions"]]}
@@ -272,6 +289,13 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     async def bad_value(_: Request, exc: Exception):
         # a field of the wrong type or form in a request ("delta": "up", a port of "22a")
         return JSONResponse({"error": f"Invalid request: {exc}"}, status_code=400)
+
+    def obj(body: dict, key: str) -> dict:
+        """The object a request carries at `key` (a provider, a host): anything else is refused."""
+        value = body.get(key, {})
+        if not isinstance(value, dict):
+            raise ValueError(f"{key} must be an object")
+        return value
 
     for a in (app, comp):
         a.add_exception_handler(UserError, user_error)
@@ -350,6 +374,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         status = body.get("status")
         if status not in ("ran", "skipped", "pending"):
             raise HTTPException(400, "companion can only mark items ran, skipped or pending")
+        if status == "pending" and e.queue.get(num).status == "withdrawn":
+            # "pending" from the phone undoes its own ran or skipped; an item the AI took back is
+            # restored at the computer, where the command is in front of the technician
+            raise UserError(f"#{num} was withdrawn by the AI. Restore it on the computer if it should run after all.")
         e.update_item(num, status=status, note=str(body.get("note", ""))[:200])
         return {"ok": True}
 
@@ -395,7 +423,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                 # the phone never gets config, prompts or credential dialogs: just a refresh cue
                 if getter.result().get("type") in ("state", "queue", "chat", "turn_end", "hypotheses", "turn_start", "sessions"):
                     await ws.send_text(json.dumps({"type": "state", "state": companion_view(app.state.engine)}))
-        except (WebSocketDisconnect, RuntimeError):
+        except (WebSocketDisconnect, RuntimeError, KeyError):     # KeyError: a frame that isn't text
             pass
         finally:
             listeners.discard(q)
@@ -479,7 +507,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/providers")
     async def save_provider(body: dict, e: Engine = Depends(auth)):
-        e.save_provider(body.get("provider", {}), body.get("api_key") or None, body.get("original_name"))
+        e.save_provider(obj(body, "provider"), body.get("api_key") or None, body.get("original_name"))
         return {"ok": True}
 
     @app.delete("/api/providers/{name:path}")
@@ -517,7 +545,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/hosts")
     async def save_host(body: dict, e: Engine = Depends(auth)):
-        e.save_host(body.get("host", {}), body.get("password") or None, body.get("original_name"))
+        e.save_host(obj(body, "host"), body.get("password") or None, body.get("original_name"))
         return {"ok": True}
 
     @app.delete("/api/hosts/{name:path}")
@@ -616,7 +644,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/sessions/{sid}/hint")
     async def session_hint(sid: str, body: dict, e: Engine = Depends(auth)):
-        e.set_session_hint(sid, body.get("os_hint", ""))
+        e.set_session_hint(sid, str(body.get("os_hint") or ""))
         return {"ok": True}
 
     @app.post("/api/queue/{num}")
@@ -864,7 +892,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                     receiver = asyncio.create_task(ws.receive_text())
                     continue
                 await ws.send_text(json.dumps(getter.result(), default=str))
-        except (WebSocketDisconnect, RuntimeError):
+        except (WebSocketDisconnect, RuntimeError, KeyError):     # KeyError: a frame that isn't text
             pass
         finally:
             listeners.discard(q)
@@ -1018,6 +1046,10 @@ def runtime_dir() -> Path:
     # sweep leftovers from instances that were killed before they could clean up
     for d in base.glob("datoolkit-*"):
         pid = d.name.removeprefix("datoolkit-")
-        if pid.isdigit() and not Path(f"/proc/{pid}").exists() and d.owner() == os.environ.get("USER", d.owner()):
+        try:
+            ours = d.stat().st_uid == os.getuid() and not d.is_symlink()
+        except OSError:           # gone meanwhile
+            continue
+        if pid.isdigit() and not Path(f"/proc/{pid}").exists() and ours:
             shutil.rmtree(d, ignore_errors=True)
     return base / f"datoolkit-{os.getpid()}"

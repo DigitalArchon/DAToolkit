@@ -292,9 +292,22 @@ def _qr(url: str) -> str:
     return segno.make(url, error="m").svg_data_uri(scale=6, border=2, dark="#000", light="#fff")
 
 
+def listen_address(ip: str) -> str:
+    """Where the companion listens: the address its codes carry (lan_ip, the default route's), so
+    it is reachable on the local network and not also on whatever else this computer is
+    attached to: a client's VPN, a container bridge, a public address. Until Nov 2026 it
+    listened on every interface. With no address to name (no route: lan_ip gave a host name),
+    every interface, as before."""
+    try:
+        return str(ipaddress.IPv4Address(ip))
+    except ValueError:
+        return "0.0.0.0"
+
+
 class CompanionServer:
     """Runs the companion app (server.app.create_app builds it) on the event loop it is started
-    from, on 0.0.0.0:`port` over TLS. The phones paired with it are forgotten when it stops."""
+    from, on this computer's local-network address (listen_address) and `port`, over TLS. The
+    phones paired with it are forgotten when it stops."""
 
     def __init__(self, app, directory: Path):
         self.app = app
@@ -352,10 +365,11 @@ class CompanionServer:
             await self.stop()
         self.ip = lan_ip()
         cert, key = ensure_cert(self.directory, self.ip)
+        address = listen_address(self.ip)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind(("0.0.0.0", port))
+            sock.bind((address, port))
         except OSError as e:
             sock.close()
             if e.errno == errno.EADDRINUSE:
