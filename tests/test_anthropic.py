@@ -436,3 +436,165 @@ async def test_saying_it_will_look_something_up_before_a_native_search_is_no_pro
     await wait_turn(engine)
     assert len(fake.requests) == 1                     # no "you promised commands" nudge
     assert engine.chat[-1]["text"] == "I'll look up the current release.\n\nThe newest release is 26.7.7."
+
+
+# ---------------------------------------------------------------- the newest models, and ones not yet named
+
+@pytest.mark.parametrize("model", ["claude-fable-5-2", "claude-mythos-5-2", "claude-opus-9"])
+async def test_a_model_newer_than_the_tables_gets_the_append_only_request(aenv, model):
+    """Claude Fable 5.2 and Mythos 5.2 refuse an edited history for every account, and a model
+    this module has never heard of is taken for one as strict: the state as a turn-scoped system
+    message kept in place, the history check set to drop, and no sampling settings. None of
+    the three is in the fake's model list, so nothing is known of them but the id."""
+    engine, fake = aenv
+    sid = await start(engine)
+    engine.select_model("Anthropic", model)
+    assert engine.cfg.settings.generation["temperature"] == 0.3            # a setting these models refuse
+    fake.replies.append(_sse([{"type": "thinking", "thinking": "Disk first.", "signature": "SIG1"},
+                              {"type": "text", "text": "Checking disk space."}, propose(sid)], stop="tool_use", model=model))
+    engine.send("server is slow")
+    await wait_turn(engine)
+    assert engine.chat[-1]["proposals"] == [1], engine.chat[-1]
+    engine.queue.update(1, status="ran")
+    fake.replies.append(_sse([{"type": "text", "text": "The disk is fine."}], model=model))
+    engine.send("", results=[{"num": 1, "text": "/dev/sda1 40% used"}])
+    await wait_turn(engine)
+    first, second = fake.requests
+    for body, headers in zip((first, second), fake.headers):
+        assert body["model"] == model
+        assert body["thinking"] == {"type": "adaptive", "display": "summarized",
+                                    "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+        assert "temperature" not in body and "top_p" not in body
+        betas = set(headers["anthropic-beta"].split(","))
+        assert {anthropic_api.THINKING_BETA, anthropic_api.CLEAR_AT_BETA} <= betas
+        assert not any(b.get("text", "").startswith(prompts.STATE_HEADER)        # never as text in a user turn
+                       for m in body["messages"] if m["role"] == "user" for b in m["content"])
+    state = first["messages"][-1]
+    assert state["role"] == "system" and state["clear_at"] == "next_user_message"
+    assert state["content"].startswith(prompts.STATE_HEADER)
+    # the first user turn, byte for byte, cache breakpoints aside (they move with the conversation)
+    strip = anthropic_api._strip
+    assert json.dumps(strip(second["messages"][0]), sort_keys=True) == json.dumps(strip(first["messages"][0]), sort_keys=True)
+    assert second["system"][0]["text"] == first["system"][0]["text"] and second["tools"] == first["tools"]
+    # ... and so is everything else the first request sent: its state stays where it was, and
+    # the thinking block goes back as it came
+    assert strip(second["messages"][:len(first["messages"])]) == strip(first["messages"])
+    assert second["messages"][len(first["messages"]) - 1] == state
+    assert second["messages"][len(first["messages"])]["content"][0] == {"type": "thinking", "thinking": "Disk first.",
+                                                                        "signature": "SIG1"}
+    assert second["messages"][-1]["role"] == "system" and second["messages"][-1]["clear_at"] == "next_user_message"
+    assert second["messages"][-1]["content"] != state["content"]
+    # the refusal fallback only where the reference lists it: not for a model it doesn't name
+    assert (first.get("fallbacks") == "default") == (model != "claude-opus-9")
+
+
+def test_the_tables_name_the_52_models_and_an_unnamed_model_is_a_new_one():
+    mode, has, tables = anthropic_api.state_mode, anthropic_api._model_is, anthropic_api
+    for new in ("claude-fable-5-2", "claude-mythos-5-2", "anthropic/claude-fable-5.2"):
+        assert mode(new, True) == "clear_at"
+        for table in (tables.CLEAR_AT_MODELS, tables.NO_SAMPLING_MODELS, tables.DYNAMIC_SEARCH_MODELS,
+                      tables.FALLBACK_MODELS, tables.ADAPTIVE_MODELS):
+            assert has(new, *table), (new, table)
+    # as the reference lists them (Nov 2026): dynamic search on every Fable and Mythos, not Haiku 5.5;
+    # the refusal fallback not on Haiku 5.5 (it has none) or Mythos 5 (it declines nothing)
+    assert tables.web_search_tool("claude-mythos-5-1")["type"] == "web_search_20260209"
+    assert tables.web_search_tool("claude-haiku-5-5")["type"] == "web_search_20250305"
+    assert has("claude-mythos-5-1", *tables.FALLBACK_MODELS) and has("claude-fable-5", *tables.FALLBACK_MODELS)
+    assert not has("claude-haiku-5-5", *tables.FALLBACK_MODELS) and not has("claude-mythos-5", *tables.FALLBACK_MODELS)
+    assert not has("claude-sonnet-5", *tables.CLEAR_AT_MODELS) and has("claude-haiku-5-5", *tables.CLEAR_AT_MODELS)
+    # a model no table names: the newest shape on Anthropic's endpoint, the plain one anywhere else
+    for unknown in ("claude-opus-9", "claude-fable-6-20270301", "claude-haiku-6-5", "anthropic/claude-sonnet-7.1"):
+        assert tables._unnamed(unknown) and mode(unknown, True) == "clear_at" and mode(unknown, False) == "user"
+        assert tables._adaptive(unknown, None) and tables._efforts(unknown, None) == ["low", "medium", "high", "xhigh", "max"]
+        assert tables.web_search_tool(unknown)["type"] == "web_search_20250305"
+    # the models named as older keep the older shape, however their id is written
+    for old in ("claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
+                "claude-opus-4-5-20251101", "claude-sonnet-4-5", "claude-opus-4-1-20250805", "claude-sonnet-4-20250514",
+                "claude-3-7-sonnet-20250219", "claude-3-5-haiku-latest", "claude-3-opus-20240229", "claude-2.1",
+                "claude-instant-1.2", "claude-mythos-preview"):
+        assert not tables._unnamed(old) and mode(old, True) == "user", old
+    assert not tables._unnamed("kimi-k3") and not tables._unnamed("moonshot/kimi-claude-like")
+
+
+def test_an_unnamed_model_keeps_its_sampling_settings_only_off_anthropics_endpoint():
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"},
+            {"role": "system", "content": prompts.STATE_HEADER + "\n\nstate", "_state": True}]
+    params = {"temperature": 0.3, "top_p": 0.9, "reasoning_effort": "medium"}
+    kwargs, extra, _ = anthropic_api.AnthropicClient(OFFICIAL, "k").request("claude-opus-9", msgs, params=params)
+    assert "temperature" not in extra["extra_body"] and "top_p" not in extra["extra_body"]
+    assert extra["extra_body"]["output_config"] == {"effort": "medium"} and "fallbacks" not in extra["extra_body"]
+    # what the model list said of it is believed: one listed as not thinking gets no thinking, and still no sampling
+    listed = anthropic_api.AnthropicClient(OFFICIAL, "k", caps={"claude-opus-9": {"adaptive": False, "efforts": []}})
+    kwargs, extra, _ = listed.request("claude-opus-9", msgs, params=params)
+    assert "thinking" not in kwargs and "temperature" not in extra["extra_body"]
+    assert kwargs["messages"][-1]["clear_at"] == "next_user_message"
+    kwargs, extra, _ = anthropic_api.AnthropicClient(COMPAT, "k").request("claude-opus-9", msgs, params=params)
+    assert extra["extra_body"]["temperature"] == 0.3 and "thinking" not in kwargs and not extra["extra_headers"]
+    assert kwargs["messages"][-1]["role"] == "user"
+    # a model named as older, on Anthropic's endpoint: as before
+    kwargs, extra, _ = anthropic_api.AnthropicClient(OFFICIAL, "k").request("claude-haiku-4-5", msgs, params=params)
+    assert extra["extra_body"]["temperature"] == 0.3 and kwargs["messages"][-1]["role"] == "user"
+
+
+async def test_a_case_that_changes_models_sends_every_turn_back_as_it_was(aenv):
+    """Fable 5.1 -> Fable 5.2 -> Opus 5.5 -> Sonnet 5 (no turn-scoped messages) -> Fable 5.2. Every
+    block goes back unchanged whoever wrote it (the API drops what the model asked can't read:
+    no earlier model reads Fable 5.2's thinking), and what an append-only model is sent never
+    differs from what the append-only model before it was sent."""
+    engine, fake = aenv
+    await start(engine)
+    strip = anthropic_api._strip
+
+    async def turn(model, text, signature):
+        engine.select_model("Anthropic", model)
+        fake.replies.append(_sse([{"type": "thinking", "thinking": "t", "signature": signature},
+                                  {"type": "text", "text": f"Answer from {model}."}], model=model))
+        engine.send(text)
+        await wait_turn(engine)
+        assert engine.chat[-1]["text"] == f"Answer from {model}.", engine.chat[-1]
+        return fake.requests[-1]
+
+    def signatures(body):
+        return [b["signature"] for m in body["messages"] if m["role"] == "assistant" for b in m["content"]
+                if b["type"] == "thinking"]
+
+    r1 = await turn("claude-fable-5-1", "one", "SIG-51")
+    r2 = await turn("claude-fable-5-2", "two", "SIG-52")
+    r3 = await turn(OPUS, "three", "SIG-OPUS")
+    assert signatures(r2) == ["SIG-51"] and signatures(r3) == ["SIG-51", "SIG-52"]       # Fable 5.2's too: the API drops it
+    for earlier, later in ((r1, r2), (r2, r3)):
+        assert later["system"] == earlier["system"] and later["tools"] == earlier["tools"]
+        assert strip(later["messages"][:len(earlier["messages"])]) == strip(earlier["messages"])
+        assert later["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
+    # Sonnet 5 takes no system message in the conversation: the states leave it, the newest goes
+    # as user text, and it isn't opted into a history check its own rendering would fail
+    r4 = await turn("claude-sonnet-5", "four", "SIG-SONNET")
+    assert all(m["role"] != "system" for m in r4["messages"]) and "block_binding" not in r4["thinking"]
+    assert r4["messages"][-1]["content"][-1]["text"].startswith(prompts.STATE_HEADER)
+    assert signatures(r4) == ["SIG-51", "SIG-52", "SIG-OPUS"]
+    # back on Fable 5.2: the turns it and the others answered are as they were sent then
+    r5 = await turn("claude-fable-5-2", "five", "SIG-52b")
+    assert strip(r5["messages"][:len(r3["messages"])]) == strip(r3["messages"])
+    assert r5["messages"][-1]["clear_at"] == "next_user_message"
+    assert signatures(r5)[:3] == ["SIG-51", "SIG-52", "SIG-OPUS"]
+    # Sonnet 5's turn was answered under a state sent as user text, which is not in this rendering:
+    # what came before its thinking has changed, so that block is left out (text and all else stays)
+    assert "SIG-SONNET" not in signatures(r5)
+    assert any(b.get("text") == "Answer from claude-sonnet-5." for m in r5["messages"] if m["role"] == "assistant"
+               for b in m["content"])
+
+
+def test_another_vendors_thinking_is_not_sent_to_anthropic():
+    """A turn a model of an Anthropic-compatible endpoint wrote carries that vendor's signature;
+    Anthropic refuses one it can't read, whatever the history check is set to."""
+    def conv(wrote):
+        return [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Hello.", "native": {"api": "anthropic", "model": wrote, "prefix_sha": "", "content": [
+                    {"type": "thinking", "thinking": "hm", "signature": "THEIRS"}, {"type": "text", "text": "Hello."}]}},
+                {"role": "user", "content": "and?"}]
+    _, out, _, _ = anthropic_api.render(conv("kimi-k3"), "claude-fable-5-2", True, [])
+    assert out[1]["content"] == [{"type": "text", "text": "Hello."}]
+    _, out, _, _ = anthropic_api.render(conv("claude-opus-5-5"), "claude-fable-5-2", True, [])
+    assert out[1]["content"][0]["signature"] == "THEIRS"
+    _, out, _, _ = anthropic_api.render(conv("kimi-k3"), "kimi-k3", False, [])            # its own endpoint: as it came
+    assert out[1]["content"][0]["signature"] == "THEIRS"

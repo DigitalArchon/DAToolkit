@@ -20,7 +20,8 @@ an edit to that history invalidates every later block. So:
   conversation as a turn-scoped system message (clear_at "next_user_message") that is stored
   with the turn that answered it ("state_before") and sent again, verbatim, every time after:
   once a later user message exists it renders nothing and costs nothing, but nothing before a
-  thinking block ever changes. Models without those messages get the state as a trailing user
+  thinking block ever changes. Models without those messages (the older ones the tables below
+  name, and any model of an Anthropic-compatible endpoint) get the state as a trailing user
   message, rebuilt each request, as through NanoGPT; they don't check the history;
 - a thinking block whose history did change since it was written (a compaction, a removed
   exchange, an edited system prompt) is left out, as the API's own check would: each turn
@@ -28,6 +29,21 @@ an edit to that history invalidates every later block. So:
   request asks the API to drop, not refuse, any block that still fails its check
   (prefix_mismatch_behavior "drop_block"). Models without turn-scoped messages get neither: they
   don't run the check, and opting them into it would drop their reasoning every request.
+
+**A model the tables don't name is taken for a new one.** Each generation has been stricter than
+the last (Claude Fable 5.2 and Mythos 5.2 run the history check for every account and refuse an
+edited history outright), so on Anthropic's own endpoint a `claude-` id this module has never
+heard of gets what the newest models need: the append-only history with its turn-scoped state,
+"drop_block", adaptive thinking and no sampling settings. Until Nov 2026 it got the oldest shape,
+and Fable 5.2, not yet in the tables, was refused on its second request. Only the models named
+as older keep the older shape.
+
+**A case may change models.** The blocks of every turn go back whoever wrote them: the API drops,
+unbilled, a thinking block the model now asked can't read (no model released before Fable 5.2
+reads Fable 5.2's, so a move from it to Opus 5.5 or Fable 5.1 runs on without that reasoning; a
+move onto it keeps the earlier models' reasoning). A turn another vendor's model wrote on an
+Anthropic-compatible endpoint is the exception: its thinking blocks carry a signature Anthropic
+can't read at all, which is a refusal whatever is asked for, so they are left out.
 """
 
 from __future__ import annotations
@@ -60,27 +76,56 @@ NATIVE_SEARCH_MAX = 4        # Anthropic's searches per request (Engine.MAX_SEAR
 _THINKING_TYPES = ("thinking", "redacted_thinking")
 
 
+def _bare(model: str) -> str:
+    """A model id without a proxy's "anthropic/" prefix, dots as dashes."""
+    return model.split("/")[-1].lower().replace(".", "-")
+
+
 def _model_is(model: str, *names: str) -> bool:
     """Whether `model` (an id, perhaps behind a proxy's "anthropic/" prefix or with a date) is one
     of `names` ("opus-5-5", "sonnet-5"...)."""
-    bare = model.split("/")[-1].lower().replace(".", "-")
+    bare = _bare(model)
     return any(re.fullmatch(rf"claude-{re.escape(n)}(-\d{{8}})?", bare) for n in names)
 
 
+# The tables follow Anthropic's model reference as of Nov 2026 (Claude Fable 5.2 and Mythos 5.2 the
+# newest). Each names the models that have a feature; a model in none of them is in OLDER_MODELS.
+
 # Mid-conversation system messages, and their turn-scoped (clear_at) form
-CLEAR_AT_MODELS = ("opus-4-8", "opus-5", "opus-5-5", "fable-5", "fable-5-1", "mythos-5", "mythos-5-1", "sonnet-5-5",
-                   "haiku-5-5")
+CLEAR_AT_MODELS = ("opus-4-8", "opus-5", "opus-5-5", "fable-5", "fable-5-1", "fable-5-2", "mythos-5", "mythos-5-1",
+                   "mythos-5-2", "sonnet-5-5", "haiku-5-5")
 # temperature / top_p are refused (or only their defaults accepted)
-NO_SAMPLING_MODELS = ("opus-4-7", "opus-4-8", "opus-5", "opus-5-5", "fable-5", "fable-5-1", "mythos-5", "mythos-5-1",
-                      "sonnet-5", "sonnet-5-5", "haiku-5-5")
-# web search with dynamic filtering; other Claude models take the basic version
+NO_SAMPLING_MODELS = ("opus-4-7", "opus-4-8", "opus-5", "opus-5-5", "fable-5", "fable-5-1", "fable-5-2", "mythos-5",
+                      "mythos-5-1", "mythos-5-2", "sonnet-5", "sonnet-5-5", "haiku-5-5")
+# web search with dynamic filtering; other Claude models (Haiku 5.5 among them) take the basic version
 DYNAMIC_SEARCH_MODELS = ("opus-4-6", "opus-4-7", "opus-4-8", "opus-5", "opus-5-5", "sonnet-4-6", "sonnet-5", "sonnet-5-5",
-                         "fable-5", "fable-5-1")
-# the server-side refusal fallback, routed by the refusal's category ("default")
-FALLBACK_MODELS = ("opus-5", "opus-5-5", "fable-5-1", "sonnet-5-5")
+                         "fable-5", "fable-5-1", "fable-5-2", "mythos-5", "mythos-5-1", "mythos-5-2")
+# the server-side refusal fallback, routed by the refusal's category ("default"). Not Haiku 5.5,
+# which has none (a declined request stays declined), nor Mythos 5, which declines nothing.
+FALLBACK_MODELS = ("opus-5", "opus-5-5", "sonnet-5-5", "fable-5", "fable-5-1", "fable-5-2", "mythos-5-1", "mythos-5-2")
 # adaptive thinking, when the model list didn't say
 ADAPTIVE_MODELS = ("opus-4-6", "opus-4-7", "opus-4-8", "opus-5", "opus-5-5", "sonnet-4-6", "sonnet-5", "sonnet-5-5",
-                   "haiku-5-5", "fable-5", "fable-5-1", "mythos-5", "mythos-5-1")
+                   "haiku-5-5", "fable-5", "fable-5-1", "fable-5-2", "mythos-5", "mythos-5-1", "mythos-5-2")
+# models with none of the above: thinking by a token budget or none, sampling settings accepted
+OLDER_MODELS = ("haiku-4-5", "opus-4-5", "sonnet-4-5", "opus-4-1", "opus-4", "opus-4-0", "sonnet-4", "sonnet-4-0",
+                "mythos-preview")
+_NAMED_MODELS = frozenset(CLEAR_AT_MODELS + NO_SAMPLING_MODELS + DYNAMIC_SEARCH_MODELS + FALLBACK_MODELS
+                          + ADAPTIVE_MODELS + OLDER_MODELS)
+# Claude 3 and before ("claude-3-5-sonnet-20241022", "claude-2.1", "claude-instant-1.2"): the version came first
+_OLD_NAMING = re.compile(r"claude-(\d|instant)")
+
+
+def _unnamed(model: str) -> bool:
+    """Whether `model` is a Claude model none of the tables names: one released after they were
+    written, which is given what the newest models need (the module's docstring says why)."""
+    bare = _bare(model)
+    return bare.startswith("claude-") and not _OLD_NAMING.match(bare) and not _model_is(model, *_NAMED_MODELS)
+
+
+def _has(model: str, table: tuple[str, ...]) -> bool:
+    """Whether a model of Anthropic's own endpoint has the feature `table` lists: it is named
+    there, or it is newer than the tables."""
+    return _model_is(model, *table) or _unnamed(model)
 
 
 def is_claude(model: str) -> bool:
@@ -90,10 +135,12 @@ def is_claude(model: str) -> bool:
 def state_mode(model: str, official: bool) -> str:
     """How the case's state goes with a request: "clear_at" (a turn-scoped system message, kept
     in the history) or "user" (a trailing user message, rebuilt each time)."""
-    return "clear_at" if official and _model_is(model, *CLEAR_AT_MODELS) else "user"
+    return "clear_at" if official and _has(model, CLEAR_AT_MODELS) else "user"
 
 
 def web_search_tool(model: str, max_uses: int = NATIVE_SEARCH_MAX) -> dict:
+    """Anthropic's own search, in the version the model takes. A model the tables don't name gets
+    the basic one, which every model so far has taken."""
     kind = "web_search_20260209" if _model_is(model, *DYNAMIC_SEARCH_MODELS) else "web_search_20250305"
     return {"type": kind, "name": "web_search", "max_uses": max_uses}
 
@@ -122,7 +169,7 @@ def _efforts(model: str, caps: dict | None) -> list[str]:
         return ["low", "medium", "high"]
     if _model_is(model, "opus-4-6", "sonnet-4-6"):
         return ["low", "medium", "high", "max"]
-    if _model_is(model, *ADAPTIVE_MODELS):
+    if _has(model, ADAPTIVE_MODELS):
         return ["low", "medium", "high", "xhigh", "max"]
     return []
 
@@ -130,7 +177,7 @@ def _efforts(model: str, caps: dict | None) -> list[str]:
 def _adaptive(model: str, caps: dict | None) -> bool:
     if caps is not None and "adaptive" in caps:
         return bool(caps["adaptive"])
-    return _model_is(model, *ADAPTIVE_MODELS)
+    return _has(model, ADAPTIVE_MODELS)
 
 
 def _tool_id(raw: str) -> str:
@@ -200,6 +247,14 @@ def native_blocks(m: dict) -> list[dict] | None:
     if isinstance(native, dict) and native.get("api") == "anthropic" and isinstance(native.get("content"), list):
         return native["content"]
     return None
+
+
+def _foreign(m: dict) -> bool:
+    """Whether another vendor's model wrote this turn, on an Anthropic-compatible endpoint (the
+    turn records its model). Its thinking blocks are signed by that vendor: Anthropic refuses a
+    signature it can't read, whatever prefix_mismatch_behavior says."""
+    wrote = str((m.get("native") or {}).get("model") or "")
+    return bool(wrote) and not is_claude(wrote)
 
 
 def after_fallback(blocks: list[dict]) -> list[dict]:
@@ -277,6 +332,8 @@ def render(messages: list[dict], model: str, official: bool, tools: list[dict], 
                 out.append({"role": "system", "content": m["state_before"], "clear_at": "next_user_message"})
             native = native_blocks(m)
             blocks = [dict(b) for b in native] if native is not None else _plain_assistant(m)
+            if native is not None and official and _foreign(m):
+                blocks = [b for b in blocks if b.get("type") not in _THINKING_TYPES]
             if native is not None and mode == "clear_at" and (m.get("native") or {}).get("prefix_sha"):
                 if m["native"]["prefix_sha"] != _sha(sys_text(), tools, _finished(out)):
                     blocks = [b for b in blocks if b.get("type") not in _THINKING_TYPES]
@@ -437,7 +494,7 @@ class AnthropicClient:
         levels = _efforts(model, caps) if official else []
         if effort and levels:
             extra["output_config"] = {"effort": nearest_effort("low" if effort in ("none", "minimal") else effort, levels)}
-        if not thinking and not _model_is(model, *NO_SAMPLING_MODELS):
+        if not thinking and not (_has(model, NO_SAMPLING_MODELS) if official else _model_is(model, *NO_SAMPLING_MODELS)):
             for key in ("temperature", "top_p"):     # no longer arguments of the SDK's stream(): sent as they are
                 if params.get(key) is not None:
                     extra[key] = params[key]

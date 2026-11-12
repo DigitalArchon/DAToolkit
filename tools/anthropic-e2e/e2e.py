@@ -1,11 +1,17 @@
 """End-to-end check of DA Toolkit's Anthropic path against the live API, through the Engine.
 
-    .venv/bin/python -I tools/anthropic-e2e/e2e.py [core native haiku-search gated vision models claude-<id> ...]
+    .venv/bin/python -I tools/anthropic-e2e/e2e.py [core fable switch native haiku-search gated vision models claude-<id> ...]
+
+"fable" is the whole core scenario on Claude Fable 5.2, which refuses an edited history for every
+account; "switch" moves one case Fable 5.1 -> Fable 5.2 -> Opus 5.5 -> Sonnet 5 -> Fable 5.2; and
+a claude-<id> runs the two-request tool loop on that model (claude-mythos-5-2, for an organisation
+that has it).
 
 Throwaway config/data dirs (next to this file); the keyring's "Anthropic" key, and "NanoGPT"'s
 for the gated search. Strict mode: prefix_mismatch_behavior "error", so any edit to an
 append-only history fails the request instead of being dropped quietly. Every scenario is
-real spend: about US$1.70 for all of them (Oct 2026), printed at the end."""
+real spend: about US$1.70 for all of them (Oct 2026; "fable" and "switch" came after and add
+to it), printed at the end."""
 
 import asyncio
 import base64
@@ -32,7 +38,8 @@ anthropic_api.PREFIX_MISMATCH = "error"
 ONLY = set(sys.argv[1:])
 
 # $ per million tokens: input, output, cache read; a 1-hour cache write is 2x input
-PRICES = {"claude-fable-5-1": (10, 50, 0.25), "claude-opus-5-5": (4, 20, 0.20), "claude-opus-5": (5, 25, 0.5),
+PRICES = {"claude-fable-5-2": (8, 40, 0.20), "claude-mythos-5-2": (8, 40, 0.20), "claude-fable-5-1": (10, 50, 0.25),
+          "claude-opus-5-5": (4, 20, 0.20), "claude-opus-5": (5, 25, 0.5),
           "claude-opus-4-8": (5, 25, 0.5), "claude-opus-4-6": (5, 25, 0.5), "claude-opus-4-5": (5, 25, 0.5),
           "claude-sonnet-5-5": (2, 10, 0.2), "claude-sonnet-5": (2, 10, 0.2), "claude-sonnet-4-6": (3, 15, 0.3),
           "claude-haiku-5-5": (0.1, 0.5, 0.01), "claude-haiku-4-5": (1, 5, 0.1)}
@@ -274,7 +281,48 @@ async def scenario_vision(model="claude-opus-5-5"):
         await eng.stop()
 
 
-MODELS = ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-opus-4-8",
+SWITCHES = ["claude-fable-5-1", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5", "claude-fable-5-2"]
+
+
+async def scenario_switch(models=SWITCHES):
+    """One case answered by several models in turn, in strict mode: every block goes back as it
+    came (the API drops, without failing, the thinking a model can't read: no earlier model reads
+    Fable 5.2's), and nothing an append-only model was sent may have changed since."""
+    print(f"\n== one case, the model changed each turn: {' -> '.join(models)}", flush=True)
+    eng = make_engine()
+    await eng.start()
+    try:
+        await eng.list_models("Anthropic")
+        eng.new_case("e2e switch", "open")
+        eng.save_settings({"search_mode": "off"})
+        eng.open_session("local")
+        nums: list[int] = []
+        for i, model in enumerate(models):
+            eng.select_model("Anthropic", model)
+            if i == 0:
+                entry, sent = await turn(eng, f"turn 1 ({model})", message=(
+                    "This machine (the local session) has its root filesystem nearly full. Queue two read-only "
+                    "commands to find what uses the space, and keep your message short."))
+                nums = (entry or {}).get("proposals", [])[:2]
+            elif i == 1 and nums:
+                entry, sent = await turn(eng, f"turn 2 ({model}, results of the other model's commands)", message="",
+                                         results=ran(eng, nums, FAKE_OUT[:len(nums)]))
+            else:
+                entry, sent = await turn(eng, f"turn {i + 1} ({model})",
+                                         message=f"In one line: what would you check next? (question {i + 1})")
+            if not entry:
+                return
+            body = sent[0]["body"]
+            mode = anthropic_api.state_mode(model, True)
+            check(f"turn {i + 1}: sent to {model}, state as {mode}", body["model"] == model and (
+                (body["messages"][-1]["role"] == "system") if mode == "clear_at"
+                else all(m["role"] != "system" for m in body["messages"])))
+            print(f"    info: turn {i + 1} sent back {thinking_blocks(body)} thinking block(s) with signatures")
+    finally:
+        await eng.stop()
+
+
+MODELS = ["claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-opus-4-8",
           "claude-sonnet-5", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-opus-4-5-20251101"]
 
 
@@ -299,6 +347,10 @@ async def main():
     assert creds.get_secret("provider", "Anthropic"), "no Anthropic key in the keyring"
     if not ONLY or "core" in ONLY:
         await scenario_core()
+    if not ONLY or "fable" in ONLY:
+        await scenario_core("claude-fable-5-2")
+    if not ONLY or "switch" in ONLY:
+        await scenario_switch()
     if not ONLY or "native" in ONLY:
         await scenario_native_search()
     if not ONLY or "native" in ONLY or "haiku-search" in ONLY:
