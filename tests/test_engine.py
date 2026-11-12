@@ -296,7 +296,6 @@ def test_prompt_host():
 
     assert prompt_host("bob@web01.lan's password: ") == "web01.lan"
     assert prompt_host("(bob@jump) Password: ") == "jump"
-    assert prompt_host("Password for me@10.0.0.5:") == "10.0.0.5"
     assert prompt_host("me@[fe80::1]'s password:") == "fe80::1"
     assert prompt_host("Password:") == ""
     # OpenSSH writes IPv6 unbracketed; a user name may hold an @ (Kerberos/NTLM: bob@corp.com)
@@ -304,8 +303,89 @@ def test_prompt_host():
     assert prompt_host("bob@2001:db8::5's password: ") == "2001:db8::5"
     assert prompt_host("Password for bob@corp.com@winsrv.corp.com (WinRM): ") == "winsrv.corp.com"
     assert prompt_host("(bob@corp.com@web01.lan) Password: ") == "web01.lan"
-    assert prompt_host("RDP password for bob@127.0.0.1") == "127.0.0.1"
     assert prompt_host("Enter passphrase for key '/home/bob@corp/.ssh/id': ") == ""
+    assert prompt_host("Enter bob@web01.lan's old password: ") == "web01.lan"       # a password being changed
+    assert prompt_host("bob@[fd00::10]'s password: ") == "fd00::10"
+    assert prompt_host("(bob@fd00::10) Password: ") == "fd00::10"
+    # After ssh's "(user@host) " comes text the server chose: the asking host is the one in the
+    # prefix, whatever the text names. Without the prefix only ssh's own whole prompt names a host
+    # (and the WinRM console's): a host somewhere in other text is nobody's word.
+    assert prompt_host("(me@bastion) bob@inner.lan's password: ") == "bastion"
+    assert prompt_host("(me@bastion) Password for bob@inner.lan (WinRM): ") == "bastion"
+    assert prompt_host("(me@bastion) (bob@inner.lan) Password: ") == "bastion"
+    assert prompt_host("(maintenance) bob@inner.lan's password: ") == ""
+    assert prompt_host("Password for me@10.0.0.5:") == ""
+    assert prompt_host("RDP password for bob@127.0.0.1") == ""
+    assert prompt_host("Welcome to bastion. bob@inner.lan's password: ") == ""
+    assert prompt_host("bob@inner.lan's password: \nreally") == ""
+
+
+async def test_a_jump_host_cant_ask_for_the_targets_saved_password(env, monkeypatch):
+    from datoolkit.sessions import ssh as ssh_mod
+    engine, _, events = env
+    engine.new_case("x", "open")
+    engine.cfg.hosts.append(Host("inner", "ssh", "inner.lan", user="bob", auth="password", jump="me@bastion"))
+    creds.set_secret("host", "inner", "inner-pw")
+    sess = engine.sessions.spawn("inner", ["/bin/cat"], {}, name="inner", kind="ssh", host_name="inner")
+    # the bastion's keyboard-interactive prompt: ssh's "(user@host) ", then text the bastion chose
+    for text in ("(me@bastion) bob@inner.lan's password: ", "(me@bastion) (bob@inner.lan) Password: ",
+                 "(me@bastion) Password for bob@inner.lan (WinRM): "):
+        events.clear()
+        task = asyncio.create_task(engine._askpass("inner", text, "askpass"))
+        prompt = await prompt_of(events)                # shown to the technician, who sees who asks
+        assert prompt["text"] == text.strip() and prompt["can_save"] is False, text
+        engine.answer_prompt(prompt["id"], None)
+        assert await task is None and not sess.used_stored_password
+    # the target's own, through keyboard-interactive or password authentication
+    for text in ("(bob@inner.lan) Password: ", "bob@inner.lan's password: ", "(bob@INNER.LAN.) password: "):
+        sess.used_stored_password = False
+        assert await engine._askpass("inner", text, "askpass") == "inner-pw", text
+    # an OpenSSH that doesn't mark a server's text (before 8.4): any prompt may be the bastion's
+    monkeypatch.setattr(ssh_mod, "marks_server_text", lambda: False)
+    for text in ("bob@inner.lan's password: ", "(bob@inner.lan) Password: "):
+        sess.used_stored_password = False
+        events.clear()
+        task = asyncio.create_task(engine._askpass("inner", text, "askpass"))
+        prompt = await prompt_of(events)
+        assert prompt["can_save"] is False, text
+        engine.answer_prompt(prompt["id"], None)
+        assert await task is None
+
+
+async def test_a_jump_host_of_the_targets_own_name_gets_no_saved_password(env):
+    engine, _, events = env
+    engine.new_case("x", "open")
+    # another port of the bastion: its prompts and the target's name the same host
+    engine.cfg.hosts.append(Host("fwd", "ssh", "gw.lan", port=2222, user="bob", auth="password", jump="me@GW.lan:22"))
+    creds.set_secret("host", "fwd", "fwd-pw")
+    engine.sessions.spawn("fwd", ["/bin/cat"], {}, name="fwd", kind="ssh", host_name="fwd")
+    task = asyncio.create_task(engine._askpass("fwd", "(me@gw.lan) Password: ", "askpass"))
+    prompt = await prompt_of(events)
+    assert prompt["can_save"] is False
+    engine.answer_prompt(prompt["id"], None)
+    assert await task is None
+
+
+def test_jump_hosts_and_the_ssh_version(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    from datoolkit.sessions import ssh as ssh_mod
+    assert ssh_mod.jump_hosts("me@Bastion:2222, ssh://x@[FD00::1]:22,10.0.0.1,a@b@gw.lan.") == {
+        "bastion", "fd00::1", "10.0.0.1", "gw.lan"}
+    assert ssh_mod.jump_hosts("") == set()
+    for banner, marks in (("OpenSSH_9.6p1 Ubuntu-3ubuntu13.20, OpenSSL 3.0.13", True), ("OpenSSH_8.4p1", True),
+                          ("OpenSSH_8.2p1 Ubuntu-4ubuntu0.13", False), ("OpenSSH_10.0p2", True), ("Dropbear v2024.86", False)):
+        ssh_mod.marks_server_text.cache_clear()
+        monkeypatch.setattr(subprocess, "run", lambda argv, banner=banner, **k: SimpleNamespace(stderr=banner + "\n", stdout=""))
+        assert ssh_mod.marks_server_text() is marks, banner
+    ssh_mod.marks_server_text.cache_clear()
+
+    def missing(argv, **k):
+        raise FileNotFoundError("ssh")
+    monkeypatch.setattr(subprocess, "run", missing)
+    assert ssh_mod.marks_server_text() is True          # no ssh: nothing prompts
+    ssh_mod.marks_server_text.cache_clear()
 
 
 async def test_askpass_answers_a_user_at_domain_or_ipv6_host_from_the_keyring(env):

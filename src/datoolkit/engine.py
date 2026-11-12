@@ -166,15 +166,38 @@ def _turn_summary(entry: dict) -> str:
     return "; ".join(parts) or "tool calls recorded"
 
 
-# the host a credential prompt names: "bob@web01.lan's password:", "(bob@jump) Password:", "me@[::1]'s password:",
-# "Password for bob@corp.com@fd00::10 (WinRM):" (after the last @; IPv6 unbracketed, as OpenSSH writes it)
-_PROMPT_HOST = re.compile(r"@(\[[^\]]+\]|[^\s'()@\[]+?)(?=:?(?:'s\b|\)|\s|$))")
+# The host asking for a credential, read only from text no server can write. Until Nov 2026 it
+# was the last "@host" anywhere in the prompt, and a jump host, which chooses the text of its own
+# keyboard-interactive prompt, could end it with the target's name and be handed the target's
+# saved password. OpenSSH (8.4 and later) puts "(user@host) " of the server that is asking before
+# such text, so there the host is the one in that prefix and nothing after it counts. Without the
+# prefix only prompts that are OpenSSH's own from the first character to the last name a host
+# ("bob@web01.lan's password: ", and the same when a password is being changed), and the one
+# the WinRM console writes ("Password for bob@corp.com@fd00::10 (WinRM):"). A user name may hold
+# an @; IPv6 is unbracketed, as OpenSSH writes it, or bracketed.
+_HOST = r"(\[[^\]\s]+\]|[^\s'()@\[\]]+)"
+_SERVER_TEXT = re.compile(rf"\(\S+@{_HOST}\) ")                 # ssh's prefix to text a server chose
+_OWN_PROMPTS = (re.compile(rf"(?:Enter |Retype )?\S+@{_HOST}'s (?:old |new )?password:\s*"),
+                re.compile(rf"Password for .*@{_HOST} \(WinRM\):\s*"))
+# any "@host" in a prompt, wherever it stands: enough to hold a password back, never to release one
+_MENTIONED_HOST = re.compile(r"@(\[[^\]]+\]|[^\s'()@\[]+?)(?=:?(?:'s\b|\)|\s|$))")
+
+
+def _host_key(host: str) -> str:
+    return host.strip("[]").lower().rstrip(".")
 
 
 def prompt_host(prompt: str) -> str:
-    """The host named in a credential prompt, lower-cased, or "" when it names none."""
-    found = _PROMPT_HOST.findall(prompt)
-    return found[-1].strip("[]").lower().rstrip(".") if found else ""
+    """The host asking in a credential prompt, lower-cased, or "" when the prompt names none in
+    a form only ssh (or this app's WinRM console) writes."""
+    if prompt.startswith("("):
+        found = _SERVER_TEXT.match(prompt)
+        return _host_key(found.group(1)) if found else ""
+    for form in _OWN_PROMPTS:
+        found = form.fullmatch(prompt)
+        if found:
+            return _host_key(found.group(1))
+    return ""
 
 
 # status the technician may set -> the statuses it may be set from (Engine.update_item)
@@ -2281,7 +2304,7 @@ class Engine:
         # security key's PIN, or a one-time passcode is something else (a wrong PIN counts
         # against the card's few tries)
         is_password = kind == "password" or bool(re.search(r"\bpassword\b", prompt, re.I))
-        # A prompt naming some other host (a jump host on the way, judged by the whole name,
+        # A prompt from some other host (a jump host on the way, judged by the whole name,
         # not a part of it) is not ours to answer from the keyring, and what the technician
         # types for it is not this host's password: it is never offered for saving under it.
         named = prompt_host(prompt)
@@ -2293,9 +2316,17 @@ class Engine:
                 self._ssh_hostnames[key] = await asyncio.to_thread(ssh_mod.resolved_hostname, host)
             own = named if named == self._ssh_hostnames[key] else own
         other_host = bool(host and named and named != own)
-        # A prompt naming no host may be the jump host's (OpenSSH before 8.4 names none for
-        # keyboard-interactive): with one on the way, the target's password isn't offered to it.
-        other_host = other_host or bool(host and host.jump and not named)
+        if host and host.jump:
+            # Never to a jump host: not one of the same name as the target (another port of one
+            # machine), and not through an OpenSSH too old to say which server wrote a prompt.
+            other_host = (other_host or named in ssh_mod.jump_hosts(host.jump)
+                          or not await asyncio.to_thread(ssh_mod.marks_server_text))
+        if host and not named:
+            # A prompt naming no host in ssh's own form may be the jump host's (OpenSSH before
+            # 8.4 names none for keyboard-interactive): with one on the way, the target's
+            # password isn't offered to it; nor is it when the text mentions another host.
+            mentioned = {_host_key(m) for m in _MENTIONED_HOST.findall(prompt)}
+            other_host = bool(host.jump) or bool(mentioned - {own})
         if sess and host and is_password and not other_host and not sess.used_stored_password:
             stored = self._get_secret_safe("host", host.name)
             if stored:
