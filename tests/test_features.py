@@ -404,7 +404,9 @@ async def test_engine_transfer_tool_needs_local_session(env, tmp_path, monkeypat
     r = engine.transfer_tool("T", remote)
     copy, check, run = (engine.queue.get(n) for n in r["nums"])
     assert copy.command.startswith("scp ") and copy.session_id != remote
-    assert (check.session_id, check.command, check.risk) == (remote, "sha256sum ~/t.bin", "read_only")
+    # the check compares the hash itself (it printed one, for the technician to compare with the purpose's by eye)
+    assert (check.session_id, check.risk) == (remote, "read_only")
+    assert check.command == f"printf '%s  %s\\n' {r['expected_sha256']} \"$HOME\"/t.bin | sha256sum -c -"
     assert r["expected_sha256"] in check.purpose and run.command == "./t.bin"
 
 

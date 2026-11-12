@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import shlex
 import shutil
 import tomllib
@@ -115,37 +116,82 @@ def verify(root: Path | None = None) -> list[dict]:
     return out
 
 
+# A file name that needs no quoting anywhere: on a command line, in a remote path, in a checksum line.
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9._+][A-Za-z0-9._+-]*")
+# PowerShell ends a single-quoted string at any of these, not at the ASCII quote alone.
+_PS_QUOTES = "'‘’‚‛"
+# In a Windows shell reached over SSH (cmd.exe by default, PowerShell where it was made the default)
+# the check is handed to PowerShell inside double quotes, where these act in one shell or the other.
+_NOT_OVER_SSH = "\"$`%!"
+OK, MISMATCH = "OK: the SHA-256 matches", "MISMATCH: the file is not the one in the tool cache; do not run it"
+
+
+def ps_quote(text: str) -> str:
+    """`text` as a PowerShell single-quoted string: nothing in it is expanded, and each quote
+    character (the curly ones too) is doubled, so the string ends where it should."""
+    return "'" + "".join(c * 2 if c in _PS_QUOTES else c for c in text) + "'"
+
+
+def _unquotable(name: str) -> str:
+    """Why no command can carry this file name as data ("" when one can): a line break or another
+    control character can't be quoted in a one-line command."""
+    return "a control character" if any(ord(c) < 32 or ord(c) == 127 for c in name) else ""
+
+
 def transfer_command(tool: Tool, host: Host | None, kind: str, root: Path | None = None) -> dict:
     """A command the technician runs to copy the tool to a host.
 
-    ssh: an scp command for a *local* session (uses the tech's ssh config, keys and agent).
+    ssh: an scp command for a *local* session (uses the tech's ssh config, keys and agent), and
+    a check to run in the SSH session afterwards, which compares the copy's hash itself.
     winrm: a PowerShell command for the *remote* session that decodes an embedded base64
-    payload; fine for small tools, and the command shows the hash so it can be checked."""
+    payload and compares the hash of what it wrote; fine for small tools.
+
+    The file's name is data in each of them, whatever it holds (a space, `$(`, a backtick, a
+    quote): quoted for the shell that reads it, sh or PowerShell. Until Nov 2026 the WinRM command
+    held it in a double-quoted PowerShell string, which expands `$(…)`, and the SSH check left
+    two hashes to compare by eye."""
     root = root or cache_dir()
     path = root / tool.file
     if not path.exists():
         raise FileNotFoundError(f"{path} is missing from the tool cache")
     if sha256_of(path) != tool.sha256:
         raise ValueError(f"{tool.file} no longer matches its recorded hash; refusing to transfer")
+    if _unquotable(tool.file):
+        raise ValueError(f"The tool's file name holds {_unquotable(tool.file)}, which no command can carry safely; "
+                         "rename the file and add the tool again")
     if kind == "ssh" and host:
         # with the session's own key, login and options (scp alone may not reach the host at all)
         address = f"[{host.host}]" if ":" in host.host else host.host
         target = f"{host.user}@{address}" if host.user else address
-        argv = (["scp"] + (["-P", str(host.port)] if host.port else []) + ssh_options(host)
+        plain = bool(_PLAIN_NAME.fullmatch(tool.file))
+        # scp's older protocol hands the remote path to the remote shell, which would read a space
+        # or `$(` in it; over SFTP (-s, OpenSSH 8.7 and later) the path is the file's name and no more
+        argv = (["scp"] + ([] if plain else ["-s"]) + (["-P", str(host.port)] if host.port else []) + ssh_options(host)
                 + ["--", str(path), f"{target}:~/{tool.file}"])
-        # run in the SSH session itself, after the copy: its output is the hash to compare
-        check = (f"sha256sum ~/{shlex.quote(tool.file)}" if tool.os != "windows" else
-                 f"powershell -NoProfile -Command \"(Get-FileHash ~/{tool.file} -Algorithm SHA256).Hash.ToLower()\"")
+        # run in the SSH session itself, after the copy: it compares the hash and says which
+        if tool.os != "windows":
+            if "\\" in tool.file:
+                raise ValueError("The tool's file name holds a backslash, which sha256sum's check can't read as it is; "
+                                 "rename the file and add the tool again")
+            check = f"printf '%s  %s\\n' {tool.sha256} \"$HOME\"/{shlex.quote(tool.file)} | sha256sum -c -"
+        else:
+            bad = sorted(set(tool.file) & set(_NOT_OVER_SSH))
+            if bad:
+                raise ValueError(f"The tool's file name holds {' '.join(bad)}, which a Windows shell over SSH would "
+                                 "read as more than a name; rename the file and add the tool again")
+            where = ps_quote("~\\" + tool.file)
+            check = ("powershell -NoProfile -Command \"if ((Get-FileHash -LiteralPath " + where + " -Algorithm SHA256).Hash "
+                     f"-eq '{tool.sha256}') {{ '{OK}' }} else {{ '{MISMATCH}' }}\"")
         return {"session": "local", "command": " ".join(shlex.quote(a) for a in argv),
-                "purpose": f"Copy {tool.name} to {target}", "risk": "modifying",
-                "verify": check, "expected_sha256": tool.sha256}
+                "purpose": f"Copy {tool.name} to {target}" + ("" if plain else " (over SFTP, so its file name is taken as it is)"),
+                "risk": "modifying", "verify": check, "expected_sha256": tool.sha256}
     if kind == "winrm":
         if path.stat().st_size > 4 * 1024 * 1024:
             raise ValueError("WinRM inline transfer is limited to 4 MB; use a share or scp for larger tools")
         b64 = base64.b64encode(path.read_bytes()).decode()
-        dest = f"$env:TEMP\\{tool.file}"
-        cmd = (f"[IO.File]::WriteAllBytes(\"{dest}\", [Convert]::FromBase64String('{b64}')); "
-               f"(Get-FileHash \"{dest}\" -Algorithm SHA256).Hash.ToLower() -eq '{tool.sha256}'")
+        cmd = (f"$f = Join-Path $env:TEMP {ps_quote(tool.file)}; "
+               f"[IO.File]::WriteAllBytes($f, [Convert]::FromBase64String('{b64}')); "
+               f"(Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLower() -eq '{tool.sha256}'")
         return {"session": "remote", "command": cmd,
                 "purpose": f"Write {tool.name} to %TEMP% and confirm its SHA-256 is {tool.sha256[:12]}…", "risk": "modifying",
                 "expected_sha256": tool.sha256}
