@@ -90,6 +90,20 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// Something that acts on a click and isn't one of the browser's own buttons: Tab reaches it, and
+// Enter or Space presses it as they press a button. (Until Nov 2026 such things were for the
+// mouse only: a session's tab, the reviewer's line.)
+function pressable(el, role = "button") {
+  el.setAttribute("tabindex", "0");
+  el.setAttribute("role", role);
+  el.addEventListener("keydown", (e) => {
+    if (e.target !== el || (e.key !== "Enter" && e.key !== " ")) return;     // not a key for a button inside it
+    e.preventDefault();
+    el.click();
+  });
+  return el;
+}
+
 // Element.append writes null as the text "null"; this skips empty children, as h() does.
 function add(el, ...children) {
   for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c);
@@ -814,6 +828,7 @@ function renderVision() {
   const hl = v.mode === "helper" ? attestLabel(S.state.helper_attestation) : null;
   b.textContent = { native: "👁", helper: `👁 via ${v.helper}${hl ? ` · ${hl.text}` : ""}`, none: "no images" }[v.mode];
   b.className = `ghost small vision ${v.mode}${hl ? ` att-${hl.cls}` : ""}`;
+  b.setAttribute("aria-label", { native: "Images: the model reads them", helper: `Images: described by ${v.helper}`, none: "Images: off" }[v.mode]);
   b.title = v.mode === "native" ? `${v.model} reads images directly.`
     : v.mode === "helper" ? `${v.model} can't read images: ${v.helper} describes each image first and ${v.model} gets the description. Replies with images take longer. Change in Settings → Model.${hl ? `\n\nVision helper: ${hl.title}` : ""}`
     : `${v.why}\nImage features are off. Choose a vision model, or set a vision helper in Settings → Model.`;
@@ -912,8 +927,10 @@ function renderHypotheses() {
       h("span", { class: "text" }, x.text),
       h("div", { class: "bar", title: `confidence ${Math.round(x.confidence * 100)}%` }, h("div", { style: `width:${Math.round(x.confidence * 100)}%` })),
       h("span", { class: "pct" }, `${Math.round(x.confidence * 100)}%`),
-      h("button", { class: `small ghost${pinned ? " on" : ""}`, title: "Pin: tell the AI to focus on this", onclick: () => mark(x.id, pinned ? "" : "pinned") }, "📌"),
-      h("button", { class: `small ghost${x.tech_mark === "ruled_out" ? " on" : ""}`, title: "Rule out: tell the AI to drop this", onclick: () => mark(x.id, x.tech_mark === "ruled_out" ? "" : "ruled_out") }, "✕"));
+      h("button", { class: `small ghost${pinned ? " on" : ""}`, title: "Pin: tell the AI to focus on this", "aria-label": "Pin this hypothesis", "aria-pressed": String(pinned),
+        onclick: () => mark(x.id, pinned ? "" : "pinned") }, "📌"),
+      h("button", { class: `small ghost${x.tech_mark === "ruled_out" ? " on" : ""}`, title: "Rule out: tell the AI to drop this", "aria-label": "Rule out this hypothesis",
+        "aria-pressed": String(x.tech_mark === "ruled_out"), onclick: () => mark(x.id, x.tech_mark === "ruled_out" ? "" : "ruled_out") }, "✕"));
   }));
 }
 
@@ -985,7 +1002,7 @@ function renderEntry(e, live = false) {
   if (e.research?.length) box.append(h("div", { class: "scards" }, e.research.map((r) => researchCard(r))));
   if (e.withdrawn?.length || e.reordered?.length) {
     box.append(h("div", { class: "revisions small" },
-      ...(e.withdrawn || []).map((w) => h("div", {}, h("span", { class: "chip", onclick: () => flashQueueItem(w.num) }, `#${w.num}`), " withdrawn", w.reason ? `: ${w.reason}` : "")),
+      ...(e.withdrawn || []).map((w) => h("div", {}, h("button", { type: "button", class: "chip", title: "Show in queue", onclick: () => flashQueueItem(w.num) }, `#${w.num}`), " withdrawn", w.reason ? `: ${w.reason}` : "")),
       e.reordered?.length ? h("div", {}, "Reordered pending: ", e.reordered.map((n) => `#${n}`).join(" → ")) : null));
   }
   if (e.questions?.length) box.append(questionBlock(e.questions, live));
@@ -1204,7 +1221,7 @@ function fillProposalCard(el) {
   }
   el.replaceChildren(...[
     h("div", { class: "phead" },
-      h("span", { class: "chip", title: "Show in queue", onclick: () => flashQueueItem(num) }, `#${num}`),
+      h("button", { type: "button", class: "chip", title: "Show in queue", onclick: () => flashQueueItem(num) }, `#${num}`),
       h("span", { class: `badge risk ${item.risk}` }, item.risk.replace("_", " ")),
       item.sensitive?.length ? h("span", { class: "badge sensitive", title: sensitiveTitle(item) }, "sensitive") : null,
       h("span", { class: "muted small" }, item.session_id),
@@ -1438,7 +1455,7 @@ const pendingImages = [];
 function renderAttachments() {
   const strip = $("#attachments");
   strip.replaceChildren(...pendingImages.map((d, i) => h("div", { class: "att" }, h("img", { src: d, class: "thumb" }),
-    h("button", { class: "small ghost", title: "Remove", onclick: () => { pendingImages.splice(i, 1); renderAttachments(); } }, "×"))));
+    h("button", { class: "small ghost", title: "Remove", "aria-label": `Remove photo ${i + 1}`, onclick: () => { pendingImages.splice(i, 1); renderAttachments(); } }, "×"))));
   strip.classList.toggle("hidden", !pendingImages.length);
   if (pendingImages.length) setChatCollapsed(false);   // an attachment waits in the chat box: show it
   saveDraftSoon();
@@ -1640,7 +1657,10 @@ function activateTab(sid, focus = true) {
   for (const [id, t] of Object.entries(S.terms)) t.host.style.display = id === sid ? "" : "none";
   for (const [id, r] of Object.entries(S.rdps)) r.host.style.display = id === sid ? "" : "none";
   for (const [id, w] of Object.entries(S.wins)) w.host.style.display = id === sid ? "" : "none";
-  for (const [id, tab] of S.tabs) tab.classList.toggle("active", id === sid);
+  for (const [id, tab] of S.tabs) {
+    tab.classList.toggle("active", id === sid);
+    tab.setAttribute("aria-selected", String(id === sid));
+  }
   const t = S.terms[sid];
   if (t) { fitTerm(t, true); if (focus) t.term.focus(); }
   const r = S.rdps[sid];
@@ -1691,13 +1711,13 @@ function renderSessions() {
   for (const s of sessions) {
     if (s.kind === "rdp") ensureRdp(s); else if (s.kind === "window") ensureWin(s); else ensureTerm(s);
     const linked = colour[s.device];
-    const tab = h("div", { class: `tab${s.exited ? " exited" : ""}${linked ? " linked" : ""}${s.kind === "rdp" && !s.connected ? " offline" : ""}`,
+    const tab = pressable(h("div", { class: `tab${s.exited ? " exited" : ""}${linked ? " linked" : ""}${s.kind === "rdp" && !s.connected ? " offline" : ""}`,
       "data-sid": s.id, title: `${s.target} ${s.os_hint || ""}`, style: linked ? `--dev:${linked}` : null,
-      onclick: () => activateTab(s.id) },
+      "aria-label": `Session ${s.id}, ${s.kind}${s.exited ? ", closed" : ""}`, onclick: () => activateTab(s.id) },
       h("span", { class: "dot" }), h("span", { class: "name" }, s.id), h("span", { class: "kind" }, s.kind),
       h("button", { class: `link${linked ? " on" : ""}`, title: linked ? "Linked to another session on the same machine: click to change" : "Link to another session on the same machine",
-        onclick: (e) => { e.stopPropagation(); linkMenu(s); } }, "🔗"),
-      h("button", { class: "close", title: "Close session", onclick: (e) => { e.stopPropagation(); closeSession(s); } }, "×"));
+        "aria-label": `Link ${s.id} to another session on the same machine`, onclick: (e) => { e.stopPropagation(); linkMenu(s); } }, "🔗"),
+      h("button", { class: "close", title: "Close session", "aria-label": `Close session ${s.id}`, onclick: (e) => { e.stopPropagation(); closeSession(s); } }, "×")), "tab");
     S.tabs.set(s.id, tab);
     list.append(tab);
   }
@@ -2473,10 +2493,10 @@ function reviewLine(item) {
   if (r.status === "checking") return h("div", { class: "qreview checking" }, h("span", { class: "spinner" }), " Reviewer checking…");
   if (r.status === "error") return h("div", { class: "qreview error", title: r.error }, `Review not run: ${r.error}`);
   const lv = REVIEW_LEVEL[r.level] || { icon: "•", label: `Reviewer: ${r.verdict || "no verdict"}` };
-  return h("div", { class: `qreview ${r.level || ""}`, title: `${r.model}${r.auto ? " (automatic)" : ""} — click for the full review`,
+  return pressable(h("div", { class: `qreview ${r.level || ""}`, title: `${r.model}${r.auto ? " (automatic)" : ""} — click for the full review`,
     onclick: () => showReview(item) },
     h("b", {}, `${lv.icon} ${lv.label}`), r.summary ? ` — ${r.summary}` : "", r.tee_attested ? [" ", teeMark(r)] : null,
-    r.data ? h("div", { class: "qreview-data" }, `🔍 Reviewer: ${r.data}`) : null);
+    r.data ? h("div", { class: "qreview-data" }, `🔍 Reviewer: ${r.data}`) : null));
 }
 
 function showReview(item) {
@@ -2678,6 +2698,8 @@ function updateRow(row, item) {
       btn("Force skip", () => forceSkip(now()), "ghost", "Skip in one click; the AI is told you chose not to run it"),
       btn("↑", () => moveItem(item.num, -1), "ghost", "Move up"),
       btn("↓", () => moveItem(item.num, 1), "ghost", "Move down"));
+    btns.at(-2).setAttribute("aria-label", `Move #${num} up`);
+    btns.at(-1).setAttribute("aria-label", `Move #${num} down`);
   } else if (item.status === "ran" || item.status === "inserted") {
     btns.push(btn("Preview", () => previewCapture(now())), btn("Reset", () => set("pending"), "ghost", "Back to pending"));
   } else if (item.status === "skipped") {
@@ -3672,7 +3694,22 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
   let models = [];
   const search = h("input", { type: "text", placeholder: "Filter models… (e.g. opus, glm, kimi, tee)" });
   const provSel = h("select", {}, providers.map((p) => h("option", { value: p.name, selected: p.name === prov }, p.name)));
-  const listEl = h("div", { class: "model-list" }, h("div", { class: "muted" }, "Loading…"));
+  // The list is one stop for Tab; the arrow keys move through its rows and Enter or Space picks
+  // the one with the focus. From the filter, the down arrow goes into the list. (Until Nov 2026 a
+  // model could be chosen with the mouse only.)
+  const listEl = h("div", { class: "model-list", role: "listbox", "aria-label": "Models" }, h("div", { class: "muted" }, "Loading…"));
+  const rowsOf = () => listEl.querySelectorAll(".model-row");
+  listEl.addEventListener("keydown", (e) => {
+    const rows = [...rowsOf()], at = rows.indexOf(document.activeElement);
+    const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: rows.length - 1 }[e.key];
+    if (to !== undefined) {
+      e.preventDefault();
+      if (to < 0) search.focus(); else rows[Math.min(to, rows.length - 1)]?.focus();
+    } else if ((e.key === "Enter" || e.key === " ") && at >= 0) {
+      e.preventDefault();
+      rows[at].click();
+    }
+  });
   const sens = st.case?.sensitivity || "open";
   const legend = {
     open: "Open case: all tiers allowed.",
@@ -3686,9 +3723,10 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     const pool = filter ? models.filter(filter) : models;
     const shown = pool.filter((x) => !q || x.id.toLowerCase().includes(q) || x.tier.includes(q) || (q === "tested" && x.tested));
     shown.sort((a, b) => (b.allowed - a.allowed) || ((recent.indexOf(a.id) + 1 || 99) - (recent.indexOf(b.id) + 1 || 99)) || a.id.localeCompare(b.id));
-    listEl.replaceChildren(...shown.slice(0, 400).map((x) => h("div", {
+    listEl.replaceChildren(...shown.slice(0, 400).map((x, i) => h("div", {
       class: `model-row${x.allowed ? "" : " blocked"}${x.id === curModel && prov === curProv ? " current" : ""}`,
       title: x.allowed ? x.id : `Not permitted for a ${sens} case`,
+      role: "option", tabindex: i ? -1 : 0, "aria-selected": String(x.id === curModel && prov === curProv), "aria-disabled": x.allowed ? null : "true",
       onclick: async () => {
         if (!x.allowed) return;
         await guarded(async () => { await onPick(prov, x.id); m.close(); });
@@ -3716,6 +3754,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     }
   };
   search.addEventListener("input", render);
+  search.addEventListener("keydown", (e) => { if (e.key === "ArrowDown") { e.preventDefault(); rowsOf()[0]?.focus(); } });
   provSel.addEventListener("change", () => { prov = provSel.value; load(false); });
   m = modal({
     title, wide: true,
@@ -3756,17 +3795,29 @@ function openRouteDialog(provName, model, onSaved) {
   const renderOpts = () => opts.replaceChildren(...kinds.map((k) => h("label", { class: "check" },
     h("input", { type: "radio", name: "route", checked: priority === k, onchange: () => { priority = k; render(); } }),
     k ? ROUTE_LABELS[k] : own)));
+  const choose = (x) => {
+    if (!x.available || chosen?.id === x.id) return;
+    chosen = { id: x.id, name: x.name, price: { input: x.input_price, output: x.output_price, cache_read: x.cache_read_price } };
+    // drawn again with the keyboard left on the host just chosen
+    const at = [...table.querySelectorAll("input[type=radio]")].indexOf(document.activeElement);
+    renderHosts();
+    if (at >= 0) table.querySelector("input:checked")?.focus();
+  };
   const renderHosts = () => {
     if (priority !== "host") { table.replaceChildren(); return; }
     if (!hosts) { table.replaceChildren(h("div", { class: "muted small" }, "Loading NanoGPT's hosts for this model…")); return; }
     if (!hosts.supported || !hosts.hosts.length) { table.replaceChildren(h("div", { class: "muted small" }, "NanoGPT offers no choice of hosts for this model: its own routing serves it.")); return; }
     const rows = hosts.hosts.filter((x) => !fp8.checked || x.fp8_or_better);
-    table.replaceChildren(h("table", { class: "hosts" },
+    table.replaceChildren();
+    add(table, h("table", { class: "hosts" },
       h("tr", {}, ["Host", "Precision", "Privacy", "First token", "Tokens/s", "$ in / out per M", "Cache"].map((t) => h("th", {}, t))),
+      // a row is chosen with a click anywhere on it, or with its radio button from the keyboard
       ...rows.map((x) => h("tr", { class: `${chosen?.id === x.id ? "current" : ""}${x.available ? "" : " blocked"}`,
         title: x.available ? "Prefer this host" : "Not available now",
-        onclick: () => { if (!x.available) return; chosen = { id: x.id, name: x.name, price: { input: x.input_price, output: x.output_price, cache_read: x.cache_read_price } }; renderHosts(); } },
-        h("td", {}, x.name, hosts.official === x.id ? h("span", { class: "muted small" }, " (maker)") : null),
+        onclick: () => choose(x) },
+        h("td", {}, h("label", { class: "check" },
+          h("input", { type: "radio", name: "route-host", checked: chosen?.id === x.id, disabled: !x.available, onchange: () => choose(x) }),
+          x.name, hosts.official === x.id ? h("span", { class: "muted small" }, " (maker)") : null)),
         h("td", {}, x.quantization || "?"), h("td", {}, x.privacy_label), h("td", {}, ms(x.first_token_ms)),
         h("td", {}, num(x.tokens_per_second, 0)), h("td", {}, `${num(x.input_price, 2)} / ${num(x.output_price, 2)}`),
         h("td", {}, x.caching === true ? "yes" : x.caching === false ? "no" : "?")))),
@@ -3947,7 +3998,7 @@ function openSettings(tab = "providers") {
         openRouteDialog(p.name, m, (r) => { if (r) routes[m] = r; else delete routes[m]; fill(); });
       });
       const tr = h("tr", {}, h("td", {}, model), h("td", {}, tier), h("td", {}, vision), h("td", {}, ctx, " ", ctxNote),
-        h("td", {}, routeBtn), h("td", {}, h("button", { type: "button", class: "small ghost", title: "Remove this row", onclick: () => tr.remove() }, "✕")));
+        h("td", {}, routeBtn), h("td", {}, h("button", { type: "button", class: "small ghost", title: "Remove this row", "aria-label": "Remove this row", onclick: () => tr.remove() }, "✕")));
       tr._get = () => ({ model: model.value.trim(), tier: tier.value, vision: vision.value, context: ctx.value.trim() });
       tr._fill = fill;
       fill();
@@ -4391,6 +4442,7 @@ function openSettings(tab = "providers") {
 function renderPhoneBtn() {
   const b = $("#phone-btn");
   b.textContent = S.phoneRunning ? (S.phones ? `📱 ${S.phones}` : "📱 on") : "📱";
+  b.setAttribute("aria-label", `Phone companion${S.phoneRunning ? (S.phones ? `: on, ${S.phones} page${S.phones > 1 ? "s" : ""} open` : ": on, no phone connected") : ""}`);
   b.classList.toggle("on", !!S.phoneRunning);
 }
 
@@ -4607,6 +4659,10 @@ function applyLayout() {
   ct.title = layout.chat_collapsed ? "Show the chat (Ctrl+Shift+K)" : "Hide the chat, to give the terminal more room";
   qt.textContent = layout.queue_collapsed ? "▸" : "▾";
   qt.title = layout.queue_collapsed ? "Show the queue list" : "Hide the queue list, to give the terminal more room";
+  ct.setAttribute("aria-label", layout.chat_collapsed ? "Show the chat" : "Hide the chat");
+  ct.setAttribute("aria-expanded", String(!layout.chat_collapsed));
+  qt.setAttribute("aria-label", layout.queue_collapsed ? "Show the queue list" : "Hide the queue list");
+  qt.setAttribute("aria-expanded", String(!layout.queue_collapsed));
   if (!layout.chat_collapsed) $("#chat-strip .unread").classList.add("hidden");
 }
 

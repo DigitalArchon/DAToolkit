@@ -1417,6 +1417,112 @@ test("a credential prompt that comes while the technician types doesn't take the
   assert.ok(app.document.activeElement === app.$(".modal"));
 });
 
+// ------------------------------------------------------------------ the keyboard
+
+test("a model is chosen from the keyboard: down from the filter into the list, arrows through it, Enter picks", async () => {
+  const models = ["alpha", "beta", "gamma"].map((id, i) => ({ id: `vendor/${id}`, tier: "standard", allowed: i !== 1 }));
+  const app = await page("a", null, { "GET /api/models": () => ({ models }), "POST /api/model": () => ({ ok: true }) });
+  app.$("#model-btn").click();
+  await app.clock.tick(100);
+  const list = app.$(".model-list"), rows = () => list.querySelectorAll(".model-row");
+  assert.equal(list.getAttribute("role"), "listbox");
+  assert.deepEqual(rows().map((r) => [r.getAttribute("role"), r.getAttribute("tabindex"), r.getAttribute("aria-disabled")]),
+    [["option", "0", null], ["option", "-1", null], ["option", "-1", "true"]]);               // the one not allowed sorts last
+  const filter = app.$(".overlay input[type=text]");
+  assert.equal(app.key(filter, { key: "ArrowDown" }).defaultPrevented, true);
+  assert.ok(app.document.activeElement === rows()[0]);
+  app.key(rows()[0], { key: "ArrowDown" });
+  app.key(rows()[1], { key: "ArrowDown" });
+  assert.ok(app.document.activeElement === rows()[2]);
+  app.key(rows()[2], { key: "Enter" });                             // not allowed for this case: nothing
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/model"), []);
+  app.key(rows()[2], { key: "ArrowUp" });
+  assert.equal(app.key(rows()[1], { key: " " }).defaultPrevented, true);
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/model").map((c) => c.body.model), ["vendor/gamma"]);
+  assert.equal(app.$(".modal"), null);
+});
+
+test("what acts on a click is reached with Tab and pressed with Enter or Space: tabs, the reviewer's line, #N, the sensitivity badge, a route's host", async () => {
+  const review = { status: "done", level: "care", verdict: "proceed with care", summary: "restarts the proxy", model: "x/reviewer", tier: "standard", text: "SUMMARY: …" };
+  const app = await page("a", (s) => {
+    s.sessions.push({ ...s.sessions[0], id: "local-2" });
+    s.queue[1].review = review;
+    s.chat = [{ kind: "assistant", text: "Two things.", proposals: [2], withdrawn: [{ num: 3, reason: "not needed" }] }];
+  }, { "GET /api/route/hosts": () => ({ supported: true, hosts: [
+    { id: "h1", name: "Host One", available: true, fp8_or_better: true, privacy_label: "no logs" },
+    { id: "h2", name: "Host Two", available: true, fp8_or_better: true, privacy_label: "no logs" },
+    { id: "h3", name: "Host Three", available: false, fp8_or_better: true, privacy_label: "logs" }] }) });
+  // a session's tab
+  const tabs = app.$("#tab-list").querySelectorAll(".tab");
+  assert.equal(app.$("#tab-list").getAttribute("role"), "tablist");
+  assert.deepEqual(tabs.map((t) => [t.getAttribute("role"), t.getAttribute("tabindex"), t.getAttribute("aria-selected")]), [["tab", "0", "false"], ["tab", "0", "true"]]);
+  assert.equal(app.key(tabs[0], { key: "Enter" }).defaultPrevented, true);
+  assert.equal(app.run("S.activeSid"), "local");
+  assert.equal(tabs[0].getAttribute("aria-selected"), "true");
+  app.key(tabs[1].querySelector(".close"), { key: "Enter" });        // a key for the button inside it is not the tab's
+  assert.equal(app.run("S.activeSid"), "local");
+  // the reviewer's line, in the row and in the chat's card
+  for (const line of [row(app, 2).querySelector(".qreview"), app.$("#chat-log").querySelector(".pcard .qreview")]) {
+    assert.deepEqual([line.getAttribute("role"), line.getAttribute("tabindex")], ["button", "0"]);
+    app.key(line, { key: " " });
+    await app.clock.tick(50);
+    assert.equal(app.$(".modal").getAttribute("aria-label"), "Second opinion on #2");
+    button(app.$(".modal"), "Close").click();
+    await app.clock.tick(0);
+  }
+  // #N in a message and on a card are buttons, and show the row
+  const chips = app.$("#chat-log").querySelectorAll(".chip");
+  assert.deepEqual(chips.map((c) => [c.tagName, c.textContent]), [["BUTTON", "#3"], ["BUTTON", "#2"]]);
+  chips[0].click();
+  assert.equal(row(app, 3).classList.contains("flash"), true);
+  // the sensitivity badge
+  const badge = app.$("#sens-badge");
+  assert.equal(badge.tagName, "BUTTON");
+  badge.click();
+  await app.clock.tick(50);
+  assert.equal(app.$(".modal").getAttribute("aria-label"), "Edit case");
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(0);
+  // a route's host: each row has a radio button of its own
+  app.run(`S.state.config.providers.push({ name: "Hosts R Us", kind: "nanogpt", routes: {} })`);
+  app.call("openRouteDialog", "Hosts R Us", "vendor/model");
+  await app.clock.tick(50);
+  const kinds = app.$(".modal .route-opts").querySelectorAll("input");
+  kinds.at(-1).checked = true;
+  kinds.at(-1).dispatchEvent(new Event("change"));
+  await app.clock.tick(0);
+  const radios = () => app.$(".modal table.hosts").querySelectorAll("input[type=radio]");
+  assert.deepEqual(radios().map((r) => [r.checked, r.disabled]), [[false, false], [false, false], [false, true]]);
+  radios()[1].focus();
+  radios()[1].checked = true;
+  radios()[1].dispatchEvent(new Event("change"));
+  assert.deepEqual(radios().map((r) => r.checked), [false, true, false]);
+  assert.ok(app.document.activeElement === radios()[1], "the keyboard stays on the host just chosen");
+  assert.equal(app.$(".modal table.hosts").querySelectorAll("tr.current").length, 1);
+  assert.doesNotMatch(app.$(".modal .host-table").textContent, /null/);
+});
+
+test("a button that shows only a symbol has a name for a screen reader, and the boxes have labels", async () => {
+  const app = await page("a", (s) => {
+    s.hypotheses = [{ id: "h1", text: "The disk is full", status: "open", confidence: 0.6, evidence: "" }];
+    s.sessions.push({ ...s.sessions[0], id: "local-2" });
+  });
+  app.run(`pendingImages.push("data:image/png;base64,iVBO"); renderAttachments()`);
+  app.call("toast", "A toast.");
+  app.call("openSettings");
+  await app.clock.tick(50);
+  const symbols = app.document.querySelectorAll("button").filter((b) => b.textContent.trim() && !/[\p{L}\p{N}]/u.test(b.textContent));
+  assert.deepEqual(symbols.filter((b) => !b.getAttribute("aria-label")).map((b) => `${b.id || b.getAttribute("class")} ${b.textContent}`), []);
+  assert.ok(symbols.length >= 12, `${symbols.length} such buttons on the page`);
+  assert.equal(app.$("#chat-input").getAttribute("aria-label"), "Message to the AI");
+  assert.equal(cmdBox(app, 2).getAttribute("aria-label"), "Command #2");
+  assert.equal(row(app, 2).querySelector(".sess").getAttribute("aria-label"), "Session for #2");
+  assert.equal(button(row(app, 2), "↑").getAttribute("aria-label"), "Move #2 up");
+  assert.equal(app.$("#queue-toggle").getAttribute("aria-expanded"), "true");
+});
+
 // ------------------------------------------------------------------ the top bar
 
 test("a settings notice and a keyring problem show in the banners", async () => {

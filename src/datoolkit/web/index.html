@@ -15,8 +15,8 @@
 <header id="topbar">
   <span class="brand">DA Toolkit</span>
   <button id="case-btn" class="ghost" title="Start a new case, or open, edit or delete a previous one">No case</button>
-  <button id="case-edit-btn" class="ghost small hidden" title="Rename this case, change its notes or raise its sensitivity">✎</button>
-  <span id="sens-badge" class="badge"></span>
+  <button id="case-edit-btn" class="ghost small hidden" title="Rename this case, change its notes or raise its sensitivity" aria-label="Edit this case">✎</button>
+  <button id="sens-badge" class="badge" type="button"></button>
   <span class="spacer"></span>
   <button id="model-btn" class="ghost" title="Choose model"><span id="model-prov" class="prov-chip hidden"></span><span id="model-name">Choose model</span> <span id="tier-badge" class="badge"></span></button>
   <button id="route-btn" class="ghost small hidden" title="Which host serves this model"></button>
@@ -33,7 +33,7 @@
   </div>
   <button id="attest-btn" class="ghost small hidden" title="Re-check the enclave's attestation"></button>
   <button id="vision-btn" class="ghost small" title=""></button>
-  <button id="phone-btn" class="ghost small" title="Phone companion: follow the case and tick off commands from your phone">📱</button>
+  <button id="phone-btn" class="ghost small" title="Phone companion: follow the case and tick off commands from your phone" aria-label="Phone companion">📱</button>
   <div class="menu-wrap">
     <button id="export-btn" class="ghost">Export ▾</button>
     <div id="export-menu" class="menu hidden">
@@ -64,12 +64,12 @@
     <div id="chat-log"></div>
     <div id="chat-status" class="hidden" role="status" aria-live="polite"><span class="spinner"></span><span id="chat-status-text"></span></div>
     <form id="chat-form">
-      <textarea id="chat-input" rows="3" placeholder="Describe the problem, answer the AI, or tell it what you think…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
+      <textarea id="chat-input" rows="3" aria-label="Message to the AI" placeholder="Describe the problem, answer the AI, or tell it what you think…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
       <div id="attachments" class="hidden"></div>
       <div class="chat-actions">
-        <button type="button" id="attach-btn" class="ghost" data-needs-vision title="Attach a photo (screen, LED panel, label). You can black out parts before it's sent.">📷</button>
+        <button type="button" id="attach-btn" class="ghost" data-needs-vision title="Attach a photo (screen, LED panel, label). You can black out parts before it's sent." aria-label="Attach a photo">📷</button>
         <input type="file" id="photo-input" accept="image/*" multiple class="hidden">
-        <button type="button" id="shot-btn" class="ghost" data-needs-vision title="Attach a screenshot of the active session (useful for appliance menus). You can black out parts before it's sent.">🖥</button>
+        <button type="button" id="shot-btn" class="ghost" data-needs-vision title="Attach a screenshot of the active session (useful for appliance menus). You can black out parts before it's sent." aria-label="Attach a screenshot of the active session">🖥</button>
         <button type="button" id="chat-results-btn" class="hidden" title="Review the results of commands you ran or skipped and send them with this message">Results</button>
         <button type="button" id="stop-btn" class="danger hidden">Stop</button>
         <button type="submit" id="send-btn" class="primary">Send</button>
@@ -79,8 +79,8 @@
   <div class="splitter vertical" id="split-v"></div>
   <section id="term-pane">
     <div id="tabs">
-      <button id="chat-toggle" class="ghost small" type="button" title="Hide the chat, to give the terminal more room">«</button>
-      <div id="tab-list"></div>
+      <button id="chat-toggle" class="ghost small" type="button" title="Hide the chat, to give the terminal more room" aria-label="Hide the chat">«</button>
+      <div id="tab-list" role="tablist" aria-label="Sessions"></div>
       <div class="menu-wrap">
         <button id="tab-shot-btn" class="ghost" data-needs-vision title="Attach a screenshot of this terminal to your next chat message, e.g. when a login lands on a menu instead of a shell">Screenshot → chat</button>
         <button id="new-session-btn" class="ghost" title="Open a session">+ Session</button>
@@ -97,7 +97,7 @@
 
 <section id="queue-pane">
   <div class="queue-head">
-    <button id="queue-toggle" class="ghost small" type="button" title="Hide the queue list, to give the terminal more room">▾</button>
+    <button id="queue-toggle" class="ghost small" type="button" title="Hide the queue list, to give the terminal more room" aria-label="Hide the queue list">▾</button>
     <span class="title">Command queue</span>
     <span id="queue-count" class="muted"></span>
     <label class="muted small" title="Also show items already sent to the AI and items the AI withdrew"><input type="checkbox" id="show-done"> show done</label>

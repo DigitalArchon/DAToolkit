@@ -561,6 +561,13 @@ a[data-insecure]::after {
 .check-code { font-family: var(--mono); font-size: 34px; letter-spacing: .2em; text-align: center; margin: 8px 0; }
 .phone-devices { margin: 8px 0; display: flex; flex-direction: column; gap: 4px; }
 
+/* What acts on a click is reached with Tab too (app.js pressable, the model list, the hosts'
+   radio buttons): where the keyboard is shows. The sensitivity badge and the #N chips are buttons. */
+.tab:focus-visible, .qreview:focus-visible, .model-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.model-row:focus { background: var(--panel-2); }
+button.badge { background: transparent; cursor: pointer; }
+table.hosts .check { cursor: inherit; }
+
 /* Run group's list of what it will type, and where */
 .group-item { margin-top: 8px; }
 .group-item .prompt-text { margin: 3px 0; }
