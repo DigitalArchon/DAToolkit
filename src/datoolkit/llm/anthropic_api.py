@@ -57,7 +57,7 @@ from typing import AsyncIterator
 import anthropic
 
 from .capabilities import EFFORTS
-from .client import (NO_RESULT, ToolCall, TurnResult, is_private_mode, local_http_options, no_reply,
+from .client import (CONNECT_TIMEOUT, NO_RESULT, ToolCall, TurnResult, is_private_mode, local_http_options, no_reply,
                      only_what_it_was_given, redirected)
 from .params import nearest_effort
 from .providers import is_official_anthropic
@@ -453,7 +453,8 @@ class AnthropicClient:
         # through a proxy the environment names (llm/client.py local_http_options). And it sends
         # no header the environment holds for Anthropic's SDK (only_what_it_was_given).
         self._client = _Anthropic(
-            api_key=api_key or "not-needed", base_url=base, max_retries=1, timeout=600,
+            api_key=api_key or "not-needed", base_url=base, max_retries=1,
+            timeout=anthropic.Timeout(600, connect=CONNECT_TIMEOUT),
             http_client=http_client or anthropic.DefaultAsyncHttpxClient(
                 follow_redirects=False, **local_http_options(base_url)))
         self._caps = caps or {}

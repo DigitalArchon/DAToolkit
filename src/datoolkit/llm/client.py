@@ -14,7 +14,7 @@ from typing import AsyncIterator
 from urllib.parse import urlparse
 
 import httpx
-from openai import APIError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import APIError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient, Timeout
 from openai.types.chat import ChatCompletionChunk
 
 from . import netguard
@@ -31,6 +31,13 @@ SENSITIVITY_TIERS = {
     "confidential": {"e2ee", "local"},
     "sovereign": {"local"},
 }
+
+
+# How long a model server gets to accept the connection, beside the minutes a reply may take to
+# come (300 s between its pieces here, 600 s on the Messages API). The two were one number until
+# Nov 2026, so a local model server that was switched off showed "thinking" for ten to twenty
+# minutes (two attempts) before the turn failed.
+CONNECT_TIMEOUT = 10
 
 
 def is_private_mode(model_id: str) -> bool:
@@ -242,7 +249,8 @@ class LLMClient:
         # client follows redirects, which would send the request again to wherever a reply
         # points, plain http and other hosts included: netguard checked only the base URL.
         # And a local server is reached directly, whatever proxy the environment names.
-        self._client = _OpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1, timeout=300,
+        self._client = _OpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1,
+                               timeout=Timeout(300, connect=CONNECT_TIMEOUT),
                                http_client=http_client or DefaultAsyncHttpxClient(
                                    follow_redirects=False, **local_http_options(base_url)))
 

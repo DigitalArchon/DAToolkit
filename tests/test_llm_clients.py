@@ -214,3 +214,47 @@ async def test_the_sdks_environment_adds_no_header_to_a_provider(monkeypatch):
             assert "env-beta" not in headers.get("anthropic-beta", "")
         else:
             assert headers["authorization"] in ("Bearer PROVIDER-KEY", "Bearer not-needed"), url
+
+
+# ---------------------------------------------------------------- a server that isn't there
+
+def test_connecting_has_a_timeout_of_its_own_beside_the_long_wait_for_a_reply():
+    from datoolkit.llm.client import CONNECT_TIMEOUT
+
+    assert CONNECT_TIMEOUT <= 15
+    for client, read in ((LLMClient("http://192.168.1.50:11434/v1", None), 300),
+                         (AnthropicClient("http://192.168.1.50:8080", None), 600),
+                         (AnthropicClient("https://api.anthropic.com", "k"), 600)):
+        timeout = client._client.timeout
+        assert timeout.connect == CONNECT_TIMEOUT and timeout.read == read, client
+
+
+@pytest.mark.parametrize("make", [lambda base: LLMClient(base + "/v1", None), lambda base: AnthropicClient(base, None)])
+async def test_a_model_server_that_never_answers_the_connection_fails_soon(make, monkeypatch):
+    """A machine that is switched off takes no connection and refuses none. Here: a listening
+    socket that accepts nothing, its queue filled, so the next connection waits for ever."""
+    import socket
+
+    from datoolkit.llm import anthropic_api
+    from datoolkit.llm import client as client_module
+
+    monkeypatch.setattr(client_module, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(anthropic_api, "CONNECT_TIMEOUT", 0.3)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(0)
+    port = listener.getsockname()[1]
+    held = []
+    try:
+        for _ in range(4):                       # more than the queue holds: these are never accepted
+            s = socket.socket()
+            s.setblocking(False)
+            s.connect_ex(("127.0.0.1", port))
+            held.append(s)
+        client = make(f"http://127.0.0.1:{port}")
+        client._client = client._client.with_options(max_retries=0)
+        with pytest.raises(Exception, match="(?i)timed out|timeout"):
+            await asyncio.wait_for(client.complete("m", USER), 5)       # 300 s and more without the connect timeout
+    finally:
+        for s in held + [listener]:
+            s.close()
