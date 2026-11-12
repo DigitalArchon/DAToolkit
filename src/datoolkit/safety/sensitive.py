@@ -32,6 +32,18 @@ SECRET_FILES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?:\.bash_history|\.zsh_history|\.mysql_history|\.psql_history|ConsoleHost_history\.txt)\b", _I),
      "reads shell history (often holds typed passwords)"),
     (re.compile(r"\bntds\.dit\b|\\config\\(?:SAM|SECURITY)\b", _I), "reads Windows credential stores"),
+    # a VPN's keys and pre-shared secrets, and the secrets files of the services that log in for a machine
+    (re.compile(r"/etc/wireguard/\S+|\.ovpn(?![\w.])|\bipsec\.secrets\b|\b(?:chap|pap)-secrets\b|\.psk(?![\w.])", _I),
+     "reads a VPN configuration (holds private keys or pre-shared secrets)"),
+    (re.compile(r"/etc/master\.passwd\b|/etc/security/opasswd\b|/smbpasswd(?![\w.-])|\.smbcredentials\b"
+                r"|\bsasl_passwd\b|\.keytab(?![\w.])|\bsssd\.conf\b|\bldap\.secret\b|/etc/mysql/debian\.cnf\b|\brclone\.conf\b"
+                r"|(?:^|[\s/\\'\"])\.(?:npmrc|pypirc)(?![\w.])|/etc/pve/priv/|\bupsd\.users\b|/freeradius/\S*clients\.conf\b"
+                r"|\bsnmpd\.conf\b", _I), "reads a file that usually holds credentials"),
+    (re.compile(r"\.tfstate(?!\w)|\.tfvars(?!\w)", _I), "reads Terraform state or variables (hold secrets in plain text)"),
+    # a firewall's or router's whole configuration as a file: pfSense and OPNsense, VyOS and EdgeOS
+    (re.compile(r"(?:/cf)?/conf/config\.xml\b|/usr/local/etc/config\.xml\b|/config/config\.boot\b"), "reads the device configuration (holds keys and passwords)"),
+    (re.compile(r"\bunattend(?:ed)?\.xml\b|\bsysprep\.xml\b|\bGroups\.xml\b", _I),
+     "reads a file that usually holds credentials"),
     # a person's own computer: their keys, browsers, passwords, mail and messages
     # a file in them or the folder whole (find ~/.ssh -exec cat, tar ~/.gnupg), not a public key,
     # which is made to be given out
@@ -72,23 +84,57 @@ RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bGet-History\b|\bdoskey\s+/history\b", _I), "prints shell history (often holds typed passwords)"),
     # secret stores and credential dumping
     (re.compile(r"\bkubectl\s+(?:\S+\s+)*get\s+secrets?\b.*(?:-o|--output)[\s=]*(?:ya?ml|json|jsonpath|go-template)", _I), "prints Kubernetes secrets"),
+    (re.compile(r"\bkubectl\s+(?:\S+\s+)*get\s+secrets?\b[^|;&\n]*--template\b", _I), "prints Kubernetes secrets"),
     (re.compile(r"\bkubectl\s+config\s+view\b.*--raw\b"), "prints kubeconfig credentials"),
-    (re.compile(r"\bdocker\s+(?:container\s+|image\s+)?inspect\b|\bdocker\s+compose\s+config\b|\bdocker-compose\s+config\b"),
+    (re.compile(r"\b(?:docker|podman)\s+(?:container\s+|image\s+)?inspect\b|\bdocker\s+compose\s+config\b|\bdocker-compose\s+config\b"),
      "shows container settings (environment variables often hold secrets)"),
+    (re.compile(r"\b(?:docker|podman|kubectl)\s+exec\b[^|;&\n]*\s(?:env|printenv)\b"), "prints environment variables (often hold secrets)"),
+    # one variable, named like a secret, printed
+    (re.compile(r"\b(?:echo|printf|Write-Output|Write-Host)\b[^|;&\n]*\$\{?(?:env:)?\w*(?:PASSWORD|PASSWD|_PWD|SECRET|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY)"
+                r"|\bprintenv\s+\w*(?:PASSWORD|PASSWD|_PWD|SECRET|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY)"
+                r"|(?:^|[;|(][ \t]*)\$env:\w*(?:PASSWORD|PASSWD|_PWD|SECRET|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY)\w*[ \t]*(?:$|[|;)])", _I | re.M),
+     "prints a variable that holds a secret"),
     (re.compile(r"\b(?:vault\s+(?:kv\s+)?(?:read|get)|aws\s+secretsmanager\s+get-secret-value|aws\s+ssm\s+get-parameters?\b.*--with-decryption|"
-                r"az\s+keyvault\s+secret\s+show|gcloud\s+secrets\s+versions\s+access|pass\s+show|gpg\s+(?:-d|--decrypt))\b", _I),
+                r"az\s+keyvault\s+secret\s+show|gcloud\s+secrets\s+versions\s+access|pass\s+show|gpg\s+(?:-d|--decrypt)"
+                r"|gopass\s+show|secret-tool\s+lookup|op\s+read|bw\s+get\s+(?:password|item|totp)|lpass\s+show|keyring\s+get"
+                r"|security\s+find-(?:generic|internet)-password|Get-AzKeyVaultSecret|Get-Secret)\b", _I),
      "reads a secret from a secret store"),
+    # the tools that hand out their own keys and tokens when asked
+    (re.compile(r"\bterraform\s+(?:output|show|state\s+(?:pull|show))\b|\bpulumi\b[^|;&\n]*--show-secrets\b|\bhelm\s+get\s+(?:values|all)\b", _I),
+     "prints infrastructure state or values (hold secrets in plain text)"),
+    (re.compile(r"\baws\s+configure\s+get\s+\S*secret|\baws\s+(?:sts\s+get-session-token|ecr\s+get-login-password|iam\s+create-access-key)\b"
+                r"|\baz\s+(?:account\s+get-access-token|storage\s+account\s+keys\s+list|ad\s+sp\s+credential\s+reset)\b|\bGet-AzStorageAccountKey\b"
+                r"|\bgcloud\s+auth\s+print-(?:access|identity)-token\b|\bgh\s+auth\s+(?:token|status\s+(?:\S+\s+)*(?:-t|--show-token))\b"
+                r"|\bgpg2?\s+(?:\S+\s+)*--export-secret-(?:sub)?keys\b|\bredis-cli\b[^|;&\n]*\bconfig\s+get\s+(?:requirepass|masterauth)\b", _I),
+     "prints an access key or token"),
+    (re.compile(r"\bwg\s+showconf\b|\bwg\s+show\s+\S+\s+(?:private-key|preshared-keys|dump)\b"
+                r"|\bnmcli\s+(?:\S+\s+)*(?:-s|--show-secrets)\b|\bnmcli\s+dev(?:ice)?\s+wifi\s+show-password\b", _I),
+     "prints network keys (Wi-Fi or VPN)"),
+    (re.compile(r"\bgetent\s+g?shadow\b|\bpdbedit\s+(?:\S+\s+)*-\w*w|\bslapcat\b"), "reads password hashes"),
     (re.compile(r"\b(?:mimikatz|sekurlsa|lsadump|secretsdump|procdump\S*\s.*\blsass|comsvcs\S*\s+MiniDump|ntdsutil|"
                 r"Get-ADReplAccount|DSInternals|LaZagne|vaultcmd\s+/listcreds)\b", _I), "dumps Windows credentials"),
     (re.compile(r"\breg(?:\.exe)?\s+(?:save|export)\s+HKLM\\(?:SAM|SECURITY|SYSTEM)\b", _I), "exports a registry hive holding credentials"),
-    (re.compile(r"\bnetsh\s+wlan\s+show\s+profiles?\b.*\bkey\s*=\s*clear\b", _I), "prints Wi-Fi passwords"),
+    (re.compile(r"\bnetsh\s+wlan\s+(?:show|export)\s+profiles?\b.*\bkey\s*=\s*clear\b", _I), "prints Wi-Fi passwords"),
     (re.compile(r"\bGet-LapsADPassword\b|\bms-Mcs-AdmPwd\b|\bmsLAPS-Password\b|\bGet-AdmPwdPassword\b", _I), "reads a LAPS password"),
+    (re.compile(r"\bmanage-bde(?:\.exe)?\s+(?:\S+\s+)*-protectors\s+(?:\S+\s+)*-get\b|\bGet-BitLockerVolume\b.*\bKeyProtector\b"
+                r"|\bmsFVE-RecoveryPassword\b|\bGet-BitLockerVolume\b[^;\n]*\|\s*(?:fl|Format-List)\s+\*", _I), "prints BitLocker recovery keys"),
+    (re.compile(r"\bGet-GPPPassword\b|\bcpassword\b|\breg(?:\.exe)?\s+query\b[^|;&\n]*(?:DefaultPassword\b|/f\s+pass)|\bSecureStringToBSTR\b", _I),
+     "reveals a stored credential"),
     (re.compile(r"\bConvertFrom-SecureString\b.*-AsPlainText\b|\.GetNetworkCredential\(\)\.Password\b", _I), "reveals a stored credential"),
     # whole databases and device configurations
     (re.compile(r"\b(?:mysqldump|mariadb-dump|pg_dump|pg_dumpall|mongodump|mongoexport|redis-cli\s+.*--rdb)\b"), "dumps a database (customer data)"),
-    (re.compile(r"^\s*(?:do\s+)?show\s+(?:run(?:ning)?(?:-config)?|start(?:up)?(?:-config)?|full-configuration|configuration)(?!\s+interface)(?:\s|$)", _I | re.M),
+    # `sh run` and `sho run` as it is typed at the console, the files the same text is kept in, and what other makers call it
+    (re.compile(r"^[ \t]*(?:do\s+)?sh(?:ow?)?\s+(?:run(?:ning)?(?:-config)?|start(?:up)?(?:-config)?|full-configuration|configuration|tech(?:-support)?)"
+                r"(?!\s+interface)(?:\s|$)|^[ \t]*more\s+(?:system:running-config|nvram:startup-config)\b"
+                r"|^[ \t]*dis(?:play)?\s+(?:current-configuration|saved-configuration)\b", _I | re.M),
      "prints the device configuration (holds keys and passwords, some weakly hashed)"),
-    (re.compile(r"^\s*/export\b.*\bshow-sensitive\b", _I | re.M), "prints the RouterOS configuration with secrets"),
+    (re.compile(r"^[ \t]*(?:do\s+)?sh(?:ow?)?\s+(?:snmp\s+community|crypto\s+isakmp\s+key|crypto\s+key\b|aaa-server)\b", _I | re.M),
+     "prints keys or community strings from the device configuration"),
+    # RouterOS before 7 exports its secrets unless told to hide them; 7 hides them unless told to show them
+    (re.compile(r"^[ \t]*/(?:[\w-]+[ \t/]+)*export\b(?!.*\bhide-sensitive\b)", _I | re.M),
+     "prints the RouterOS configuration (with its secrets, unless hide-sensitive is given)"),
+    (re.compile(r"^[ \t]*/(?:ppp[ \t/]+secret|ip[ \t/]+ipsec[ \t/]+(?:identity|peer)|interface[ \t/]+wireless[ \t/]+security-profiles)\b.*\bprint\b",
+                _I | re.M), "prints RouterOS secrets"),
     # a secret in the command text itself: kept in shell history, the process list and the case log
     (re.compile(r"\b(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)\b[^|;&\n]*\s-p(?!\s)\S+"), "puts a password in the command line"),
     (re.compile(r"(?<![\w-])--(?:password|passwd|pass|pw|token|api-?key|apikey|secret|client-secret|secret-key|access-key|auth-token)"

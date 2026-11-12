@@ -594,6 +594,48 @@ def test_looking_at_names_only_is_not(command):
     assert sensitive(command) == []
 
 
+@pytest.mark.parametrize("command", [
+    # a device's configuration as it is typed at the console, kept in a file, or named by another maker
+    "sh run", "sho run | include username", "do sh run", "show tech-support", "more system:running-config", "display current-configuration",
+    "show snmp community", "show crypto isakmp key", "/export", "/ip firewall export", "/ppp secret print", "/ip ipsec identity print",
+    "cat /conf/config.xml", "cat /cf/conf/config.xml", "cat /config/config.boot",
+    # a VPN's or a Wi-Fi's keys
+    "cat /etc/wireguard/wg0.conf", "sudo wg showconf wg0", "wg show wg0 private-key", "cat /etc/openvpn/client.ovpn", "cat /etc/ipsec.secrets",
+    "nmcli -s connection show Home", "nmcli --show-secrets -g 802-11-wireless-security.psk c show Home", "nmcli device wifi show-password",
+    "netsh wlan export profile key=clear folder=C:\\temp",
+    # a variable named like a secret, printed
+    "echo $DB_PASSWORD", 'echo "token: ${API_TOKEN}"', "printenv AWS_SECRET_ACCESS_KEY", "$env:DB_PASSWORD", "Write-Output $env:API_KEY",
+    "docker exec db env", "kubectl exec db -- printenv",
+    # tools that hand out state, keys and tokens
+    "terraform output -json", "terraform show", "terraform state pull", "cat terraform.tfstate", "cat prod.tfvars", "helm get values rel",
+    "pulumi config --show-secrets", "aws configure get aws_secret_access_key", "az account get-access-token", "gcloud auth print-access-token",
+    "gh auth token", "gpg --export-secret-keys -a", "redis-cli config get requirepass", "op read op://vault/item/password", "bw get password x",
+    "kubectl get secret db --template='{{.data.password}}'", "podman inspect db",
+    # Windows: BitLocker's recovery keys, passwords kept by Group Policy or the registry
+    "manage-bde -protectors -get C:", "manage-bde.exe -protectors C: -get", "(Get-BitLockerVolume C:).KeyProtector",
+    "Get-ADObject -Filter * -Properties msFVE-RecoveryPassword", "Get-GPPPassword",
+    "findstr /S /I cpassword \\\\dom\\sysvol\\dom\\policies\\*.xml",
+    'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" /v DefaultPassword',
+    "type C:\\Windows\\Panther\\Unattend\\Unattended.xml",
+    # hashes and the files services keep their passwords in
+    "getent shadow", "sudo getent shadow root", "cat /etc/samba/smbpasswd", "cat /root/.smbcredentials", "cat /etc/postfix/sasl_passwd",
+    "cat /etc/krb5.keytab", "cat /etc/sssd/sssd.conf", "cat ~/.npmrc", "cat ~/.config/rclone/rclone.conf", "cat /etc/mysql/debian.cnf",
+])
+def test_printing_these_is_flagged_sensitive(command):
+    assert sensitive(command)
+
+
+@pytest.mark.parametrize("command", [
+    "sh ip int br", "show running-config interface Gi0/1", "show version", "/export hide-sensitive", "/interface print", "/ip address print",
+    "export PATH=$PATH:/opt/bin", "export -f fn", "wg show", "wg show wg0 endpoints", "nmcli connection show Home", "nmcli -t -f NAME c show",
+    "echo $PWD", "echo $HOME $USER", "printenv PATH", "$env:COMPUTERNAME", "terraform version", "terraform plan", "helm list",
+    "manage-bde -status", "manage-bde -protectors -disable C:", "Get-BitLockerVolume", "getent passwd bob", "smbpasswd -a bob",
+    "netsh wlan show profiles", "gh auth status", "aws configure list", "ls /etc/wireguard", "stat /conf/config.xml",
+])
+def test_their_neighbours_are_not(command):
+    assert sensitive(command) == []
+
+
 def test_default_ignorable_marks_are_removed_from_commands():
     shown, notes = clean("ls\u034f -la\u2800 /tmp\u180b\u17b4")
     assert shown == "ls -la /tmp" and len(notes) == 4
