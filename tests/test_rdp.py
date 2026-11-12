@@ -318,6 +318,85 @@ async def test_legacy_rdp_asks_every_time_and_guacd_missing(rdp_env, monkeypatch
     assert err.value.commands == ["sudo apt install guacd"]
 
 
+_PIN = {"sha256": "AA:BB", "subject": "CN=a", "issuer": "CN=a", "not_after": "2030-01-01"}
+
+
+def test_the_pin_file_is_replaced_whole_and_private(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    store = rdpcert.PinStore(tmp_path / "cfg" / "rdp_pins.json")
+    assert store.get("dc01", 3389) is None and store.trusted("dc01", 3389) is None and store.forget("dc01", 3389) is False
+    store.pin("DC01", 3389, _PIN)
+    store.pin("fs01", 5986, {**_PIN, "sha256": "CC:DD"})
+    assert store.trusted("dc01", 3389)["sha256"] == "AA:BB" and store.get("FS01", 5986)["sha256"] == "CC:DD"
+    assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
+    # every change goes through a file of its own and a rename, forgetting too (it wrote in place)
+    replaced = []
+    real = os.replace
+    monkeypatch.setattr(os, "replace", lambda a, b: replaced.append((str(a), str(b))) or real(a, b))
+    assert store.forget("dc01", 3389) is True and store.get("dc01", 3389) is None
+    assert len(replaced) == 1 and replaced[0][1] == str(store.path) and replaced[0][0] != str(store.path)
+    # a write that fails half way leaves the pins as they were, and no file of its own behind
+    def no_space(fd):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(os, "fsync", no_space)
+    with pytest.raises(OSError):
+        store.pin("dc02", 3389, _PIN)
+    with pytest.raises(OSError):
+        store.forget("fs01", 5986)
+    assert json.loads(store.path.read_text()).keys() == {"fs01:5986"}
+    assert [f.name for f in store.path.parent.iterdir()] == ["rdp_pins.json"]
+
+
+@pytest.mark.parametrize("damage", ["", '{"dc01:3389": {"sha2', "[]", '{"dc01:3389": "AA:BB"}', b"\xff\xfe\x00"])
+def test_a_pin_file_that_cant_be_read_is_set_aside_not_taken_for_no_pins(tmp_path, damage):
+    store = rdpcert.PinStore(tmp_path / "rdp_pins.json")
+    store.pin("dc01", 3389, _PIN)
+    store.pin("fs01", 5986, _PIN)
+    store.path.write_bytes(damage if isinstance(damage, bytes) else damage.encode())
+    assert store.get("dc01", 3389) is None                      # what Settings shows: no pin, and nothing changed
+    assert store.path.read_bytes() == (damage if isinstance(damage, bytes) else damage.encode())
+    with pytest.raises(rdpcert.PinsUnreadable, match=r"couldn't be read .* set aside as rdp_pins\.json\.unreadable-\d{8}-\d{6}"):
+        store.pin("dc02", 3389, _PIN)                           # never written over with the one new pin
+    aside = [f for f in tmp_path.iterdir() if ".unreadable-" in f.name]
+    assert len(aside) == 1 and aside[0].read_bytes() == store.path.with_name(aside[0].name).read_bytes() and not store.path.exists()
+    assert aside[0].read_bytes() == (damage if isinstance(damage, bytes) else damage.encode())
+    # said once: from here on there are no pins, and new ones are kept
+    assert store.trusted("dc01", 3389) is None
+    store.pin("dc02", 3389, _PIN)
+    assert store.trusted("dc02", 3389)["sha256"] == "AA:BB"
+
+
+async def test_an_unreadable_pin_file_is_reported_before_anything_is_trusted(rdp_env, monkeypatch):
+    engine, events, tmp_path = rdp_env
+    engine.cfg.hosts.append(Host("dc05", "rdp", "10.250.0.5", user="bob", auth="password"))
+    creds.set_secret("host", "dc05", "pw")
+
+    async def fetch(host, port=3389, user=""):
+        return dict(GOOD_CERT)
+    monkeypatch.setattr(rdpcert, "fetch", fetch)
+    engine.pins.pin("10.250.0.5", 3389, {**GOOD_CERT, "sha256": "the pin that was"})
+    engine.pins.path.write_text("")                             # cut to nothing by a crash or a full disk
+    assert engine.snapshot()["config"]["hosts"][-1]["pinned"] == ""
+    with pytest.raises(UserError, match="couldn't be read .* set aside .* Nothing was sent to 10.250.0.5:3389"):
+        await engine.open_rdp("dc05")
+    assert not [e for e in events if e["type"] == "prompt"] and not engine.sessions.sessions
+    assert "pins_unreadable" in (engine.case.dir / "events.jsonl").read_text()
+    # the technician, told, connects again: a first connection, asked about
+    opener = asyncio.create_task(engine.open_rdp("dc05"))
+    await answer_prompts(engine, ["yes"])
+    await opener
+    assert "First connection to 10.250.0.5:3389" in [e for e in events if e["type"] == "prompt"][0]["prompt"]["text"]
+    assert engine.pins.trusted("10.250.0.5", 3389)["sha256"] == "AA:BB"
+    # removing a pin from a file that can't be read says so too
+    engine.pins.path.write_text("{")
+    with pytest.raises(UserError, match="set aside .* There is no pin left to remove"):
+        engine.forget_pin("dc05")
+    kept = sorted(f.read_text() for f in engine.pins.path.parent.iterdir() if ".unreadable-" in f.name)
+    assert kept == ["", "{"]                                    # each kept, the second not over the first
+
+
 async def _prompts(engine, n, secs=5.0):
     for _ in range(int(secs * 100)):
         if len(engine._prompts) >= n:

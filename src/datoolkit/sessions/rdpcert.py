@@ -22,6 +22,7 @@ import json
 import os
 import ssl
 import struct
+import tempfile
 import unicodedata
 import warnings
 from datetime import datetime
@@ -161,35 +162,99 @@ async def fetch_tls(host: str, port: int) -> dict:
         writer.close()
 
 
+class PinsUnreadable(CertError):
+    """The file of pinned certificates couldn't be read. It has been set aside (or says why it
+    couldn't be); the message is for the technician."""
+
+
 class PinStore:
     """host:port -> pinned certificate (RDP servers and WinRM listeners), in
-    ~/.config/datoolkit/rdp_pins.json (0600)."""
+    ~/.config/datoolkit/rdp_pins.json (0600).
+
+    The file is replaced whole, by a rename, whenever it changes, so a crash never leaves half
+    of it. One that can't be read (cut short, edited into something else, unreadable) is never
+    taken for "no pins" where trust is decided: `trusted`, `pin` and `forget` set it aside
+    under another name, where it can be looked at or put back, and raise PinsUnreadable for
+    the technician to be told. Until Nov 2026 such a file read as empty, every host was a first
+    connection again with nothing said, and the first one accepted overwrote all the others."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or config_dir() / "rdp_pins.json"
 
     def _load(self) -> dict:
+        """The pins; {} when there is no file. Raises ValueError or OSError for one that can't be read."""
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return {}
+        if not isinstance(data, dict) or not all(isinstance(v, dict) and isinstance(v.get("sha256"), str)
+                                                 for v in data.values()):
+            raise ValueError("it doesn't hold a list of pinned certificates")
+        return data
+
+    def _checked(self) -> dict:
+        try:
+            return self._load()
+        except (OSError, ValueError) as e:
+            why = (e.strerror if isinstance(e, OSError) and e.strerror else str(e)) or type(e).__name__
+        aside = first = self.path.with_name(f"{self.path.name}.unreadable-{datetime.now():%Y%m%d-%H%M%S}")
+        n = 1
+        while aside.exists():                    # never over one set aside before
+            n += 1
+            aside = first.with_name(f"{first.name}-{n}")
+        try:
+            os.replace(self.path, aside)
+        except OSError as e:
+            raise PinsUnreadable(
+                f"The file of pinned certificates ({self.path}) can't be read ({why}), and couldn't be set aside "
+                f"({e.strerror or e}). No certificate is trusted or pinned until it is moved away or repaired.") from e
+        raise PinsUnreadable(
+            f"The file of pinned certificates ({self.path}) couldn't be read ({why}). It was set aside as {aside.name}, "
+            "and nothing in it is trusted: every RDP and WinRM host will ask you to check its certificate again, as on "
+            "a first connection.")
+
+    def _save(self, data: dict) -> None:
+        private_dir(self.path.parent)
+        fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)   # 0600
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=1))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        try:                                     # the rename itself, kept across a power cut
+            dir_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
 
     def get(self, host: str, port: int) -> dict | None:
-        return self._load().get(f"{host.lower()}:{port}")
+        """The pin as Settings shows it. Never raises, and never decides trust: a file that
+        can't be read shows as no pin here and is dealt with by `trusted`."""
+        try:
+            return self._load().get(f"{host.lower()}:{port}")
+        except (OSError, ValueError):
+            return None
+
+    def trusted(self, host: str, port: int) -> dict | None:
+        """The pin a connection is held to, or None when there is none. Raises PinsUnreadable."""
+        return self._checked().get(f"{host.lower()}:{port}")
 
     def pin(self, host: str, port: int, cert: dict) -> None:
-        data = self._load()
+        data = self._checked()
         data[f"{host.lower()}:{port}"] = {k: cert[k] for k in ("sha256", "subject", "issuer", "not_after")} | {
             "pinned": datetime.now().isoformat(timespec="seconds")}
-        private_dir(self.path.parent)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        tmp.replace(self.path)
+        self._save(data)
 
     def forget(self, host: str, port: int) -> bool:
-        data = self._load()
+        data = self._checked()
         if data.pop(f"{host.lower()}:{port}", None) is None:
             return False
-        self.path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        self._save(data)
         return True

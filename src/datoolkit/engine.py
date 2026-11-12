@@ -2138,7 +2138,11 @@ class Engine:
         must match the pin for it, or, the first time, be accepted by the technician and pinned.
         `kind` ("rdp" | "winrm") names the audit events and the hint for finding the certificate."""
         where = f"{host}:{port}"
-        pinned = self.pins.get(host, port)
+        try:
+            pinned = self.pins.trusted(host, port)
+        except rdpcert.PinsUnreadable as e:      # set aside, and said: never read as "no pins"
+            self.log("pins_unreadable", target=where, error=str(e))
+            raise UserError(f"{e} Nothing was sent to {where}; connect again to go on.") from e
         if not cert["tls"]:
             if pinned and not cert.get("chosen"):
                 # A server whose certificate is pinned now says it has no TLS to offer. That
@@ -2190,7 +2194,11 @@ class Engine:
         if answer != "yes":
             self.log(f"{kind}_cert_rejected", target=where, sha256=cert["sha256"])
             raise UserError(f"Certificate of {where} not trusted; {kind.upper()} session not opened.")
-        self.pins.pin(host, port, cert)
+        try:
+            self.pins.pin(host, port, cert)
+        except (rdpcert.PinsUnreadable, OSError) as e:
+            raise UserError(f"The certificate of {where} couldn't be pinned, so nothing was sent: "
+                            f"{e if isinstance(e, rdpcert.PinsUnreadable) else (e.strerror or e)}") from e
         self.log(f"{kind}_cert_pinned", target=where, sha256=cert["sha256"])
 
     @staticmethod
@@ -2208,7 +2216,14 @@ class Engine:
         if not host:
             raise UserError(f"Unknown host {host_name}")
         port = self._pin_port(host)
-        removed = port is not None and self.pins.forget(host.host, port)
+        try:
+            removed = port is not None and self.pins.forget(host.host, port)
+        except rdpcert.PinsUnreadable as e:
+            self.log("pins_unreadable", host=host_name, error=str(e))
+            self._changed()
+            raise UserError(f"{e} There is no pin left to remove.") from e
+        except OSError as e:
+            raise UserError(f"The pin of {host_name} couldn't be removed: {e.strerror or e}") from e
         self.log("pin_forgotten", host=host_name, removed=removed)
         self._changed()
         return removed
