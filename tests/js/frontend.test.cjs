@@ -713,9 +713,11 @@ test("Ctrl+Shift+C in a terminal copies its selection, and leaves the clipboard 
 
 function fakeRdp(app, sid = "rdp1") {
   const log = [];
-  app.run(`S.rdps[${JSON.stringify(sid)}] = { id: ${JSON.stringify(sid)}, state: 3, host: h("div"), view: h("div", { class: "rdp-view", tabindex: 0 }) };`);
+  app.run(`S.rdps[${JSON.stringify(sid)}] = { id: ${JSON.stringify(sid)}, state: 3, host: h("div"), view: h("div", { class: "rdp-view", tabindex: 0 }),
+    fitBtn: h("button"), maxBtn: h("button"), status: h("span") };`);
   const r = app.run(`S.rdps[${JSON.stringify(sid)}]`);
-  r.client = { sendKeyEvent: (down, key) => log.push([down, key]) };
+  r.client = { sendKeyEvent: (down, key) => log.push([down, key]),
+    getDisplay: () => ({ getScale: () => 1, getWidth: () => 0, getHeight: () => 0, scale() {} }) };
   r.keyboard = { reset: () => log.push("reset") };
   app.$("#terms").append(r.host);
   r.host.append(r.view);
@@ -737,6 +739,116 @@ test("texts typed into a remote desktop go one after another, each with the keys
   r.state = 3;
   await app.call("rdpType", r, "y", false);
   assert.deepEqual(log, ["reset", ...keys("y")], "a failed text doesn't stop the next");
+});
+
+// A page whose first queue item is for a remote desktop that is connected.
+async function rdpPage(command, routes = {}) {
+  const app = await page("a", null, routes);
+  const rdp = fakeRdp(app);
+  const sessions = [...state("a").sessions, { ...state("a").sessions[0], id: "rdp1", kind: "rdp", target: "fs01", connected: true }];
+  await app.event({ type: "sessions", sessions });
+  await app.event({ type: "queue", queue: state("a", (s) => { Object.assign(s.queue[0], { session_id: "rdp1", command }); }).queue });
+  app.routes["POST /api/queue/1"] ??= (c) => ({ ok: true, item: { ...state("a").queue[0], session_id: "rdp1", command, ...c.body } });
+  return { app, ...rdp };
+}
+const ENTER = [[1, 0xFF0D], [0, 0xFF0D]];
+const typed = (s) => [...s].flatMap((c) => (c === "\n" ? ENTER : [[1, c.codePointAt(0)], [0, c.codePointAt(0)]]));
+
+test("a command with a tab in it is not typed into a remote desktop, where the tab would be the Tab key", async () => {
+  const { app, r, log } = await rdpPage("Get-Content\tC:\\hosts");
+  for (const label of ["Run", "Insert"]) {
+    button(row(app, 1), label).click();
+    await app.clock.tick(50);
+    assert.equal(app.$(".modal"), null);
+    assert.match(app.toasts().at(-1), /The command of #1 has a tab character in it, which can't be typed into a remote desktop: there it is the Tab key/);
+  }
+  assert.deepEqual(app.posts("/api/queue/1"), [], "not marked run");
+  assert.deepEqual(log, []);
+  // nor as text typed by hand, nor a control character: nothing of it is sent
+  await assert.rejects(app.call("rdpType", r, "a\tb", false), /has a tab character in it/);
+  await assert.rejects(app.call("rdpType", r, "a\x1b[201~b", false), /control characters/);
+  assert.deepEqual(log, []);
+});
+
+test("Insert into a remote desktop asks before a command of several lines, every time: each line break is Enter there", async () => {
+  const { app, r, log } = await rdpPage("Stop-Service spooler\nRemove-Item C:\\spool\\*\nStart-Service spooler");
+  r.typedOk = true;                                             // this session has been typed into before
+  button(row(app, 1), "Insert").click();
+  await app.clock.tick(50);
+  assert.match(app.$(".modal h2").textContent, /Insert will press Enter at each line break/);
+  assert.match(app.$(".modal .warnbox").textContent, /This command has 3 lines\..*every line but the last runs as soon as it is typed/);
+  assert.match(app.$(".modal .prompt-text").textContent, /Remove-Item/);
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(50);
+  assert.deepEqual([app.posts("/api/queue/1").length, log.length], [0, 0]);
+  button(row(app, 1), "Insert").click();
+  await app.clock.tick(50);
+  button(app.$(".modal"), "Type it, line breaks as Enter").click();
+  await app.clock.tick(200);
+  assert.deepEqual(app.posts("/api/queue/1").map((c) => c.body), [{ status: "inserted" }]);
+  assert.deepEqual(log, ["reset", ...typed("Stop-Service spooler\nRemove-Item C:\\spool\\*\nStart-Service spooler")]);
+  // one line: typed without a question, and no Enter
+  const one = await rdpPage("hostname");
+  one.r.typedOk = true;
+  button(row(one.app, 1), "Insert").click();
+  await one.app.clock.tick(50);
+  assert.equal(one.app.$(".modal"), null);
+  assert.deepEqual(one.log, ["reset", ...typed("hostname")]);
+});
+
+test("keys pressed in a remote desktop while a command is typed there are not sent into the middle of it", async () => {
+  const app = await page("a");
+  const { r, log } = fakeRdp(app);
+  const typing = app.call("rdpType", r, "x".repeat(40), true);
+  await app.clock.tick(15);                                     // 16 characters in: the technician hits a key
+  app.call("rdpKey", r, 1, 0x61);
+  app.call("rdpKey", r, 0, 0x61);
+  await app.clock.tick(100);
+  await typing;
+  assert.deepEqual(log, ["reset", ...typed("x".repeat(40)), ...ENTER]);
+  app.call("rdpKey", r, 1, 0x61);                               // typed: keys go through again
+  assert.deepEqual(log.at(-1), [1, 0x61]);
+  r.state = 5;
+  app.call("rdpKey", r, 1, 0x62);
+  assert.deepEqual(log.at(-1), [1, 0x61], "nothing to a desktop that isn't connected");
+});
+
+test("Run group always shows what it will type, and into which sessions, before it types anything", async () => {
+  const grouped = (s) => { s.queue[0].group = s.queue[2].group = "g1"; };
+  const app = await page("a", grouped, { "GET /api/queue/group/g1": () => ({ nums: [1, 3] }) });
+  for (const n of [1, 3]) app.routes[`POST /api/queue/${n}`] = (c) => ({ ok: true, item: { ...state("a", grouped).queue[n - 1], ...c.body } });
+  termSocket(app).open();
+  button(row(app, 1), "Run group").click();
+  await app.clock.tick(50);
+  const items = app.$(".modal").querySelectorAll(".group-item");
+  assert.match(app.$(".modal").textContent, /These 2 commands will be typed at the same moment, each into its session, with Enter/);
+  assert.deepEqual(items.map((i) => i.querySelector(".prompt-text").textContent), ["uptime", "df -h"]);
+  assert.deepEqual(items.map((i) => i.firstChild.textContent), ["#1 into local (local shell)", "#3 into local (local shell)"].map((t) => t.replace("local shell", state("a").sessions[0].target)));
+  assert.deepEqual([app.posts("/api/queue/1").length, app.posts("/api/queue/3").length, app.terminals[0].pasted.length], [0, 0, 0]);
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(50);
+  assert.deepEqual(app.terminals[0].pasted, []);
+  button(row(app, 1), "Run group").click();
+  await app.clock.tick(50);
+  button(app.$(".modal"), "Run all").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, ["uptime", "df -h"]);
+  assert.deepEqual([app.posts("/api/queue/1").map((c) => c.body), app.posts("/api/queue/3").map((c) => c.body)], [[{ status: "ran" }], [{ status: "ran" }]]);
+});
+
+test("a group of which one item can't be started as shown types none of them", async () => {
+  const grouped = (s) => { s.queue[0].group = s.queue[2].group = "g1"; };
+  const app = await page("a", grouped, { "GET /api/queue/group/g1": () => ({ nums: [1, 3] }),
+    "POST /api/queue/3": () => ({ __status: 400, body: { error: "#3 is withdrawn by the AI now, so it can't be marked ran; nothing was changed." } }) });
+  app.routes["POST /api/queue/1"] = (c) => ({ ok: true, item: { ...state("a", grouped).queue[0], ...c.body } });
+  termSocket(app).open();
+  button(row(app, 1), "Run group").click();
+  await app.clock.tick(50);
+  button(app.$(".modal"), "Run all").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, []);
+  assert.deepEqual(app.posts("/api/queue/1").map((c) => c.body), [{ status: "ran" }, { status: "pending" }], "the one that was marked is pending again");
+  assert.match(app.toasts().at(-1), /#3 is withdrawn by the AI now/);
 });
 
 test("Alt+1 in a remote desktop switches tabs here and taps Ctrl there, so Windows opens no menu", async () => {

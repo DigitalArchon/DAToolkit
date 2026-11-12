@@ -560,3 +560,8 @@ a[data-insecure]::after {
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; }
 .check-code { font-family: var(--mono); font-size: 34px; letter-spacing: .2em; text-align: center; margin: 8px 0; }
 .phone-devices { margin: 8px 0; display: flex; flex-direction: column; gap: 4px; }
+
+/* Run group's list of what it will type, and where */
+.group-item { margin-top: 8px; }
+.group-item .prompt-text { margin: 3px 0; }
+.group-item .warn { color: var(--warn); }

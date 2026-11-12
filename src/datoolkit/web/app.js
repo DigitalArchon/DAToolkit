@@ -1851,8 +1851,8 @@ function ensureRdp(sess) {
   setTimeout(renderVision, 0);
   $("#terms").append(r.host);
   r.keyboard = new Guacamole.Keyboard(r.view);
-  r.keyboard.onkeydown = (keysym) => { if (r.state === 3) r.client.sendKeyEvent(1, keysym); return false; };
-  r.keyboard.onkeyup = (keysym) => { if (r.state === 3) r.client.sendKeyEvent(0, keysym); };
+  r.keyboard.onkeydown = (keysym) => { rdpKey(r, 1, keysym); return false; };
+  r.keyboard.onkeyup = (keysym) => { rdpKey(r, 0, keysym); };
   r.view.addEventListener("blur", () => r.keyboard.reset());
   r.view.addEventListener("mousedown", () => r.view.focus());
   new ResizeObserver(() => rdpFit(r)).observe(r.view);
@@ -1915,11 +1915,29 @@ function rdpKeys(r, keysyms) {
   r.view.focus();
 }
 
+// A key the technician presses in the remote desktop's view. Not sent while a command is being
+// typed there for them: it would land in the middle of the command.
+function rdpKey(r, pressed, keysym) {
+  if (r.state === 3 && !r.typingNow) r.client.sendKeyEvent(pressed, keysym);
+}
+
 function keysymFor(ch) {
   if (ch === "\n") return 0xFF0D;
-  if (ch === "\t") return 0xFF09;
   const c = ch.codePointAt(0);
   return (c >= 0x20 && c <= 0x7E) || (c >= 0xA0 && c <= 0xFF) ? c : 0x01000000 | c;
+}
+
+// Text is typed into a remote desktop as key presses, so a line break is the Enter key there
+// (rdpTypeNow) and a tab would be the Tab key, which moves the focus or completes a name instead
+// of standing in the text: text with a tab, or any other control character, is refused, and
+// nothing of it is typed. (Until Nov 2026 a tab was pressed as Tab.)
+function rdpTypable(text, what = "This text") {
+  const plain = text.replace(/\r\n?/g, "\n");
+  if (plain.includes("\t")) {
+    throw new Error(`${what} has a tab character in it, which can't be typed into a remote desktop: there it is the Tab key, which moves the focus or completes a name. Replace the tab with spaces, or put the text on the remote clipboard (Paste text…) and paste it there.`);
+  }
+  if (/[\x00-\x09\x0b-\x1f\x7f-\x9f]/.test(plain)) throw new Error(`${what} has control characters in it, which can't be typed into a remote desktop as keys.`);
+  return plain;
 }
 
 // Type text into whichever window has focus on the remote desktop (Run adds Enter). One text
@@ -1931,23 +1949,28 @@ function rdpType(r, text, enter) {
 
 async function rdpTypeNow(r, text, enter) {
   if (r.state !== 3) throw new Error("The remote desktop is not connected.");
+  const chars = [...rdpTypable(text)];
   // keys still held down there (the Ctrl+Shift of Ctrl+Shift+Enter pressed in the remote
   // desktop) would turn every character into a shortcut, and Enter into Ctrl+Shift+Enter
   r.keyboard?.reset();
-  const chars = [...text.replace(/\r\n?/g, "\n")];
-  for (let i = 0; i < chars.length; i++) {
-    const k = keysymFor(chars[i]);
-    r.client.sendKeyEvent(1, k);
-    r.client.sendKeyEvent(0, k);
-    if (i % 16 === 15) await new Promise((res) => setTimeout(res, 15));   // let the remote app keep up
+  r.typingNow = true;                 // the technician's own keys wait until it is typed (rdpKey)
+  try {
+    for (let i = 0; i < chars.length; i++) {
+      const k = keysymFor(chars[i]);
+      r.client.sendKeyEvent(1, k);
+      r.client.sendKeyEvent(0, k);
+      if (i % 16 === 15) await new Promise((res) => setTimeout(res, 15));   // let the remote app keep up
+    }
+    if (enter) { r.client.sendKeyEvent(1, 0xFF0D); r.client.sendKeyEvent(0, 0xFF0D); }
+  } finally {
+    r.typingNow = false;
   }
-  if (enter) { r.client.sendKeyEvent(1, 0xFF0D); r.client.sendKeyEvent(0, 0xFF0D); }
 }
 
 function rdpPasteText(r) {
   const ta = h("textarea", { rows: 6, class: "mono", spellcheck: "false", placeholder: "Text to send to the remote desktop" });
   modal({ title: `Paste into ${r.id}`, body: h("div", { class: "field" }, ta,
-    h("div", { class: "muted small" }, "“Remote clipboard” puts it on the remote clipboard; then press Ctrl+V there. “Type it” types it into the focused window.")),
+    h("div", { class: "muted small" }, "“Remote clipboard” puts it on the remote clipboard; then press Ctrl+V there. “Type it” types it into the focused window as key presses: every line break is the Enter key there, and text with a tab in it can't be typed.")),
     buttons: [{ label: "Cancel" },
       { label: "Type it", onClick: async () => { await rdpType(r, ta.value, false); } },
       { label: "Remote clipboard", kind: "primary", onClick: () => {
@@ -2656,12 +2679,18 @@ async function runItemNow(num, mode, { readOnly = false } = {}) {
   const r = S.rdps[sess.id];
   if (r) {
     if (r.state !== 3) throw new Error(`The remote desktop ${sess.id} is not connected.`);
-    if (!r.typedOk) {
-      const ok = await confirmModal("Type into the remote desktop", h("div", {},
+    rdpTypable(item.command, `The command of #${num}`);
+    // Insert is there to leave the last word to the technician; in a remote desktop every line
+    // break of a command is Enter, so all but its last line would run at once: asked every time
+    const lines = item.command.split("\n").length, eachEnter = mode === "insert" && lines > 1;
+    if (!r.typedOk || eachEnter) {
+      const ok = await confirmModal(eachEnter ? "Insert will press Enter at each line break" : "Type into the remote desktop", h("div", {},
         h("p", {}, `This types the command into whichever window has focus on ${sess.id}${mode === "run" ? " and presses Enter" : ""}. Click into the right window first (for example an elevated PowerShell).`),
+        eachEnter ? h("div", { class: "warnbox" }, `This command has ${lines} lines. In a remote desktop each line break is typed as the Enter key, so every line but the last runs as soon as it is typed; Insert holds back only the Enter after the last line.`) : null,
         h("pre", { class: "prompt-text" }, item.command),
-        h("p", { class: "muted small" }, "Output isn't captured from a remote desktop: copy it there and use Clipboard → AI, or attach a screenshot. You won't be asked again for this session.")),
-      mode === "run" ? "Type and press Enter" : "Type it", "primary");
+        h("p", { class: "muted small" }, "Output isn't captured from a remote desktop: copy it there and use Clipboard → AI, or attach a screenshot. "
+          + (eachEnter ? "Inserting a command of several lines is asked about every time." : "You won't be asked again for this session."))),
+      mode === "run" ? "Type and press Enter" : eachEnter ? "Type it, line breaks as Enter" : "Type it", eachEnter ? "danger" : "primary");
       if (!ok) return;
       r.typedOk = true;
     }
@@ -2689,27 +2718,38 @@ async function runGroup(group) {
   if (items.some((i) => isWindowSession(i.session_id))) {
     throw new Error("This group includes a window session, whose commands you paste by hand: run its items one at a time.");
   }
-  // what Run would confirm for each item: its risk, the reviewer's "don't run", a cut session,
-  // and the first typing into a remote desktop
+  const sessionOf = (i) => (S.state.sessions || []).find((s) => s.id === i.session_id);
+  const ready = () => {
+    for (const i of items) {
+      const sess = sessionOf(i), up = S.rdps[i.session_id] ? S.rdps[i.session_id].state === 3 : S.terms[i.session_id]?.ws;
+      if (!sess || sess.exited || !up) throw new Error(`Session ${i.session_id} is not open or not connected.`);
+      if (S.rdps[i.session_id]) rdpTypable(i.command, `The command of #${i.num}`);
+    }
+  };
+  ready();
+  // One click types several commands, into several sessions, and which ones is the model's
+  // choice (it names the group): what is about to be typed, and where, is always shown first,
+  // with what Run would have asked about for each item (its risk, the reviewer's "don't run", a
+  // cut session, the first typing into a remote desktop). (Until Nov 2026 a group of read-only
+  // items was typed with nothing shown.)
   const cautions = items.map((i) => [
     i.risk !== "read_only" ? i.risk : "",
     i.review?.status === "done" && i.review.level === "stop" ? "the reviewer said not to run it" : "",
     i.cuts_session ? `it ${i.cuts_session}` : "",
     S.rdps[i.session_id] && !S.rdps[i.session_id].typedOk ? "types into the remote desktop's focused window" : "",
   ].filter(Boolean));
-  if (cautions.some((c) => c.length)) {
-    const danger = items.some((i, k) => i.risk !== "read_only" || cautions[k].includes("the reviewer said not to run it"));
-    const ok = await confirmModal("Run paired probes", h("div", {}, h("p", {}, "Before these run together:"),
-      h("pre", { class: "prompt-text" }, items.map((i, k) => `#${i.num} ${i.session_id}: ${i.command}`
-        + (cautions[k].length ? `\n    ⚠ ${cautions[k].join("; ")}` : "")).join("\n"))), "Run all", danger ? "danger" : "primary");
-    if (!ok) return;
-    for (const i of items) if (S.rdps[i.session_id]) S.rdps[i.session_id].typedOk = true;
-  }
-  for (const i of items) {
-    const sess = (S.state.sessions || []).find((s) => s.id === i.session_id);
-    const ready = S.rdps[i.session_id] ? S.rdps[i.session_id].state === 3 : S.terms[i.session_id]?.ws;
-    if (!sess || sess.exited || !ready) throw new Error(`Session ${i.session_id} is not open or not connected.`);
-  }
+  const danger = items.some((i, k) => i.risk !== "read_only" || cautions[k].includes("the reviewer said not to run it"));
+  const ok = await confirmModal(`Run group ${group}`, h("div", { class: "group-run" },
+    h("p", {}, items.length === 1 ? "This command will be typed into its session, with Enter:"
+      : `These ${items.length} commands will be typed at the same moment, each into its session, with Enter:`),
+    items.map((i, k) => h("div", { class: "group-item" },
+      h("div", {}, h("b", {}, `#${i.num}`), ` into ${i.session_id}`, sessionOf(i)?.target ? ` (${sessionOf(i).target})` : ""),
+      h("pre", { class: "prompt-text" }, i.command),
+      cautions[k].length ? h("div", { class: "small warn" }, `⚠ ${cautions[k].join("; ")}`) : null))),
+  items.length === 1 ? "Run it" : "Run all", danger ? "danger" : "primary");
+  if (!ok) return;
+  for (const i of items) if (S.rdps[i.session_id]) S.rdps[i.session_id].typedOk = true;
+  ready();
   // record all start positions first, then type everything in one go so the starts line up; if
   // one item can't be started as it was shown, none is typed and the others are pending again
   for (const i of items) stillAsShown(i);
