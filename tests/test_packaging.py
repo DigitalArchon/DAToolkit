@@ -1,12 +1,14 @@
 """The AppImage build's scripts (packaging/): what they take from the machine they run on, and
 what they let in. No build is run here (it takes Podman and the network, and build.sh runs inside
 the container), but the parts of the scripts that read the machine or fetch are; the wrapper is
-run whole against a Podman that only notes what it is asked. From DA Assistant's
+run whole against a Podman that only notes what it is asked, and test-locked.sh against an
+AppImage and a pip that are stand-ins, with nothing downloaded. From DA Assistant's
 tests/test_appimage_packaging.py and test_build_scripts.py (Nov 2026)."""
 
 import base64
 import csv
 import hashlib
+import importlib.util
 import io
 import os
 import re
@@ -14,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -23,6 +26,7 @@ PACKAGING = ROOT / "packaging" / "appimage"
 WRAPPER = (ROOT / "packaging" / "build-appimage.sh").read_text()
 BUILD = (PACKAGING / "build.sh").read_text()
 APPRUN = (PACKAGING / "AppRun").read_text()
+LOCKED = (ROOT / "packaging" / "test-locked.sh").read_text()
 README = (ROOT / "packaging" / "README.md").read_text()
 
 
@@ -273,7 +277,10 @@ def test_nothing_is_installed_but_from_a_lock_with_its_hashes_or_built_here():
 
 
 def test_every_locked_package_carries_a_hash_and_the_lock_tools_are_named_exactly():
-    for name in ("requirements", "build-requirements", "sdists", "lock-requirements"):
+    # the four the build installs from, and any other there is (the test tools', once it is written)
+    names = {"requirements", "build-requirements", "sdists", "lock-requirements"}
+    assert all((PACKAGING / f"{name}.lock").is_file() for name in names)
+    for name in sorted(names | {path.stem for path in PACKAGING.glob("*.lock")}):
         entries = re.findall(r"^([\w.-]+)==([^\s]+)((?:\s*\\\s*--hash=sha256:\w+)*)",
                              (PACKAGING / f"{name}.lock").read_text(), re.M)
         assert entries, name
@@ -427,6 +434,17 @@ def test_the_script_that_runs_must_be_the_commits_too(build_repo, tmp_path):
     assert done.returncode == 1 and podman == [] and _named(done.stderr) == ["packaging/build-appimage.sh"]
 
 
+def test_lock_reads_the_working_tree_and_names_a_lock_that_is_new(build_repo):
+    repo, build = build_repo
+    with open(repo / "packaging" / "appimage" / "pins.sh", "a") as f:
+        f.write("# a pin on its way to being changed\n")
+    done, podman = build("lock")
+    assert done.returncode == 0, done.stderr
+    assert "Nothing built" not in done.stderr and podman[-1].endswith(" lock")
+    assert (repo / "packaging" / "appimage" / "test-requirements.lock").read_text() == "pytest==9.9.9\n"
+    assert "new, to git add: packaging/appimage/test-requirements.lock" in done.stdout
+
+
 def test_an_unknown_mode_is_said_before_anything_is_made(build_repo):
     _, build = build_repo
     done, podman = build("--help")
@@ -539,3 +557,154 @@ def test_records_are_brought_up_to_date_once_everything_is_left_out_and_before_t
                     "-name __pycache__ -type d -prune"):
         assert BUILD.index(earlier) < at, earlier
     assert at < BUILD.index("-m compileall") < BUILD.index("mksquashfs")
+
+
+# ---------------------------------------------------------------- the suite, on what ships
+
+def _key(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def test_the_test_tools_are_pytests_alone_locked_and_installed_apart():
+    """The suite ran only in a developer's venv made with --system-site-packages, 32 of whose 79
+    packages were not the versions the AppImage has."""
+    import tomllib
+
+    asked = {_key(line.split(">=")[0].split("==")[0]) for line in
+             (PACKAGING / "test-requirements.in").read_text().splitlines() if line and not line.startswith("#")}
+    shipped = {_key(name) for name in
+               re.findall(r"(?m)^([\w.-]+)(?:\[[^\]]*\])?==", (PACKAGING / "requirements.lock").read_text())}
+    dev = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["optional-dependencies"]["dev"]
+    # everything the dev extra asks for is in the image or in the test tools, and never in both:
+    # what ships is tested as shipped
+    assert {_key(re.match(r"[\w.-]+", dep).group(0)) for dep in dev} <= asked | shipped
+    assert asked == {"pytest", "pytest-asyncio"} and not asked & shipped
+    assert re.search(r"for name in [^;]*\btest-requirements\b[^;]*; do", BUILD)            # locked with the rest
+
+    install = next(line for line in _commands(LOCKED) if " -m pip " in line and not line.lstrip().startswith("#"))
+    for needed in ("-I -m pip --isolated ", " --require-hashes ", " --no-deps ", " --only-binary :all: ",
+                   ' --target "$WORK/test-tools" ', ' -r "$LOCK"'):
+        assert needed in install, needed
+    assert "LOCK=packaging/appimage/test-requirements.lock" in LOCKED
+    # the pinned Python whose pip that is comes as the build's does
+    assert _function(LOCKED, "fetch").split("\n", 1)[1] == _function(BUILD, "fetch").split("\n", 1)[1]
+    assert 'fetch "$PBS_URL" "$PBS_SHA256" "$CACHE/python.tar.gz"' in LOCKED
+    # the image's Python, isolated; the tools' folder after the image's packages, not before them
+    assert 'suite=("$PY" -I -B -c "$RUN" "$WORK/test-tools" -p no:cacheprovider "${@:--q}")' in LOCKED
+    assert "sys.path.append(sys.argv.pop(1))" in LOCKED
+    assert not any("PYTHONPATH" in line for line in LOCKED.splitlines() if not line.lstrip().startswith("#"))
+    assert "packaging/test-locked.sh" in README.split("## Releasing")[1]
+
+
+@pytest.fixture
+def locked_repo(tmp_path):
+    """A checkout with test-locked.sh, two tests and a datoolkit of one file; an "AppImage" that
+    unpacks to a Python with that datoolkit installed (a venv of this Python's, with nothing else
+    in it); and, in the build's cache, a "pinned Python" whose pip only links this Python's own
+    pytest into the folder it is told to install into. curl fails if it is ever run."""
+    import venv
+
+    if not shutil.which("git"):
+        pytest.skip("no git")
+    repo = tmp_path / "repo"
+    (repo / "packaging" / "appimage").mkdir(parents=True)
+    shutil.copy(ROOT / "packaging" / "test-locked.sh", repo / "packaging")
+    (repo / "src" / "datoolkit" / "web").mkdir(parents=True)
+    (repo / "src" / "datoolkit" / "__init__.py").write_text('__version__ = "9.9"\n')
+    (repo / "src" / "datoolkit" / "web" / "app.js").write_text("// the page\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_shipped.py").write_text(
+        "import sys\n\nimport datoolkit\n\n\ndef test_it_is_the_image_that_is_tested():\n"
+        "    assert '/squashfs-root/usr/python/lib/' in datoolkit.__file__ and sys.flags.isolated\n"
+        "    assert sys.path[-1].endswith('/test-tools') and sys.dont_write_bytecode\n")
+    (repo / "tests" / "failing.py").write_text("def test_that_fails():\n    assert not 'what ships works'\n")
+    (repo / ".gitignore").write_text("dist/\n")
+    (repo / "packaging" / "appimage" / "test-requirements.lock").write_text(
+        "pytest==9.9.9 \\\n    --hash=sha256:" + "0" * 64 + "\n")
+
+    image = tmp_path / "image"
+    venv.create(image, with_pip=False, symlinks=True)
+    shutil.copytree(repo / "src" / "datoolkit", next(image.glob("lib/python3.*/site-packages")) / "datoolkit")
+    (repo / "dist").mkdir()
+    appimage = repo / "dist" / "DAToolkit-9.9-x86_64.AppImage"
+    _stub(repo / "dist", appimage.name, '[ "$1" = --appimage-extract ] || exit 64\n'
+          f"mkdir -p squashfs-root/usr && cp -a {shlex.quote(str(image))} squashfs-root/usr/python")
+
+    tools = []
+    for name in ("pytest", "_pytest", "pluggy", "iniconfig", "packaging", "py", "pygments"):
+        spec = importlib.util.find_spec(name)
+        if spec:
+            tools.append(spec.submodule_search_locations[0] if spec.submodule_search_locations else spec.origin)
+    pip = ('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$PIP_LOG"\n'
+           'while [ $# -gt 0 ]; do\n    if [ "$1" = --target ]; then target="$2"; fi\n    shift\ndone\n'
+           + "".join(f'ln -s {shlex.quote(tool)} "$target"/\n' for tool in tools))
+    packed = io.BytesIO()
+    with tarfile.open(fileobj=packed, mode="w:gz") as tar:
+        entry = tarfile.TarInfo("python/bin/python3")
+        entry.size, entry.mode = len(pip.encode()), 0o755
+        tar.addfile(entry, io.BytesIO(pip.encode()))
+    (tmp_path / "cache" / "datoolkit-appimage").mkdir(parents=True)
+    (tmp_path / "cache" / "datoolkit-appimage" / "python.tar.gz").write_bytes(packed.getvalue())
+    (repo / "packaging" / "appimage" / "pins.sh").write_text(
+        'PBS_URL="https://downloads.invalid/python.tar.gz"\n'
+        f'PBS_SHA256="{hashlib.sha256(packed.getvalue()).hexdigest()}"\n')
+
+    _stub(tmp_path / "bin", "curl", 'echo "$*" >> "$CURL_LOG"; exit 22')
+    env = {**_git_env(tmp_path, tmp_path / "bin"), "PIP_LOG": str(tmp_path / "pip.log"),
+           "CURL_LOG": str(tmp_path / "curl.log"),
+           # for systemd-run --user, where there is a user session: the suite's memory cap
+           **{name: os.environ[name] for name in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS") if name in os.environ}}
+    _commit_all(repo, env)
+
+    def locked(*args, **more):
+        return subprocess.run(["bash", "packaging/test-locked.sh", *args], cwd=repo, env={**env, **more},
+                              capture_output=True, text=True, timeout=180)
+
+    locked.env = env
+    return repo, locked, appimage
+
+
+def test_the_suite_runs_on_the_images_python_and_packages_with_the_test_tools_last(locked_repo, tmp_path):
+    repo, locked, appimage = locked_repo
+    done = locked()
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1 passed" in done.stdout
+    assert re.search(r"Testing DAToolkit-9\.9-x86_64\.AppImage: datoolkit 9\.9, Python 3\.\d+\.\d+ and the packages "
+                     r"in the image, with the tests of [0-9a-f]{7,}\.", done.stdout)
+    installs = (tmp_path / "pip.log").read_text().splitlines()
+    assert len(installs) == 1 and installs[0].startswith("-I -m pip --isolated ")
+    assert " --require-hashes " in installs[0] and installs[0].endswith(" -r packaging/appimage/test-requirements.lock")
+    assert not (tmp_path / "curl.log").exists()             # the cache had the pinned Python, with its hash
+    # nothing is left in the checkout, and the temporary folder is gone
+    left = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=repo, capture_output=True, text=True,
+                          env=locked.env).stdout.split()
+    assert left == ["!!", "dist/"]
+    # a failing test fails the script, and pytest's arguments are the script's
+    failed = locked("-q", "tests/failing.py")
+    assert failed.returncode == 1 and "1 failed" in failed.stdout
+    # another AppImage than dist/'s newest
+    moved = tmp_path / "elsewhere.AppImage"
+    shutil.move(appimage, moved)
+    assert "no AppImage to run (none in dist/)" in locked().stderr
+    assert "1 passed" in locked(APPIMAGE=str(moved)).stdout
+    # a cached Python that is not the pinned one is fetched again, over https alone, and not used unchecked
+    installs = (tmp_path / "pip.log").read_text()
+    (tmp_path / "cache" / "datoolkit-appimage" / "python.tar.gz").write_bytes(b"something else")
+    refetch = locked(APPIMAGE=str(moved))
+    assert refetch.returncode != 0 and "passed" not in refetch.stdout
+    assert (tmp_path / "curl.log").read_text().startswith("--proto =https --tlsv1.2 ")
+    assert (tmp_path / "pip.log").read_text() == installs
+
+
+def test_an_appimage_of_another_commit_or_no_lock_is_not_tested(locked_repo, tmp_path):
+    repo, locked, _ = locked_repo
+    (repo / "src" / "datoolkit" / "web" / "app.js").write_text("// the page, since the build\n")
+    (repo / "src" / "datoolkit" / "added.py").write_text("")           # not in the image: no file of the image's differs
+    done = locked()
+    assert done.returncode == 1 and "passed" not in done.stdout
+    assert "was not built from this checkout" in done.stderr and _named(done.stderr) == ["web/app.js"]
+    assert not (tmp_path / "pip.log").exists()
+    (repo / "packaging" / "appimage" / "test-requirements.lock").unlink()
+    done = locked()
+    assert done.returncode == 1 and "passed" not in done.stdout
+    assert "test-requirements.lock is not there" in done.stderr and "build-appimage.sh lock" in done.stderr

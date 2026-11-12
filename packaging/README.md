@@ -38,6 +38,7 @@ reads the version from `pyproject.toml`). Everything else the build uses is in t
 packaging/build-appimage.sh build    # dist/DAToolkit-<version>-x86_64.AppImage (+ .sha256)
 packaging/build-appimage.sh check    # build twice from scratch, compare: must be identical
 packaging/test-appimage.sh           # smoke-test it on Ubuntu, Debian, Fedora, Arch, CachyOS
+packaging/test-locked.sh             # the test suite, on the AppImage's own Python and packages
 packaging/build-appimage.sh lock     # lock what was added to the requirements (review the diff, commit)
 UPGRADE=1 packaging/build-appimage.sh lock   # re-resolve every lock to today's newest
 DIST=/elsewhere packaging/build-appimage.sh build   # the results somewhere other than dist/
@@ -72,8 +73,10 @@ no registry is asked for it). Downloads are https only, redirects included, cach
 | PyGObject, pycairo (source archives, with hashes) | `appimage/sdists.lock` |
 | meson, meson-python, ninja, setuptools, Cython (with hashes) | `appimage/build-requirements.lock` |
 | pip and pip-tools, which write the locks, and what they run on (with hashes) | `appimage/lock-requirements.lock` |
+| pytest and pytest-asyncio, for `test-locked.sh` (with hashes; not in the AppImage) | `appimage/test-requirements.lock` |
 
-Changing any of these changes the AppImage, which is the point: an update is a reviewed commit.
+Changing any of these but the last changes the AppImage, which is the point: an update is a
+reviewed commit.
 Nothing of the build machine gets in: bytecode is unchecked-hash and names its source as it is
 inside the image (`/usr/python/lib/...`), pip's console scripts (which would name the build's
 Python) are left out, and the build stops if any file still names the folder it was built in.
@@ -96,10 +99,36 @@ for those builds only) has it go in source order instead.
 
 If they differ, `diffoscope` on the two files shows where.
 
+## Testing what ships
+
+A developer's venv is not the AppImage: its packages are the newest of the day it was made (and
+the distribution's own, when it was made with `--system-site-packages`), on the system's
+Python. `packaging/test-locked.sh` runs the test suite on the AppImage instead:
+
+```bash
+packaging/test-locked.sh                         # the whole suite, on dist/'s newest AppImage
+packaging/test-locked.sh -q tests/test_images.py # any pytest arguments
+APPIMAGE=/elsewhere/DAToolkit-<version>-x86_64.AppImage packaging/test-locked.sh
+```
+
+It unpacks the AppImage into a temporary folder and has its Python (`-I`, as AppRun runs it)
+run the checkout's `tests/` against the `datoolkit` and the packages installed in the image.
+The image must be of the checkout: if a file of its `datoolkit` is not the one in
+`src/datoolkit`, the script names it and tests nothing. pytest and pytest-asyncio are not in
+the image; they are installed from `appimage/test-requirements.lock`, with hashes, into a
+folder of their own that comes last on the path, so that nothing they bring stands in for a
+package that ships. The pip that installs them is the pinned Python's the build uses
+(`pins.sh`), taken from the build's cache or downloaded and checked as the build does. The
+suite runs under a 3 GB memory cap where there is a systemd user session. Tests that need a
+display, Xvfb or Node skip without them, as anywhere. The script needs git, GNU tar, curl and
+the network (for those few wheels).
+
 ## Releasing
 
 1. Update the version in `pyproject.toml` and `src/datoolkit/__init__.py`, commit, tag.
-2. `packaging/build-appimage.sh check` (reproducible), then `packaging/test-appimage.sh`.
+2. `packaging/build-appimage.sh check` (reproducible), then `packaging/test-locked.sh` (the
+   test suite passes on what was built) and `packaging/test-appimage.sh` (it starts on each
+   distribution).
 3. Attach the AppImage and its `.sha256` to the release.
 
 Rebuild and re-release when a pinned dependency has a security fix: the locks don't move by

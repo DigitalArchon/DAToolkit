@@ -53,7 +53,7 @@ if [ "$mode" = lock ]; then
     # pip-compile keeps the pins of a lock it is writing over: so a requirement added (or a
     # floor raised) is locked without moving everything else to whatever is newest today.
     # UPGRADE=1 re-resolves the lot, the lock tools' own lock with them.
-    for name in requirements build-requirements sdists lock-requirements; do
+    for name in requirements build-requirements sdists lock-requirements test-requirements; do
         if [ "${UPGRADE:-0}" != 1 ] && [ -f "$name.lock" ]; then
             cp "$name.lock" "/out/$name.lock"
         fi

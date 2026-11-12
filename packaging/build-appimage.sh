@@ -176,5 +176,7 @@ case "$mode" in
         git ls-files -z | tar -cf "$WORK/src.tar" --null -T -
         run "$WORK/lock" lock
         cp "$WORK"/lock/*.lock packaging/appimage/
-        git --no-pager diff --stat -- packaging/appimage/*.lock ;;
+        git --no-pager diff --stat -- packaging/appimage/*.lock
+        # a lock written for the first time is in no diff: named, so that it gets added
+        git ls-files --others --exclude-standard -- 'packaging/appimage/*.lock' | sed 's/^/ new, to git add: /' ;;
 esac
