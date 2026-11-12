@@ -190,6 +190,74 @@ def test_the_console_checks_the_pin_on_its_own_connections(tmp_path):
         stop()
 
 
+@pytest.mark.parametrize("host, ssl, through_proxy", [
+    ("127.0.0.2", False, False),              # Basic over plain HTTP, the host's own tick given: the password itself
+    ("192.168.250.9", True, False), ("fs01.local", True, False), ("[fd00::9]", True, False), ("localhost", False, False),
+    ("winsrv.corp.example", True, True),      # not local: the environment's proxy still applies
+])
+def test_the_console_never_reaches_a_local_host_through_the_environments_proxy(monkeypatch, host, ssl, through_proxy):
+    import socket
+    import threading
+
+    import requests
+    from pypsrp.powershell import RunspacePool
+
+    from datoolkit.sessions import psrp_console
+
+    seen = []
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(2)
+
+    def proxy():
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        conn.settimeout(3)
+        data = b""
+        try:
+            while b"\r\n\r\n" not in data:
+                more = conn.recv(65536)
+                if not more:
+                    break
+                data += more
+            conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        except OSError:
+            pass
+        seen.append(data)
+        conn.close()
+    threading.Thread(target=proxy, daemon=True).start()
+    address = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, address)                 # a desktop behind a proxy
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    wsman = psrp_console.connection({"host": host, "port": 1, "user": "bob", "auth": "basic", "ssl": ssl,
+                                     "cert_validation": True}, "CLEARTEXT-PW")
+    # where requests would send it, asked of requests itself and without sending
+    session = wsman.transport._build_session()
+    request = session.prepare_request(requests.Request("POST", wsman.transport.endpoint))
+    chosen = requests.utils.select_proxy(request.url, requests.utils.resolve_proxies(request, session.proxies, session.trust_env))
+    session.close()
+    assert (chosen or None) == (address if through_proxy else None)
+    if host not in ("127.0.0.2", "winsrv.corp.example"):
+        listener.close()
+        return                                             # nothing is sent towards a real network from a test
+    wsman.transport.connection_timeout = wsman.transport.read_timeout = 3
+    wsman.transport.reconnection_retries = 0
+    try:
+        with wsman, RunspacePool(wsman):
+            pass
+    except Exception:  # noqa: BLE001 - nothing answers as WinRM here: only where the request went matters
+        pass
+    listener.close()
+    if through_proxy:
+        assert seen and seen[0].startswith(b"CONNECT winsrv.corp.example:1 ")
+    else:
+        assert seen == []          # it got "POST http://127.0.0.2:1/wsman" with "Authorization: Basic", the password
+
+
 def test_a_pinned_hosts_console_is_given_the_pin():
     import json
     pinned = Host("dc", "winrm", "dc.lan", winrm_cert_validation=False)

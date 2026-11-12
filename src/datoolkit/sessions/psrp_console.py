@@ -197,9 +197,29 @@ def pin_certificate(wsman, sha256: str) -> None:
     transport._build_session = pinned_session
 
 
+def connection(cfg: dict, password: str):
+    """pypsrp's WSMan for these settings, not yet connected.
+
+    A host on this machine or its own network (llm/netguard.py's list: loopback, the private
+    ranges, link-local, .local) is never reached through a proxy from the environment: with
+    HTTP_PROXY set, as on a desktop behind one, requests sent the whole exchange there, and for
+    Basic over plain HTTP that is the password, to a machine the host's "local network only"
+    rule never meant. Any other host keeps the environment's proxy, as before."""
+    from pypsrp.wsman import WSMan
+
+    from datoolkit.llm import netguard
+
+    host, ssl, auth = cfg["host"], bool(cfg.get("ssl", True)), cfg.get("auth", "negotiate")
+    # Basic over plain HTTP (only with the host's "Allow Basic over plain HTTP" tick, on the
+    # local network: winrm.problem) has no message encryption, which pypsrp otherwise insists on
+    return WSMan(host, port=cfg.get("port") or (5986 if ssl else 5985), username=cfg.get("user") or None,
+                 password=password, ssl=ssl, auth=auth, cert_validation=bool(cfg.get("cert_validation", True)),
+                 encryption="never" if not ssl and auth == "basic" else "auto",
+                 operation_timeout=20, read_timeout=30, no_proxy=netguard.is_local(host))
+
+
 def main() -> int:
     from pypsrp.powershell import RunspacePool
-    from pypsrp.wsman import WSMan
 
     cfg = json.loads(os.environ["DATOOLKIT_PSRP"])
     host = cfg["host"]
@@ -213,13 +233,7 @@ def main() -> int:
     print(f"{DIM}Connecting to {host}:{port} over {'HTTPS' if ssl else 'HTTP'} ({cfg.get('auth', 'negotiate')})...{RESET}")
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        auth = cfg.get("auth", "negotiate")
-        # Basic over plain HTTP (only with the host's "Allow Basic over plain HTTP" tick, on the
-        # local network: winrm.problem) has no message encryption, which pypsrp otherwise insists on
-        wsman = WSMan(host, port=port, username=cfg.get("user") or None, password=password, ssl=ssl,
-                      auth=auth, cert_validation=bool(cfg.get("cert_validation", True)),
-                      encryption="never" if not ssl and auth == "basic" else "auto",
-                      operation_timeout=20, read_timeout=30)
+        wsman = connection(cfg, password)
         if ssl and cfg.get("pin"):
             pin_certificate(wsman, cfg["pin"])
         elif ssl and not cfg.get("cert_validation", True):
