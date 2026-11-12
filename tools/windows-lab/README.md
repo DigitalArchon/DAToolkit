@@ -9,7 +9,7 @@ then Enter), RDP through the real page in headless Firefox (WebDriver BiDi).
 
 | Script | What it checks |
 |---|---|
-| `winrm_test.py` | save-time rules; Negotiate, NTLM, Kerberos, Basic, wrong password; the console (streams, non-ASCII, Ctrl+C, Read-Host); HTTPS against the CA store and pinned |
+| `winrm_test.py` | save-time rules (Basic over plain HTTP without the tick, Kerberos to an IP address: both refused, with the reason); Negotiate, NTLM, Basic, wrong password; the console (streams, non-ASCII, Ctrl+C, Read-Host); HTTPS against the CA store and pinned |
 | `console_test.py` | the console's interactive behaviour: output as it arrives, Ctrl+C over HTTP and HTTPS keeping output, Read-Host, a two-line paste |
 | `queue_test.py winrm\|ssh [ids]` | every Windows recipe step run through the queue, the transcript capture, a watch, tool transfers (1 KB to 3.9 MB) |
 | `rdp_test.py` | RDP through guacd: certificate prompt, desktop drawn, Win+R, exact typing, Run on a queued item, clipboard both ways, Ctrl+Alt+Del, live resize, reconnect, linking, security modes, wrong password |

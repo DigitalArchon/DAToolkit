@@ -54,7 +54,16 @@ async def main():
         # ---- save-time rules
         r = app.api("POST", "/api/hosts", {"host": host("LabW11-Basic-HTTP", auth="basic")})
         check(r.get("_error") and "Allow Basic over plain HTTP" in r["detail"], "Basic over HTTP refused without the tick", r)
-        for h in (host("LabW11-HTTP"), host("LabW11-NTLM", auth="ntlm"), host("LabW11-Kerb", auth="kerberos"),
+        # Kerberos to an address can never work (the domain issues tickets by name), so the host
+        # is refused when saved, with what to use instead. Until Nov 2026 it was saved and failed
+        # on connecting; Kerberos that works is kerberos_test.py's, against the lab's domain.
+        r = app.api("POST", "/api/hosts", {"host": host("LabW11-Kerb", auth="kerberos")})
+        check(r.get("_error") == 400 and "Host not saved. Kerberos needs the computer's DNS name" in str(r.get("detail"))
+              and "not an IP address" in str(r.get("detail")) and "Negotiate" in str(r.get("detail")),
+              "Kerberos to an IP address refused when saved, naming the DNS name and Negotiate", r)
+        saved = [h["name"] for h in app.api("GET", "/api/state")["config"]["hosts"]]
+        check("LabW11-Kerb" not in saved, "the refused host is not among the saved ones", saved)
+        for h in (host("LabW11-HTTP"), host("LabW11-NTLM", auth="ntlm"),
                   host("LabW11-Basic-HTTP", auth="basic", winrm_plain_basic=True),
                   host("LabW11-HTTPS-CA", winrm_ssl=True),
                   host("LabW11-HTTPS-Pin", winrm_ssl=True, winrm_cert_validation=False),
@@ -144,13 +153,6 @@ async def main():
               out[-600:])
         print("     wrong password gave:", repr(out.strip()[-400:]))
         app.rules.pop(0)
-        if t:
-            await t.__aexit__()
-
-        # ---- Kerberos on a workgroup machine
-        r, t, out = await open_console(app, "LabW11-Kerb", timeout=60)
-        print("     Kerberos (workgroup, expected to fail) gave:", repr(out.strip()[-500:]))
-        check(t and "Traceback" not in out, "Kerberos failure is reported without a traceback", out[-500:])
         if t:
             await t.__aexit__()
 

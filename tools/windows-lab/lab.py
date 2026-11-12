@@ -100,11 +100,13 @@ class App:
                 return json.loads(data) if data else {}
         except urllib.error.HTTPError as e:
             text = e.read().decode(errors="replace")
+            # the app's own refusals come as {"error": sentence}, FastAPI's as {"detail": ...}
             try:
-                detail = json.loads(text).get("detail", text)
+                body = json.loads(text)
             except ValueError:
-                detail = text
-            return {"_error": e.code, "detail": detail}
+                body = None
+            detail = (body.get("detail") or body.get("error")) if isinstance(body, dict) else None
+            return {"_error": e.code, "detail": detail or text}
 
     async def aapi(self, method: str, path: str, body: dict | None = None, timeout: float = 120) -> dict:
         return await asyncio.to_thread(self.api, method, path, body, timeout)
