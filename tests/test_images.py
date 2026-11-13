@@ -3,7 +3,10 @@ hidden frames or trailing bytes, and blacked-out areas stay black."""
 
 import base64
 import os
+import random
 import struct
+import subprocess
+import sys
 import zlib
 from io import BytesIO
 
@@ -145,6 +148,120 @@ def test_other_formats_and_oversize_are_refused():
     Image.new("L", (12000, 1)).save(buf, "PNG")
     with pytest.raises(ValueError, match="over"):
         images.clean(buf.getvalue())
+
+
+def bare_png(width: int, height: int, depth: int, colour: int, channels: int = 1) -> bytes:
+    """A blank PNG written by hand, so that making it costs no memory to speak of: a few kilobytes
+    that say they are width x height."""
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+    row = b"\0" * (1 + (width * channels * depth + 7) // 8)
+    packer = zlib.compressobj(9)
+    data = b"".join(packer.compress(row) for _ in range(height)) + packer.flush()
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, depth, colour, 0, 0, 0))
+            + chunk(b"IDAT", data) + chunk(b"IEND", b""))
+
+
+_MEASURE = """
+import resource, sys
+from datoolkit.safety import images
+raw = open(sys.argv[1], "rb").read()
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+try:
+    said = images.clean(raw).ext
+except ValueError as e:
+    said = "refused: " + str(e)
+print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) // 1024, said)
+"""
+
+
+def _cost_of_cleaning(tmp_path, raw: bytes) -> tuple[int, str]:
+    """(MB that cleaning `raw` added to a fresh process's peak memory, what clean() said)."""
+    path = tmp_path / "picture.png"
+    path.write_bytes(raw)
+    out = subprocess.run([sys.executable, "-B", "-c", _MEASURE, str(path)], capture_output=True, text=True, timeout=120, check=True)
+    mb, said = out.stdout.strip().split(" ", 1)
+    return int(mb), said
+
+
+def test_a_small_file_that_says_it_is_huge_costs_no_memory(tmp_path):
+    # 5 KB of PNG, 1 bit a pixel, 8000 x 5000: cleaning it took 460 MB. It is refused by its header,
+    # before a pixel is decoded
+    bomb = bare_png(8000, 5000, 1, 0)
+    assert len(bomb) < 10_000
+    mb, said = _cost_of_cleaning(tmp_path, bomb)
+    assert said.startswith("refused") and "million pixels" in said and mb < 30, (mb, said)
+    with pytest.raises(ValueError, match="over 4096px"):
+        images.clean(bare_png(5000, 100, 1, 0))
+
+
+@pytest.mark.parametrize("depth,colour,channels", [(1, 0, 1), (8, 2, 3), (8, 6, 4)], ids=["1 bit", "RGB", "RGBA"])
+def test_the_largest_picture_taken_is_cleaned_in_two_copies_of_its_pixels(tmp_path, depth, colour, channels):
+    # 4096 x 3072, a phone's 12-megapixel photo: 50 MB of pixels as Pillow holds them. Four copies were
+    # alive at once (decoded, upright, converted, and the bytes of the new image)
+    mb, said = _cost_of_cleaning(tmp_path, bare_png(images.MAX_SIDE, images.MAX_PIXELS // images.MAX_SIDE, depth, colour, channels))
+    assert said == "png" and mb < 180, (mb, said)
+
+
+def _photo_with_exif() -> bytes:
+    exif = Image.Exif()
+    exif[0x0112] = 6                                       # Orientation: the phone was held sideways
+    exif[0x010F] = "cam"                                   # Make
+    buf = BytesIO()
+    Image.effect_noise((40, 30), 50).convert("RGB").save(buf, "JPEG", exif=exif.tobytes())
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("tag", [0x011B, 0x0123, 0x014E], ids=["a text where a fraction belongs", "... a number", "... another"])
+def test_exif_that_pillow_cant_write_back_is_a_refusal_not_a_server_error(tag):
+    # one flipped byte: the camera's name stands under a tag that holds numbers. Turning the photo
+    # upright writes its EXIF anew, which raised struct.error or TypeError past the ValueError the
+    # caller turns into "Could not use an attached image"
+    photo = _photo_with_exif()
+    at = photo.index(b"\x01\x0f\x00\x02")                  # the Make tag, of type ASCII
+    damaged = photo[:at] + struct.pack(">H", tag) + photo[at + 2:]
+    assert images.clean(photo).ext == "jpg"
+    with pytest.raises(ValueError, match="not a readable"):
+        images.clean(damaged)
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")                        # Pillow's, of the damage it reads past
+def test_a_damaged_picture_is_cleaned_or_refused_and_nothing_else():
+    # cut short at every length, and with bytes changed, dropped and added all over: whatever the
+    # readers make of it, clean() returns a picture or raises ValueError
+    def encoded(image, fmt, **kw):
+        buf = BytesIO()
+        image.save(buf, fmt, **kw)
+        return buf.getvalue()
+    noise = Image.effect_noise((40, 30), 50).convert("RGB")
+    whole = [encoded(noise, "PNG"), encoded(noise.convert("P"), "PNG", transparency=0), encoded(noise.convert("RGBA"), "PNG"),
+             encoded(Image.new("I;16", (40, 30), 3000), "PNG"), _photo_with_exif(), encoded(noise, "JPEG", progressive=True),
+             encoded(noise.convert("CMYK"), "JPEG"), encoded(noise, "MPO", save_all=True, append_images=[noise]),
+             encoded(noise, "PNG", save_all=True, append_images=[noise, noise])]
+    rng = random.Random(7)
+    damaged = [picture[:n] for picture in whole for n in range(0, len(picture), 7)]
+    for picture in whole:
+        for _ in range(400):
+            raw = bytearray(picture)
+            for _ in range(rng.choice((1, 1, 2, 4, 8))):
+                k, how = rng.randrange(len(raw)), rng.random()
+                if how < 0.5:
+                    raw[k] = rng.randrange(256)
+                elif how < 0.7:
+                    del raw[k:k + rng.randrange(1, 20)]
+                elif how < 0.85:
+                    raw[k:k] = rng.randbytes(rng.randrange(1, 8))
+                else:
+                    raw[k:k + 4] = rng.choice((b"\xff\xff\xff\xff", b"\x00\x00\x00\x00", b"\x7f\xff\xff\xff", b"\x00\x00\x27\x10"))
+            damaged.append(bytes(raw))
+    cleaned = refused = 0
+    for raw in damaged:
+        try:
+            images.clean(raw)
+            cleaned += 1
+        except ValueError:
+            refused += 1
+    assert cleaned + refused == len(damaged) and cleaned and refused
 
 
 async def test_only_the_cleaned_image_is_stored_and_sent(env):  # noqa: F811
