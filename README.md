@@ -91,6 +91,14 @@ python3 -m venv --system-site-packages .venv   # system-site-packages gives acce
 .venv/bin/datoolkit
 ```
 
+WinRM with Kerberos needs one more step from source (the AppImage includes it): the `kerberos`
+extra, which compiles two packages against MIT Kerberos' headers.
+
+```bash
+sudo apt install libkrb5-dev gcc python3-dev   # Debian/Ubuntu/Mint
+.venv/bin/pip install -e ".[kerberos]"
+```
+
 `--no-open` only prints the local URL, for opening it yourself. Treat that URL like a password:
 it grants terminal access.
 

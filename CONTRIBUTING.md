@@ -27,8 +27,10 @@ Two related rules:
   please don't send platform abstraction layers upstream.
 - **GUI only.** The desktop window (pywebview) and `--browser` mode share one web front end.
   There is no terminal UI and none is planned.
-- **Model providers** are anything OpenAI-compatible. Provider-specific code is fine where a
-  provider offers something the others don't (NanoGPT's Private Mode, TEE attestation).
+- **Model providers** are anything that speaks OpenAI's chat completions API or Anthropic's
+  Messages API (`llm/client.py`, `llm/anthropic_api.py`). Provider-specific code is fine where a
+  provider offers something the others don't (NanoGPT's Private Mode, TEE attestation,
+  Anthropic's own search and prompt caching).
 
 ## Development
 
@@ -50,6 +52,12 @@ flow without an API key.
   tests that fail without the change.
 - After editing risk, sensitive-data, redaction or injection rules, run `datoolkit-replay`
   over your own past cases to see what would now be classified differently.
+- The venv above is not what ships: its packages are the day's newest, and the system's own
+  where it was made with `--system-site-packages`. A release is tested on the AppImage itself
+  with `packaging/test-locked.sh`, which runs this test suite on the AppImage's Python and
+  its locked packages (see [packaging/README.md](packaging/README.md#testing-what-ships)). Run
+  it when a change leans on a library's internals (`llm/sdk_guard.py`, `safety/images.py`) or
+  moves a pinned dependency.
 - Document user-visible behaviour in [MANUAL.md](MANUAL.md).
 
 ## Licence
