@@ -730,8 +730,9 @@ class _Lexer:
                     kind = "hash" if w is not None and w.raw.endswith("@") else "brace"
                     if w is not None and (w.raw in ("%", "?") or w.raw.endswith(")") or w.raw.lower() in _BEFORE_BRACE):
                         b.word()                 # `%{`, `){`, `else{`: the block is a word of its own
+                    spaced = t[i + 1:i + 2] in (" ", "\t", "\n")
                     inner, i = self.script(i + 1, "}")
-                    b.lit("\0", "{}", plain=False, lead=kind).groups.append((kind, inner))
+                    b.lit("\0", "{}", plain=False, lead=kind).groups.append((kind, inner, spaced))
                     if i < n and (t[i].isalnum() or t[i] in "{("):
                         b.word()                 # `}else{`
                 else:                            # inside a word: a{b,c} or x{1..3}, plain text to every shell
@@ -905,6 +906,10 @@ _PS_ASSIGN = re.compile(r"(?:" + _TYPE + r")?\$((?:[A-Za-z_]\w*:)?\w+)\s*(?:[-+*
 _STATIC_CALL = re.compile(r"(?:" + _TYPE + r")*+\[([\w.]+)\]::\w+\(\)")
 _PS_MEMBER_SET = re.compile(r"\$[\w:]+(?:\.\w+|\[[^\]]*\]|::\w+)+(?:[-+*/%]|\?\?)?=(?!=)")
 _PS_TARGET = re.compile(r"(?:" + _TYPE + r")?\$((?:[A-Za-z_]\w*:)?\w+)")
+# a number at a word's start (5, 1.5, 500MB, 0x1F, then perhaps `,` or `..`): PowerShell reads `7z` as a command
+_NUMBER = re.compile(r"(?:\d+(?:\.\d+)?(?:[kmgtp]b)?|0x[0-9a-f]+)(?![\w.])|\d+\.\.", _I)
+_SENTENCE = re.compile(r"[\s:;,=()\[\]{}<>|&*?!'\"]")
+_PLAIN_NAME = re.compile(r"[A-Za-z_]\w*")
 _ASSIGN_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "??="}
 _TYPE_LED = re.compile(r"(?:" + _TYPE + r")++(?:::[A-Za-z_]|[$(@'\"]|$)")
 _PS_OPS = {p + op for op in ("eq", "ne", "gt", "ge", "lt", "le", "like", "notlike", "match", "notmatch", "contains", "notcontains", "in", "notin",
@@ -940,16 +945,21 @@ class _Check:
         self.depth += 1
         if self.depth > 40:
             raise _No
-        for pipe in script:
+        for idx, pipe in enumerate(script):
             before = ""
-            for words, side in pipe:
+            for k, (words, side) in enumerate(pipe):
                 for w in side:
                     self.inert(w)
                 self.joined = any(w.lead == "joined" for w in side)
                 if words and any(w.lead == "called" for w in side) and not (
                         (words[0].lead == "lit" and words[0].plain) or (words[0].lead == "brace" and len(words) == 1)):
                     raise _No                    # & (...) or & $x or & "path": PowerShell runs whatever that comes to
-                before = self.stage(words, before, inblock, lenient) or before
+                # A script block given to a command is so many words to a POSIX shell, but only up to the first
+                # `;`, `|` or line break in it: what follows is a command of its own there, and
+                # `... | ForEach-Object { $a; "reboot" }` reboots. So only a block's first statement is read as
+                # PowerShell's alone; the later ones are read as strictly as a line of their own
+                later = (inblock or lenient) and (idx > 0 or k > 0)
+                before = self.stage(words, before, inblock and not later, lenient and not later, later) or before
                 self.joined = False
         self.depth -= 1
 
@@ -970,8 +980,9 @@ class _Check:
         if (self.ps and self.posix) or (self.device and (self.ps or self.posix)):
             raise _No
 
-    def inert(self, w: _W, inblock: bool = True) -> None:
-        """A word that is data to its command: what it nests must only read."""
+    def inert(self, w: _W, inblock: bool = True, assigned: bool = False) -> None:
+        """A word that is data to its command: what it nests must only read. `assigned`: the word is `name={ ... }`
+        where a POSIX shell would take `name={` for a variable set and the block's text for the command."""
         static = _STATIC_CALL.match(w.raw)       # [type]::Method(...), the word's first call
         for g in w.groups:
             kind = g[0]
@@ -993,7 +1004,10 @@ class _Check:
             elif kind == "paren":
                 self.script(g[1], inblock, lenient=True)
             elif kind == "brace":                # a script block given to a command: to a POSIX shell, words
-                self.script(g[1], True, lenient=True)
+                if assigned and g[2]:
+                    self.script(g[1], False, False)
+                else:
+                    self.script(g[1], True, lenient=True)
             elif kind == "hash":
                 self.hash(g[1])
             else:                                # a method called on a value: only the ones that change nothing
@@ -1006,25 +1020,41 @@ class _Check:
                             self.inert(x)
 
     def hash(self, script: list) -> None:
-        """PowerShell's @{ key = value; ... }: a value may be a command, which then runs."""
+        """PowerShell's @{ key = value; ... }. A value may be a command, which then runs. And each entry after
+        the first starts a command of its own for a POSIX shell: `key = value` runs `key`, `key= value` runs
+        `value` with a variable set for it, and `key={ value }` likewise."""
         self.ps = True
-        for pipe in script:
+        for idx, pipe in enumerate(script):
             before = ""
             for k, (words, side) in enumerate(pipe):
+                for w in side:
+                    self.inert(w)
                 if k or not words:
-                    before = self.stage(words, before, True) or before
+                    before = self.stage(words, before, False, False, True) or before
                     continue
-                first = words[0]
-                if len(words) > 1 and words[1].plain and words[1].s == "=":
-                    rhs = words[2:]
-                elif "=" in first.raw and first.lead == "lit":
-                    rest = first.raw.split("=", 1)[1]
-                    rhs = ([_W(rest)] if rest and first.plain else []) + words[1:]
-                    if rest and not first.plain:
-                        self.inert(first)
-                else:
+                first, more = words[0], words[1:]
+                if idx and _deny(" ".join(w.raw for w in words))[0] != "read_only":
+                    raise _No                    # a key that is a command's name: `reboot = 1`
+                if more and more[0].plain and more[0].s == "=" and first.lead in ("lit", "str") and not first.groups and not first.exps:
+                    self.value(more[1:], True)
+                    continue
+                key, eq, rest = first.raw.partition("=")
+                if not eq or first.lead != "lit" or not _PLAIN_NAME.fullmatch(key):
                     raise _No
-                self.value(rhs, True)
+                if not rest:                     # key= value
+                    if idx:
+                        self.stage(more, "", False, False)
+                    else:
+                        self.value(more, True)
+                    continue
+                if idx and more and not (more[0].plain and more[0].s.lower() in _PS_OPS and more[0].s != "*"):
+                    raise _No                    # key=1 word: the word is a command to a POSIX shell
+                if first.plain:
+                    self.value([_W(rest)] + more, True)
+                else:
+                    self.inert(first, True, assigned=bool(idx))
+                    for x in more:
+                        self.inert(x, True)
 
     def ping(self, w: _W) -> bool:
         """Whether .Send( is called on a Ping: `(New-Object Net.NetworkInformation.Ping).Send(...)`, or a variable
@@ -1042,16 +1072,13 @@ class _Check:
             self.pings.add(name.lower())
         else:
             self.pings.discard(name.lower())
-        if not rhs:
-            return
-        if rhs[0].plain and rhs[0].s[:1].isalpha():
-            self.command(rhs, "", inblock)
-        else:
-            for x in rhs:
-                self.inert(x, inblock)
+        if rhs:                                  # a statement of its own: `$a = $b = Stop-Computer`, `$x = C:\tools\x.exe`
+            self.stage(rhs, "", True, lenient=True)
 
-    def stage(self, words: list, before: str = "", inblock: bool = False, lenient: bool = False) -> str:
-        """One command of a pipeline; `before` is what kind the stages before it were. Returns its kind."""
+    def stage(self, words: list, before: str = "", inblock: bool = False, lenient: bool = False, later: bool = False) -> str:
+        """One command of a pipeline; `before` is what kind the stages before it were. Returns its kind.
+        `inblock` and `lenient` hold where only PowerShell would run the statement (the first one of a script
+        block given to a command, a value); `later` for the statements after it (see script)."""
         words = list(words)
         while words and words[0].plain and words[0].s == "!":
             words.pop(0)
@@ -1061,7 +1088,9 @@ class _Check:
         if w.plain and w.s.lower() in _KEYWORDS:
             return self.keyword(w.s.lower(), words[1:], before, inblock)
         if w.lead in ("brace", "paren") and w.raw in ("{}", "()") and len(words) == 1:
-            self.script(w.groups[0][1], inblock or w.lead == "brace", lenient and w.lead == "paren")
+            # ( ... ) or { ...; } as a command: a POSIX shell runs what is inside (PowerShell too, after `&`),
+            # so it is read as strictly as the line it stands on
+            self.script(w.groups[0][1], inblock, lenient and w.lead == "paren")
             return ""
         first = w.raw[:1]
         if w.lead == "sub":                      # $(...) as the command: a POSIX shell runs what it prints
@@ -1072,8 +1101,10 @@ class _Check:
         if len(words) == 1 and w.plain and re.fullmatch(r"\d+\.\.\d+", w.s):
             self.ps = True                       # 1..254: a range, the start of a PowerShell pipeline
             return ""
-        if w.lead == "str" or (lenient and (first.isdigit() or first in "-+,.")):
-            if not lenient:                      # a string alone is output to PowerShell and a program's name to a POSIX shell
+        if w.lead == "str" or ((lenient or later) and w.lead == "lit" and (_NUMBER.match(w.s) or (w.plain and w.s.lower() in ("-not", "-join", "-split")))):
+            # a string alone is output to PowerShell and a program's name to a POSIX shell: only where PowerShell
+            # alone would run it, or where it is no name a program could have ("Free: $x GB")
+            if w.lead == "str" and not lenient and not (later and _SENTENCE.search(w.s)):
                 raise _No
             for x in words:
                 self.inert(x, inblock)
@@ -1099,8 +1130,8 @@ class _Check:
                 self.value(([_W(rest)] if rest and re.fullmatch(r"[\w.-]+", rest) else []) + words[1:], inblock, m.group(1))
                 return ""
             name = next((e[0] for e in w.exps if e[0]), None)
-            if not inblock and (not name or name == "_" or not re.search(r"[a-z]", name)):
-                raise _No
+            if not inblock and (not name or (not re.match(r"\$_[.\[]", lead) if name == "_" else not re.search(r"[a-z]", name))):
+                raise _No                        # $SHELL, $0, a bare $_ (the last word of the command before, to bash)
         if len(words) > 1 and words[1].plain and words[1].s in _ASSIGN_OPS:
             m = _PS_TARGET.fullmatch(w.raw)
             if not m:
@@ -2194,9 +2225,6 @@ def _dism(a, c=None):
                          r"|cleanup-wim|spsuperseded|resetbase)")
     return (all(x.startswith("/") for x in a) and not any(changes.match(x) for x in a)
             and (any(x.startswith("/get-") for x in a) or ("/cleanup-image" in a and bool({"/checkhealth", "/scanhealth"} & set(a)))))
-
-
-_PLAIN_NAME = re.compile(r"[A-Za-z_]\w*")
 
 
 def _test(a, c=None, arithmetic=False):

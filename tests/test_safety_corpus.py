@@ -262,6 +262,54 @@ def test_a_command_that_changes_state_reaches_its_level_whatever_the_model_said(
     assert not low, low
 
 
+# Lines a reader could be written into, each of which runs the command put in its place: after a separator, in
+# a substitution, as the text of a shell, as a prefix's command, in a PowerShell block or value. The second
+# string holds the characters a command must not have to fit the line's quoting.
+RUNS_IT = {
+    "ls; {}": "", "ls && {}": "", "{} | cat": "", "ls | {}": "", "ls\n{}": "", "({})": "", "{{ {}; }}": "", "echo $({})": "", 'echo "$({})"': "",
+    "bash -c '{}'": "'", 'sh -lc "{}"': '"$`\\', "sudo -u root {}": "", "time {}": "", "timeout 5 {}": "", "ssh host '{}'": "'",
+    "find . -exec {} \\;": ";|&\n", "xargs {}": "", "if true; then {}; fi": "", "for i in 1 2; do {}; done": "", "diff <({}) /dev/null": "",
+    "FOO=1 {}": "", "env {}": "", "busybox {}": "", "docker exec web {}": "", "kubectl exec pod -- {}": "", "ls # note\n{}": "",
+    "echo hi \\\n{}": "", "ls -la &\n{}": "", "show version\n{}": "", 'powershell -NoProfile -Command "{}"': '"$`\\', "cmd /c {}": "",
+    "Get-Date | ForEach-Object {{ {} }}": "", "if ($true) {{ {} }}": "", "Invoke-Command -ComputerName dc01 {{ {} }}": "", "& {{ {} }}": "",
+    "$x = {}": "", "Measure-Command {{ {} }}": "", "Get-Service | Where-Object {{ {} }}": "", "Select-Object @{{n='x';e={{ {} }}}}": "",
+    "try {{ {} }} catch {{ }}": "", "foreach ($i in 1..2) {{ {} }}": "", "Get-Date | ForEach-Object {{ $a = 1; {} }}": "",
+    "Select-Object @{{n='x'; e={{ {} }}}}": "", "Select-Object @{{n='x';e= {} }}": "", "Get-Item -Path ({})": "", "Get-Item -Path $({})": "",
+    'Write-Host "$({})"': "", "if (Test-Path x) {{ Get-Date }} else {{ {} }}": "", "Where-Object {{ $_.x -eq 1 -and ({}) }}": "",
+    "ForEach-Object {{ $x = {} }}": "", "Select-Object @{{a=1; b = {} }}": "", "Get-Date | ForEach-Object {{ $_.Name\n{} }}": "",
+    "[pscustomobject]@{{A=1; B=({}) }}": "", "Get-Date | Sort-Object {{ {} }}": "", "1..3 | % {{ {} }}": "",
+}
+
+
+def test_a_command_that_changes_state_is_not_confirmed_wherever_a_readers_line_would_run_it():
+    commands = [c for c, _ in _rows("commands_that_change.jsonl")[::20] if c[:1] not in "'\""]     # (a quoted word alone is a string there)
+    kept = [t.format(c) for c in commands for t, clash in RUNS_IT.items()
+            if not any(ch in c for ch in clash) and effective("read_only", t.format(c))[0] == "read_only"]
+    assert not kept, kept
+
+
+@pytest.mark.parametrize("command", [
+    # a script block is words to a POSIX shell only up to its first `;`: what follows runs there
+    'Get-Date | ForEach-Object { $a = 1; "reboot" }', 'Get-Date | ForEach-Object { $x = "/sbin/reboot"; $_ }',
+    # a hashtable's later entries start commands of their own there: key={ value }, key= value, key = value
+    "Select-Object @{n='x';e={ \"reboot\" }}", "Select-Object @{n='x';e= \"reboot\" }", "Get-Item x | Select-Object @{a=1; reboot = 1}",
+    "Select-Object @{x=1; a=1 /tmp/evil}",
+    # a value may be a command, and a path is one
+    "$x = /sbin/reboot", "$x = C:\\tools\\x.exe", "$a = $b = Stop-Computer", "Get-Date | ForEach-Object { . ./x.ps1 }",
+    "Measure-Command { Get-ChildItem | % Delete }", "{ $_; }", "{ $SHELL -f /tmp/x; }",
+])
+def test_what_a_posix_shell_would_run_inside_a_powershell_line_is_read_as_its_command(command):
+    assert not reads_only(command)
+
+
+@pytest.mark.parametrize("command", [
+    "Get-ChildItem | Select-Object Name, @{n='MB'; e={ $_.Length / 1MB }}", 'Get-Service | ForEach-Object { $n = $_.Name; "$n is $($_.Status)" }',
+    "Get-ChildItem | ForEach-Object { $_.Name }", '$x = 5; $y = "text"; $x', "if ($env:USERDNSDOMAIN) { Resolve-DnsName $env:USERDNSDOMAIN } else { 'No domain to resolve' }",
+])
+def test_ordinary_powershell_blocks_are_still_confirmed(command):
+    assert reads_only(command)
+
+
 @pytest.mark.parametrize("command,level", [
     # each kept the model's read_only until Nov 2026: no rule had a word for it
     ("Stop-VM dc01 -TurnOff -Force", "disruptive"), ("Remove-DhcpServerv4Scope -ScopeId 10.0.0.0 -Force", "disruptive"),
