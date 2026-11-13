@@ -271,11 +271,18 @@ undoing each other's work:
   - output sent to a file (`>`, `>>`, `2> errors.txt`, `| tee`; `2>/dev/null` and `2>&1` are
     fine);
   - a command too long to read in full: over 32,000 characters, a long run of base64 or hex
-    counting as one word ("too long for the local rules to read in full").
+    counting as one word ("too long for the local rules to read in full");
+  - a statement that begins with a variable (`$x`, `$s.Status`, `$p = Get-Process`): a value
+    to PowerShell, and to bash the command the variable holds, set by an earlier line the
+    rules never saw. It keeps its read-only label in a WinRM session, which can only be
+    PowerShell, and for the variables PowerShell defines itself (`$env:COMPUTERNAME`,
+    `$PSVersionTable`, `$Host`); in any other session it is shown as modifying. After `sudo`
+    or another prefix a variable is the command to run in every shell (`sudo $x`), and is
+    never read only.
 
   The rules read one command line at a time. They don't follow what an earlier command left
-  in the shell (a variable, an alias, a function), so a line that runs a variable's value
-  (`$x`) is judged without knowing the value: read it together with the line that set it.
+  in the shell (an alias, a function, a variable used as an argument), so read a line that
+  depends on one together with the line that set it.
 - **A recipe's step keeps its author's label.** A recipe is its author's text, a built-in one's
   or your own, and the AI can only name a recipe, not write its steps. So where the rules have
   nothing against a step but don't know it as a reader (a loop over the users' crontabs, a

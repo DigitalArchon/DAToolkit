@@ -391,7 +391,9 @@ A Local provider is reached directly, never through a proxy from your environmen
   the keyboard shortcut and can be watched, so it stands only for a command the local rules
   know as one that only reads: a named reader in a form that reads, with nothing on the line
   the rules can't see (an operand hidden in an unquoted expansion, text handed to another
-  shell or an interpreter, output sent to a file, a command too long to read in full). A
+  shell or an interpreter, output sent to a file, a command too long to read in full, a
+  statement that begins with a variable anywhere but in a WinRM session, where only
+  PowerShell can be reading it). A
   command the AI calls read-only that the rules don't know is shown as modifying, said to be
   unknown to them, and can't be run by the shortcut or watched. A dry run is rated by the same
   rules as any other command, so a rehearsal is read only only where the rules confirm it
