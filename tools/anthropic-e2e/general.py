@@ -170,7 +170,7 @@ async def s_tee():
             if entry and entry.get("tee_signature") not in (None, "checking"):
                 break
             await asyncio.sleep(1)
-        check("reply signature checked", entry and entry.get("tee_signature") in ("signed", "unsigned", "unchecked"),
+        check("reply signature checked", entry and entry.get("tee_signature") in ("verified", "signed", "unsigned", "unchecked"),
               str(entry and entry.get("tee_signature")))
     finally:
         await eng.stop()

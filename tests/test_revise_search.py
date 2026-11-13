@@ -340,6 +340,10 @@ def test_snippets_are_cut_at_the_given_length():
     "Let me lay out my working hypotheses and pull the relevant config.",                          # Qwen 3.8 27B
     "Before we change it, I want to confirm the bridge port setup. Then we'll add the interface to the list.",
     "I suspect the guest VLAN is missing from the LAN list. Let’s inspect the relevant config on",  # cut off, curly quote
+    # live against Anthropic's API, Nov 2026: each with only the board updated and nothing queued
+    "I'm queuing three commands: overall filesystem usage, the biggest directories under `/`, and large recent files. "
+    "Please run them and send back the output.",                                                  # Claude Opus 4.6
+    "Root nearly full — let's find the culprit. I'll start with overall usage, then drill into the biggest directories.",  # Sonnet 4.6
 ])
 def test_promises_are_recognised(text):
     from datoolkit.engine import promises_commands

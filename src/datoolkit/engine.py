@@ -98,7 +98,8 @@ STALE_NUDGE = (
 # A sentence that announces commands, or a change, that should be in the queue: "Now I need you
 # to run a few more commands to find out." (GLM 5.3), "I'll also make it persistent." and
 # "Queue these win01 checks:" (Kimi K2.7 Code), "The fix is to turn on X." (Qwen 3.8), "I've
-# queued two checks" with nothing queued (Qwen 3.8 27B). A sentence about items already queued
+# queued two checks" with nothing queued (Qwen 3.8 27B), "I'm queuing three commands: … Please run
+# them" and "I'll start with overall usage" (Claude Opus 4.6, Sonnet 4.6). A sentence about items already queued
 # (#n, "in the queue", "pending") is not a promise.
 _PROMISE = re.compile(
     r"\b(I need you to|please|could you|can you|now|next)\b[^.?!\n]{0,40}\b(run|execute|try|check|paste)\b[^.?!\n]{0,40}"
@@ -111,7 +112,11 @@ _PROMISE = re.compile(
     r"check|queue|start|inspect|pull|look at|update the hypothesis board and queue)\b"
     r"|^\s*(queue|run|try|execute|paste)\s+(these|this|the following|them|both)\b"
     r"|\bthe (fix|next step|change) (is|would be|will be) (to|one|a single|simple|this)\b|\bthe (fix|next step)\s*[:—–]"
-    r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b", re.I | re.M)
+    r"|\b(here (are|is)|below (are|is))\b[^.?!\n]{0,30}\b(commands?|checks?|steps?)\b"
+    # said while only the board was updated, with nothing queued (Claude Opus 4.6 and Sonnet 4.6, Nov 2026)
+    r"|\bI['’]?m\s+(now\s+|just\s+|also\s+)?(queu(?:e)?ing|proposing|adding|lining up)\b"
+    r"|\b(I['’]?ll|I will|let me|we['’]?ll)\s+(start|begin)\s+(with|by)\b|\blet['’]?s\s+(find|dig|drill|narrow)\b"
+    r"|\bplease run (them|these|those|both)\b", re.I | re.M)
 _ALREADY_QUEUED = re.compile(r"#\d+|\b(in|from) (the|your) queue\b|\balready queued\b|\bpending\b|\bqueued (above|earlier)\b",
                              re.I)
 
