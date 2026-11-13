@@ -114,7 +114,7 @@ def test_a_windows_title_is_one_line_in_the_roster_without_the_marker():
 
 
 @pytest.mark.parametrize("verdict, level", [
-    ("proceed", "ok"), ("Proceed.", "ok"), ("**proceed**", "ok"), ("safe to proceed", "ok"),
+    ("proceed", "ok"), ("Proceed.", "ok"), ("**proceed**", "ok"), ("safe to proceed", "ok"), ("It's safe to proceed.", "ok"),
     ("proceed with care", "care"), ("proceed with caution", "care"), ("proceed, but back up the config first", "care"),
     ("looks fine", "care"), ("yes", "care"), ("probably proceed", "care"),
     ("do not run", "stop"), ("DO NOT RUN", "stop"), ("don't run", "stop"), ("Not safe to proceed", "stop"),

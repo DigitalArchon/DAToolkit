@@ -2655,7 +2655,7 @@ class Engine:
         if case is None and case_id:
             try:
                 case = Case.load(case_id)
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError):
                 case = None
         if case is not None:
             return {"case": case_id, "case_name": case.name, "client": case.client, "sensitivity": case.sensitivity}
@@ -2692,7 +2692,7 @@ class Engine:
         out = []
         root = self._baseline_root()
         dirs = [root / self._host_key(sid)] if sid else sorted(root.iterdir()) if root.is_dir() else []
-        origins: dict[str, dict] = {}         # one look at each case, however many baselines it has
+        origins: dict[tuple, dict] = {}       # one look at each case, however many baselines it has
         for d in dirs:
             for f in sorted(d.glob("*.json")) if d.is_dir() else []:
                 try:
@@ -4903,7 +4903,7 @@ class Engine:
             level = ""
         elif re.search(r"\b(not|never|stop|abort|halt|unsafe|dangerous|refuse|reject|avoid|cancel)\b|^no\b", v):
             level = "stop"
-        elif re.fullmatch(r"(it is |it's )?((safe|ok|okay|fine) to )?proceed[.!]?", v):
+        elif re.fullmatch(r"(it is |its )?((safe|ok|okay|fine) to )?proceed[.!]?", v):     # "it's": its quote is gone by now
             level = "ok"
         else:
             level = "care"
