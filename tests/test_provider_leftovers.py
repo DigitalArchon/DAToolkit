@@ -1,15 +1,17 @@
 """What a provider leaves behind when it is deleted or changed: nothing learned or set for it
 passes to a new one of its name, and the top bar shows no attestation for an address or a model
-that is no longer in use."""
+that is no longer in use. And private/ models on a provider that can't send them sealed."""
 
 import asyncio
 
 import pytest
 
+from datoolkit import engine as engine_mod
 from datoolkit.config import Config, Provider
 from datoolkit.engine import Engine, UserError
+from datoolkit.llm.anthropic_api import AnthropicClient
 
-from test_engine import env  # noqa: F401
+from test_engine import BASE, env  # noqa: F401
 
 VERIFIED = {"status": "verified", "kind": "tee", "model": "TEE/glm-5.3", "summary": "attested"}
 
@@ -124,3 +126,42 @@ async def test_a_default_model_chosen_by_the_list_is_attested_like_a_chosen_one(
     await engine.list_models("Fake")
     assert engine.cfg.active_model == "TEE/glm-5.3"
     assert engine.attestation["model"] == "TEE/glm-5.3" and engine.attestation["status"] != "verified"
+
+
+# ---------------------------------------------------------------- private/ models and the Anthropic API
+
+async def test_private_models_are_not_offered_or_accepted_on_the_anthropic_api(tmp_path, monkeypatch):
+    cfg = Config(providers=[Provider("Compat", "https://zz-gateway.example/anthropic", api="anthropic")])
+    engine = Engine(cfg, lambda e: None, tmp_path / "rt", save_config=lambda c: None)
+
+    async def listed(self):
+        return ["zz-plain-model", "private/zz-model", "Private/zz-other"], {}
+
+    async def never(base_url):
+        raise AssertionError("the Private Mode list was asked for")
+
+    monkeypatch.setattr(AnthropicClient, "list_models_detailed", listed)
+    monkeypatch.setattr(engine_mod, "offers_private_mode", lambda base_url: True)
+    monkeypatch.setattr(engine_mod, "list_private_models", never)
+    assert [m["id"] for m in await engine.list_models("Compat")] == ["zz-plain-model"]
+    with pytest.raises(UserError, match="only ever sent sealed.*Compat is set to the Anthropic API"):
+        engine.select_model("Compat", "private/zz-model")
+    assert engine.cfg.active_model == ""
+    engine.new_case("confidential client", "confidential")               # where a private/ model would be allowed
+    with pytest.raises(UserError, match="only ever sent sealed"):
+        engine.select_model("Compat", "private/zz-model")
+    # one selected before (the provider's API was changed since, or the file edited): refused when used, and unselected
+    engine.cfg.active_provider, engine.cfg.active_model = "Compat", "private/zz-model"
+    with pytest.raises(UserError, match="only ever sent sealed"):
+        engine.send("the firewall drops 10.20.0.0/16")
+    assert engine.chat == []
+    engine.new_case("another", "open")
+    assert engine.cfg.active_model == ""
+    await engine.stop()
+
+
+async def test_changing_a_provider_to_the_anthropic_api_unselects_its_private_model(env):  # noqa: F811
+    engine, _, _ = env
+    engine.select_model("Fake", "private/glm-5-3")
+    engine.save_provider({"name": "Fake", "base_url": BASE, "api": "anthropic"}, original_name="Fake")
+    assert engine.cfg.active_model == "" and engine.attestation is None

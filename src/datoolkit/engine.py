@@ -900,7 +900,12 @@ class Engine:
                     raise UserError(f"Could not list models from {netguard.shown(prov.base_url)}: {e}") from e
                 # an Anthropic-compatible endpoint without a model list: its default model is the one
                 ids = [prov.default_model]
-            if offers_private_mode(prov.base_url):
+            if self._api(prov) == "anthropic":
+                # private/ models are only ever sent sealed, which the OpenAI-compatible path alone
+                # does (_check_tier): on a provider set to the Anthropic API none can be used, so
+                # none is offered
+                ids = [m for m in ids if not is_private_mode(m)]
+            elif offers_private_mode(prov.base_url):
                 try:
                     ids = sorted(set(ids) | set(await list_private_models(prov.base_url)))
                 except Exception as e:  # noqa: BLE001 - the plain models are still usable
@@ -1619,6 +1624,15 @@ class Engine:
 
     def _check_tier(self, prov: Provider, model: str) -> str:
         tier = detect_tier(model, prov.base_url, prov.tier_overrides)
+        if is_private_mode(model) and self._api(prov) == "anthropic":
+            # A private/ model is rated end-to-end encrypted by its name, and is only ever sent
+            # sealed, to its enclave through the provider's relay: the OpenAI-compatible path
+            # does that (_client), the Anthropic one would send it as it is. Refused here, for
+            # every use of a model, with a sentence; until Nov 2026 it could be chosen, and the
+            # guard on the request then stopped it with an error of Python's own.
+            raise UserError(f"{model} is an end-to-end encrypted (private/) model, which is only ever sent sealed, "
+                            f"and {prov.name} is set to the Anthropic API, which can't send it so. Choose another "
+                            "model, or set the provider's API to OpenAI under Settings → Providers.")
         if self.case and tier not in SENSITIVITY_TIERS[self.case.sensitivity]:
             raise UserError(f"This case is {self.case.sensitivity.upper()}: {tier.upper()}-tier models "
                             f"like {model} are not permitted.")
@@ -2150,7 +2164,8 @@ class Engine:
         self._changed()
 
     def _drop_disallowed_model(self) -> bool:
-        """Unselect the chat model if the case's sensitivity doesn't allow it. True if it did. Its
+        """Unselect the chat model if it can't be used: the case's sensitivity doesn't allow it,
+        or its provider can't send it as it must be sent (_check_tier). True if it did. Its
         attestation goes with it: nothing is selected, so nothing is shown as attested."""
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov and self.cfg.active_model:
