@@ -20,7 +20,7 @@ _I = re.IGNORECASE
 SECRET_FILES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"/etc/g?shadow-?(?![\w.])"), "reads password hashes"),
     (re.compile(r"(?:^|[\s/\\'\"])(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|ssh_host_\w+_key)(?![\w.])"), "reads a private SSH key"),
-    (re.compile(r"(?:/ssl/private/|/letsencrypt/(?:live|archive)/\S*privkey|\bpriv(?:ate)?[\w.-]*\.pem\b|\.key(?![\w.])|\.(?:p12|pfx|jks|keystore|kdbx|ppk)(?![\w.]))", _I),
+    (re.compile(r"(?:/ssl/private(?![\w.-])|/letsencrypt/(?:live|archive)(?:/?(?=[\s'\"]|$)|/\S*privkey)|\bpriv(?:ate)?[\w.-]*\.pem\b|\.key(?![\w.])|\.(?:p12|pfx|jks|keystore|kdbx|ppk)(?![\w.]))", _I),
      "reads a private key or key store"),
     (re.compile(r"(?:^|[\s/\\'\"=])\.env(?!\.(?:example|sample|dist|template)\b)(?:\.[\w-]+)?(?![\w/\\.-])"),
      "reads an environment file (often holds passwords)"),
