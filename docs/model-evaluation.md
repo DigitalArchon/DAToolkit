@@ -2,7 +2,8 @@
 
 *Evaluation of 9 models, October 2026, DA Toolkit 0.1.0b12 → 0.1.0b13*
 
-DA Toolkit works with any OpenAI-compatible model. A good diagnosis isn't enough on its own,
+DA Toolkit works with any OpenAI- or Anthropic-compatible model. A good diagnosis isn't enough
+on its own,
 though: the model also has to work inside a gated console. It should put every command it
 wants run into the queue, say what it is doing in words, label risk honestly, and remember
 the ground rules the technician set an hour ago.
@@ -25,6 +26,10 @@ your own key.
 | DeepSeek V4 Pro | 4/6 | 3.2 | **Usable with 0.1.0b13** (3/3, quality 4.0 with the changes). Watch that it answers your questions. |
 | Qwen 3.7 Plus | 6/6 | 3.8 | **Simple jobs.** It can lock onto a wrong theory. |
 | Qwen 3.8 27B | 5/6 | 3.8 | **Borderline.** Included as a stand-in for a model you would run locally. |
+
+These verdicts were measured at reasoning effort **low**, which was DA Toolkit's default at the
+time. The default is now **medium** (Settings → Model), so DA Toolkit as installed runs these
+models at a higher effort than the runs below did; how each does at medium was not measured.
 
 Two findings matter more than the ranking:
 
@@ -382,9 +387,12 @@ annoys you, a sentence there is usually enough.
 - **AI-played technician.** The technician and machines were played by Claude, and the
   quality scores are its judgement. That may favour Claude-like behaviour. The automatic
   per-turn checks don't depend on that judgement.
-- **NanoGPT routes.** Every model was used through NanoGPT, with DA Toolkit's default
-  generation settings (temperature 0.3, reasoning effort low). Other providers, quantised
-  local builds or higher reasoning effort may behave differently.
+- **NanoGPT routes.** Every model was used through NanoGPT, with the generation settings that
+  were DA Toolkit's defaults then: temperature 0.3 and reasoning effort low. The default
+  effort has since become medium, and the harness still sets low itself
+  (`tools/model-eval/common.py`), so a rerun measures what these runs did, not what the app
+  now does by default. Other providers, quantised local builds or a higher reasoning effort
+  (medium included) may behave differently.
 - **Context.** Context beyond about 130k tokens wasn't tested. Neither were images,
   research, or the end-to-end encrypted and TEE routes. The GLM, Kimi and Qwen notes match
   those routes too (e.g. `private/glm-5-3`, `TEE/qwen3.8-27b`).
