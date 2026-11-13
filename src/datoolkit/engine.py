@@ -431,6 +431,7 @@ class Engine:
         # Service call (and may raise the unlock dialog), and a snapshot asks about every
         # provider and host, so the answers are kept until a secret is stored or removed here.
         self._secret_cache: dict[tuple[str, str], bool] = {}
+        self._unsaved_said = False      # told once that a choice of model isn't written (_save)
         self._ssh_hostnames: dict[tuple, str] = {}      # a host's settings -> the address ssh resolves them to
         self._review_slots = asyncio.Semaphore(REVIEW_CONCURRENCY)
         self._reviewer_attest = asyncio.Lock()          # one attestation of a TEE reviewer, not one per review
@@ -454,6 +455,8 @@ class Engine:
         self.sessions.close_all()
         await self.sessions.wait_closed()
         await self.bridge.stop()
+        if self.case:
+            self.case.unlock()           # the case is another DA Toolkit's to open from here on
         try:
             await asyncio.wait_for(asyncio.to_thread(self.guacd.stop), 4)
         except asyncio.TimeoutError:
@@ -545,12 +548,13 @@ class Engine:
             found = routing.validate(route, kind)
         except ValueError as e:
             raise UserError(str(e)) from e
+        self._settings_ours()
         if found:
             prov.routes[model] = found
         else:
             prov.routes.pop(model, None)
         self.log("route_set", provider=provider_name, model=model, route=found)
-        self._save_config(self.cfg)
+        self._save()
         self._changed()
 
     async def model_hosts(self, provider_name: str, model: str, refresh: bool = False) -> dict:
@@ -580,6 +584,33 @@ class Engine:
 
     def _secrets_changed(self) -> None:
         self._secret_cache.clear()
+
+    # Two DA Toolkits can run at once (a technician with two tickets has a reason to), and each
+    # read config.toml when it started. Until Nov 2026 each wrote its own copy over the file
+    # whenever it saved anything: a host saved in one was gone from the file when a pane was
+    # dragged in the other. Now a save is refused once the file is no longer what this one read
+    # or last wrote (config.save): a change to the settings is refused before anything is
+    # changed (_settings_ours), and what is only this session's choice (the model, the pane
+    # sizes) holds here without being written (_save with quiet).
+    SETTINGS_ELSEWHERE = ("Settings were changed by another DA Toolkit that is running. Close this one and start it "
+                          "again to pick them up; nothing was saved here.")
+
+    def _settings_ours(self) -> None:
+        """Before a change to the settings: UserError when another DA Toolkit has saved its own
+        since this one read them, with nothing changed here, in memory or in the keyring."""
+        if config_mod.changed_elsewhere(self.cfg):
+            raise UserError(self.SETTINGS_ELSEWHERE)
+
+    def _save(self, quiet: bool = False) -> bool:
+        """Write the config. When another DA Toolkit has saved its own meanwhile, nothing is
+        written: UserError, or False with `quiet`."""
+        try:
+            self._save_config(self.cfg)
+        except config_mod.ChangedElsewhere:
+            if quiet:
+                return False
+            raise UserError(self.SETTINGS_ELSEWHERE) from None
+        return True
 
     def _changed(self) -> None:
         self.emit("state", state=self.snapshot())
@@ -652,6 +683,7 @@ class Engine:
             raise UserError(f"There is already a provider called {name}. The same address can be added again with "
                             f"another API key, under a name of its own (such as \"{name} PAYG\" beside \"{name} Sub Only\").")
         renamed = bool(original_name and original_name != name and old)
+        self._settings_ours()
         # The secrets first, so a keyring that refuses them (none that keeps them safe, or a locked
         # one: creds.KeyringUnavailable) leaves everything as it was. A password written into the
         # address is kept in the keyring, as the key is, and config.toml has the address without
@@ -690,7 +722,7 @@ class Engine:
             self.cfg.active_provider = name
         self._models.pop(name, None)
         self._secrets_changed()
-        self._save_config(self.cfg)
+        self._save()
         self._changed()
 
     def _provider_renamed(self, old: str, new: str) -> None:
@@ -718,6 +750,7 @@ class Engine:
             self._tee.pop(key)[0].close()
 
     def delete_provider(self, name: str) -> None:
+        self._settings_ours()
         self._forget_tee(name)
         self.cfg.providers = [p for p in self.cfg.providers if p.name != name]
         creds.delete_secret("provider", name)
@@ -726,7 +759,7 @@ class Engine:
         if self.cfg.active_provider == name:
             self.cfg.active_provider = self.cfg.providers[0].name if self.cfg.providers else ""
             self.cfg.active_model = ""
-        self._save_config(self.cfg)
+        self._save()
         self._changed()
 
     @staticmethod
@@ -798,7 +831,7 @@ class Engine:
                     self.cfg.active_provider, self.cfg.active_model = prov.name, prov.default_model
                 except UserError:
                     pass
-            self._save_config(self.cfg)
+            self._save(quiet=True)       # a default found for the session holds here, written or not
             self._changed()
         allowed = SENSITIVITY_TIERS[self.case.sensitivity] if self.case else set(SENSITIVITY_TIERS["open"])
         kind = self._kind(prov)
@@ -1053,7 +1086,12 @@ class Engine:
         self.cfg.active_provider, self.cfg.active_model = provider_name, model
         self.cfg.recent_models = ([f"{provider_name}|{model}"] +
                                   [r for r in self.cfg.recent_models if r != f"{provider_name}|{model}"])[:8]
-        self._save_config(self.cfg)
+        if not self._save(quiet=True) and not self._unsaved_said:
+            # the choice of model is this session's work, not a setting to refuse: it holds here
+            self._unsaved_said = True
+            self.emit("toast", level="warn", text=(
+                "Settings were changed by another DA Toolkit that is running, so the model chosen here is used "
+                "until this one is closed but not remembered. Close this one and start it again to pick them up."))
         self.log("model_selected", provider=provider_name, model=model, tier=self.active_tier())
         self._schedule_caps(prov)
         self.attestation = None
@@ -1543,6 +1581,7 @@ class Engine:
             raise UserError(f"There is already a host called {name}. The same address can be added again (another "
                             "user, another password), under a name of its own.")
         renamed = bool(original_name and original_name != name and old)
+        self._settings_ours()
         try:                     # first, so a keyring that refuses it leaves everything as it was
             pw = password or (creds.get_secret("host", original_name) if renamed else None)
             if pw and (password or renamed):
@@ -1556,14 +1595,15 @@ class Engine:
         else:
             self.cfg.hosts.append(host)
         self._secrets_changed()
-        self._save_config(self.cfg)
+        self._save()
         self._changed()
 
     def delete_host(self, name: str) -> None:
+        self._settings_ours()
         self.cfg.hosts = [h for h in self.cfg.hosts if h.name != name]
         creds.delete_secret("host", name)
         self._secrets_changed()
-        self._save_config(self.cfg)
+        self._save()
         self._changed()
 
     def forget_host_password(self, name: str) -> None:
@@ -1572,6 +1612,7 @@ class Engine:
         self._changed()
 
     def save_settings(self, data: dict) -> None:
+        self._settings_ours()
         # checked on a copy, kept only if every value holds: a refused one changed nothing, where
         # the fields before it used to stay set (and were saved with the next change of anything)
         s = copy.deepcopy(self.cfg.settings)
@@ -1653,7 +1694,7 @@ class Engine:
         self.cfg.settings = s
         if "vision_model" in data:
             self._refresh_helper_attestation()
-        self._save_config(self.cfg)
+        self._save()
         self._changed()
         if "auto_review" in data or "review_model" in data:
             self._auto_review(self.queue.items)      # catch up on what is already pending
@@ -1663,7 +1704,10 @@ class Engine:
 
     def save_layout(self, data: dict) -> None:
         """Pane sizes and collapsed panes, saved quietly: the page already shows them, so
-        nothing is sent back. Unknown keys are ignored and sizes are kept in range."""
+        nothing is sent back. Unknown keys are ignored and sizes are kept in range. Quietly too
+        when another DA Toolkit has saved settings since this one read them: the sizes hold
+        here and aren't written (this runs on every drag of a pane, and until Nov 2026 each
+        drag wrote this one's whole config over the other's)."""
         layout = dict(self.cfg.settings.layout)
         for key, (lo, hi) in self.LAYOUT_SIZES.items():
             if key in data:
@@ -1676,7 +1720,7 @@ class Engine:
                 layout[key] = bool(data[key])
         if layout != self.cfg.settings.layout:
             self.cfg.settings.layout = layout
-            self._save_config(self.cfg)
+            self._save(quiet=True)
 
     # ---------------------------------------------------------------- cases
 
@@ -1692,8 +1736,10 @@ class Engine:
             raise UserError("Wait for the AI to finish (or stop it) before starting a new case.")
         client = self._known_client(client)
         self.compact_cancel()        # a summary of the old case's conversation is no use now
-        self.case = Case.create(name.strip() or "Untitled case", sensitivity, notes.strip(), client=client,
-                                history=bool(history))
+        case = Case.create(name.strip() or "Untitled case", sensitivity, notes.strip(), client=client,
+                           history=bool(history))
+        case.lock()                  # this DA Toolkit's until it is closed or another is opened (Case.lock)
+        self._switch_case(case)
         self.queue = Queue()
         self.conv, self.chat = [], []
         self.last_usage = None
@@ -1716,6 +1762,9 @@ class Engine:
             try:
                 Case.delete(cid)
                 deleted.append(cid)
+            except Case.InUse:
+                errors.append(f"{cid}: it is open in another DA Toolkit, which is still writing into it; close it "
+                              "there first")
             except (OSError, ValueError) as e:
                 errors.append(f"{cid}: {e}")
         if deleted and any(h["id"] in deleted for h in self._similar):
@@ -1749,7 +1798,11 @@ class Engine:
             self.compact_cancel()        # a summary being written goes to a model the new level may not allow
         old_client, old_history = case.client, case.history
         try:
-            case.edit(name, case.notes if notes is None else notes.strip(), sensitivity or None, client, history)
+            with case.held():        # the open case is held already; one on disk for as long as this takes
+                case.edit(name, case.notes if notes is None else notes.strip(), sensitivity or None, client, history)
+        except Case.InUse:
+            raise UserError("This case is open in another DA Toolkit, which would write its own name, notes and "
+                            "sensitivity back over the change. Edit it there, or close it there first.") from None
         except ValueError as e:
             raise UserError(str(e)) from e
         except OSError as e:
@@ -1788,8 +1841,9 @@ class Engine:
             raise UserError("Give the client a name.")
         if name in self.cfg.clients:
             raise UserError(f"{name} is already in the client list.")
+        self._settings_ours()
         self.cfg.clients.append(name)
-        self._save_config(self.cfg)
+        self._save()
         self.log("client_added", client=name)
         self._changed()
 
@@ -1805,6 +1859,24 @@ class Engine:
                 continue
         return out
 
+    @staticmethod
+    def _hold(cases: list[Case]) -> list[Case]:
+        """Hold every one of these cases that isn't held already, so that all of them can be
+        written to or none is; returns those to let go again. UserError when another DA Toolkit
+        has one of them open: it would write the case's old client back."""
+        taken = []
+        try:
+            for case in cases:
+                if not case.is_held:
+                    case.lock()
+                    taken.append(case)
+        except Case.InUse:
+            for other in taken:
+                other.unlock()
+            raise UserError(f"The case {case.name} is open in another DA Toolkit, which would write its old client "
+                            "back. Close it there first; nothing was changed.") from None
+        return taken
+
     def rename_client(self, old: str, new: str) -> int:
         """Rename a client; its cases follow it (their case.json is updated). Returns how many."""
         new = " ".join(str(new or "").split())[:80]
@@ -1814,11 +1886,17 @@ class Engine:
             raise UserError("Give the client a name.")
         if new != old and new in self.cfg.clients:
             raise UserError(f"{new} is already in the client list.")
+        self._settings_ours()
         cases = self._cases_of(old)
-        self.cfg.clients[self.cfg.clients.index(old)] = new
-        for case in cases:
-            case.set_client(new)
-        self._save_config(self.cfg)
+        taken = self._hold(cases)
+        try:
+            self.cfg.clients[self.cfg.clients.index(old)] = new
+            for case in cases:
+                case.set_client(new)
+        finally:
+            for case in taken:
+                case.unlock()
+        self._save()
         self.log("client_renamed", old=old, client=new, cases=len(cases))
         self._changed()
         return len(cases)
@@ -1828,14 +1906,20 @@ class Engine:
         feeds a runbook to any case again). Returns how many cases that was."""
         if name not in self.cfg.clients:
             raise UserError(f"Unknown client {name}")
+        self._settings_ours()
         cases = self._cases_of(name)
-        self.cfg.clients.remove(name)
-        for case in cases:
-            case.set_client("")
+        taken = self._hold(cases)
+        try:
+            self.cfg.clients.remove(name)
+            for case in cases:
+                case.set_client("")
+        finally:
+            for case in taken:
+                case.unlock()
         if self.case and self.case in cases and self._similar:
             self._similar, self._runbooks = [], ""
             self.emit("similar", cases=[])
-        self._save_config(self.cfg)
+        self._save()
         self.log("client_deleted", client=name, cases=len(cases))
         self._changed()
         return len(cases)
@@ -1845,6 +1929,20 @@ class Engine:
         if self.busy:
             raise UserError("Wait for the AI to finish (or stop it) before opening a case.")
         unreadable = (OSError, ValueError, TypeError, KeyError, AttributeError)
+        try:
+            case = Case.load(case_id)
+        except unreadable as e:
+            raise UserError(f"Could not open case {case_id}: {e}") from e
+        # One DA Toolkit at a time has a case open (Case.lock): each saves the whole conversation
+        # from its own memory, so a second one's first save would wipe what the first has written
+        # since. The case open here already is this one's to open again.
+        try:
+            if self.case and self.case.id == case.id:
+                case.take_lock_from(self.case)
+            case.lock()
+        except Case.InUse:
+            raise UserError("This case is open in another DA Toolkit; it would overwrite that one's "
+                            "conversation.") from None
 
         def restore(state: dict) -> tuple:
             conv, chat = list(state.get("conv", [])), list(state.get("chat", []))
@@ -1859,7 +1957,6 @@ class Engine:
         # Nov 2026 a state.json cut short made its case unopenable.
         lost = ""
         try:
-            case = Case.load(case_id)
             try:
                 state = case.load_state()
                 if state is None and case.has_backup():
@@ -1876,9 +1973,13 @@ class Engine:
             similar = (search.reload_hits(saved or [], case.client, case.sensitivity)
                        if case.client and case.history else [])
         except unreadable as e:
+            if self.case and self.case.id == case.id:
+                self.case.take_lock_from(case)       # still the open case, as it was
+            case.unlock()
             raise UserError(f"Could not open case {case_id}: {e}") from e
         self.compact_cancel()        # a summary of the old case's conversation is no use now
-        self.case, self.conv, self.chat, self.queue = case, conv, chat, queue
+        self._switch_case(case)
+        self.conv, self.chat, self.queue = conv, chat, queue
         # the last request's size, so the context figure shows on resume, before the next request
         self.last_usage = state.get("last_usage") if isinstance(state.get("last_usage"), dict) else None
         self.hypotheses = hypotheses
@@ -1901,6 +2002,13 @@ class Engine:
             self.chat.append({"kind": "note", "text": f"Case resumed {datetime.now():%Y-%m-%d %H:%M}. "
                               "Output of earlier commands is captured from the transcript files."})
         self._persist()
+
+    def _switch_case(self, case: Case) -> None:
+        """`case`, held by this DA Toolkit, becomes the open case; the one open until now is let
+        go for another DA Toolkit to open."""
+        old, self.case = self.case, case
+        if old and old is not case:
+            old.unlock()
 
     # ---------------------------------------------------------------- the chat box's draft
 

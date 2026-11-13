@@ -1,5 +1,5 @@
 """A case's files on disk: written whole, the state before the last kept as a backup, draft saves
-in the order they were asked for."""
+in the order they were asked for, and one DA Toolkit at a time with the case open."""
 
 import json
 import threading
@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from datoolkit import case as case_mod
-from datoolkit.case import Case
+from datoolkit.case import Case, CaseInUse
 from datoolkit.engine import UserError
 
 from test_engine import env  # noqa: F401
@@ -83,6 +83,7 @@ async def test_without_a_backup_the_case_is_still_refused_and_nothing_is_written
     with pytest.raises(UserError, match="Could not open"):
         engine.open_case(broken.id)
     assert engine.case.name == "current" and (broken.dir / "state.json").read_text() == "{"
+    engine.open_case(engine.case.id)                                     # and the open case is still this one's to open
 
 
 # ---------------------------------------------------------------- drafts
@@ -136,3 +137,55 @@ def test_many_draft_saves_at_once_leave_the_last_one_asked_for(tmp_path):
     assert c.load_draft()["text"] == "the last"
     c.save_draft("", [])
     assert not (c.dir / "draft.json").exists() and not list(c.dir.glob(".draft*"))
+
+
+# ---------------------------------------------------------------- the lock
+
+def test_a_case_is_held_by_one_handle_at_a_time(tmp_path):
+    c = Case.create("held", "open", root=tmp_path)
+    c.lock()
+    other = Case.load(c.id, root=tmp_path)           # another DA Toolkit: its own descriptor
+    with pytest.raises(CaseInUse):
+        other.lock()
+    with pytest.raises(CaseInUse):
+        Case.delete(c.id, root=tmp_path)
+    assert c.dir.is_dir()
+    with pytest.raises(CaseInUse):
+        with other.held():
+            raise AssertionError("held twice")
+    with c.held():                                   # already this one's: still held after
+        pass
+    assert c.is_held
+    c.unlock()
+    with other.held():
+        with pytest.raises(CaseInUse):
+            c.lock()
+    assert not other.is_held
+    c.lock()
+    del c                                            # a handle that is gone lets go (as a process that dies does)
+    Case.delete(other.id, root=tmp_path)
+    assert not other.dir.exists()
+
+
+def test_what_a_killed_save_left_is_cleared_when_the_case_is_next_held(tmp_path):
+    import os
+    c = Case.create("killed", "open", root=tmp_path)
+    old, fresh = c.dir / ".state.json.abc123.tmp", c.dir / ".draft.json.def456.tmp"
+    old.write_bytes(b"half a state")
+    fresh.write_bytes(b"a draft being written now")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    c.lock()
+    assert not old.exists() and fresh.exists()
+    c.unlock()
+
+
+def test_a_late_result_is_not_patched_into_a_case_another_has_open(tmp_path):
+    c = Case.create("late", "open", root=tmp_path)
+    c.save_state([], [{"kind": "assistant", "text": "hi", "tee_signature": "checking"}], [])
+    holder = Case.load(c.id, root=tmp_path)
+    holder.lock()
+    assert c.patch_chat_entry(0, {"tee_signature": "checking"}, tee_signature="verified") is False
+    assert c.load_state()["chat"][0]["tee_signature"] == "checking"
+    holder.unlock()
+    assert c.patch_chat_entry(0, {"tee_signature": "checking"}, tee_signature="verified") is True
+    assert c.load_state()["chat"][0]["tee_signature"] == "verified" and not c.is_held

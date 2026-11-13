@@ -6,11 +6,14 @@ behind one): config.toml has the address without it, and the keyring the address
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import os
 import stat
 import tempfile
 import time
 import tomllib
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -220,6 +223,13 @@ class Config:
     # reach the AI only within one client's cases: see Engine._find_similar
     clients: list[str] = field(default_factory=list)
 
+    def __post_init__(self):
+        # What each config file held when this Config was last read from it or written to it
+        # (path -> the sha256 of its bytes, None for no file): save() writes over nothing else
+        # (ChangedElsewhere). Not a field: it is never written, and two Configs read from one
+        # file are two DA Toolkits' views of it, each with its own.
+        self._on_disk: dict[str, str | None] = {}
+
     def provider(self, name: str) -> Provider | None:
         return next((p for p in self.providers if p.name == name), None)
 
@@ -255,6 +265,49 @@ def from_dict(data: dict) -> Config:
     return cfg
 
 
+class ChangedElsewhere(Exception):
+    """config.toml is no longer what this DA Toolkit last read or wrote: another one that is
+    running has saved settings since. Nothing was written."""
+
+
+def _digest(data: bytes | None) -> str | None:
+    return None if data is None else hashlib.sha256(data).hexdigest()
+
+
+def _on_disk(path: Path) -> bytes | None:
+    """The file's bytes, None when there is no file."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+@contextmanager
+def _one_writer(path: Path):
+    """One DA Toolkit at a time between comparing the file with what was read and writing over
+    it: a lock (flock) on a file beside it, which the system drops if the holder dies."""
+    fd = None
+    try:
+        fd = os.open(path.with_name(f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        pass                            # no lock to be had here (a read-only directory, a file system without them)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def changed_elsewhere(cfg: Config) -> bool:
+    """Whether a file `cfg` was read from or written to has been changed by someone else since
+    (another DA Toolkit that is running, or an editor): a save would be refused."""
+    try:
+        return any(_digest(_on_disk(Path(p))) != seen for p, seen in cfg._on_disk.items())
+    except OSError:
+        return False                    # can't be read now: the save itself will say why
+
+
 def _used_before(path: Path) -> bool:
     """Whether DA Toolkit has been used here, and so had settings: there are cases, or pinned
     certificates, or what an interrupted save of `path` left beside it. (The keyring can't be
@@ -269,9 +322,11 @@ def _used_before(path: Path) -> bool:
 
 def load(path: Path | None = None) -> Config:
     path = path or config_dir() / "config.toml"
-    if not path.exists():
-        return Config()
-    raw = path.read_bytes()
+    raw = _on_disk(path)
+    if raw is None:
+        cfg = Config()
+        cfg._on_disk[str(path)] = None
+        return cfg
     if not raw.strip() and _used_before(path):
         # DA Toolkit never writes an empty file: one beside cases is what a crash or a full disk
         # left of the settings, not a first start. Until Nov 2026 it was read as "no settings",
@@ -279,11 +334,12 @@ def load(path: Path | None = None) -> Config:
         # now keeps it and says so.
         raise ValueError("it is empty, though DA Toolkit has been used on this computer")
     cfg = from_dict(tomllib.loads(raw.decode("utf-8")))
+    cfg._on_disk[str(path)] = _digest(raw)
     if _with_passwords(cfg):
         try:
             save(cfg, path)             # the keyring has what the file had: out of the file
-        except OSError:
-            pass                        # read-only: it goes at the next save
+        except (OSError, ChangedElsewhere):
+            pass                        # read-only, or just saved by another DA Toolkit: it goes at the next save
     return cfg
 
 
@@ -327,11 +383,13 @@ def load_or_set_aside(path: Path | None = None) -> tuple[Config, str]:
         return load(path), ""
     except Exception as e:  # noqa: BLE001 - a hand-edited file can be wrong in any way at all
         kept = path.with_name(f"{path.name}.broken-{time.strftime('%Y%m%d-%H%M%S')}")
+        cfg = Config()
         try:
             path.replace(kept)
         except OSError:
-            return Config(), f"{path} couldn't be read ({e}). DA Toolkit started with default settings."
-        return Config(), (f"{path.name} couldn't be read ({e}), so DA Toolkit started with default settings. The file "
+            return cfg, f"{path} couldn't be read ({e}). DA Toolkit started with default settings."
+        cfg._on_disk[str(path)] = None      # set aside: the next save writes a new file, and over no one else's
+        return cfg, (f"{path.name} couldn't be read ({e}), so DA Toolkit started with default settings. The file "
                           f"is kept as {kept}: fix it, quit, and put it back as {path.name}.")
 
 
@@ -348,6 +406,17 @@ def _without_passwords(data: dict) -> dict:
 
 
 def save(cfg: Config, path: Path | None = None) -> None:
+    """Write the config, unless the file is no longer what `cfg` was read from or last written
+    as: then another DA Toolkit that is running has saved since, this one's settings are older
+    than the file's, and writing them would undo that one's (a host saved there was gone when a
+    pane was dragged here). ChangedElsewhere is raised and nothing is written. A Config that
+    was never read from `path` (a first save to it) is written as before."""
     path = path or config_dir() / "config.toml"
     private_dir(path.parent)
-    write_atomic(path, tomli_w.dumps(_without_passwords(cfg.to_dict())).encode("utf-8"))
+    data = tomli_w.dumps(_without_passwords(cfg.to_dict())).encode("utf-8")
+    key = str(path)
+    with _one_writer(path):
+        if key in cfg._on_disk and _digest(_on_disk(path)) != cfg._on_disk[key]:
+            raise ChangedElsewhere(f"{path.name} was changed by another DA Toolkit that is running")
+        write_atomic(path, data)
+        cfg._on_disk[key] = _digest(data)

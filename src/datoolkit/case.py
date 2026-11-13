@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import itertools
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -16,8 +18,18 @@ from pathlib import Path
 from .config import data_dir, private_dir, write_atomic
 
 SENSITIVITIES = ("open", "confidential", "sovereign")
-# What the copy of state.json as it was before the last save is called (Case.load_backup).
+# The file in a case's directory that the DA Toolkit which has the case open holds a lock on
+# (Case.lock), and what the copy of state.json as it was before the last save is called
+# (Case.load_backup).
+LOCK_NAME = ".lock"
 BACKUP_SUFFIX = ".bak"
+
+
+class CaseInUse(Exception):
+    """The case is open in another DA Toolkit that is running: it holds the case's lock."""
+
+    def __init__(self, message: str = "This case is open in another DA Toolkit."):
+        super().__init__(message)
 
 
 def utf8(text: str) -> bytes:
@@ -51,6 +63,7 @@ class Case:
     client: str = ""
     # feed the AI runbooks from this client's earlier cases (of the same or a lower sensitivity)
     history: bool = False
+    _lock_fd: int | None = field(default=None, init=False, repr=False, compare=False)
 
     @classmethod
     def create(cls, name: str, sensitivity: str, notes: str = "", root: Path | None = None,
@@ -79,6 +92,59 @@ class Case:
         return cls(name=meta["name"], sensitivity=meta["sensitivity"], notes=meta.get("notes", ""),
                    id=case_id, dir=d, started=meta.get("started", ""), client=meta.get("client", ""),
                    history=bool(meta.get("history", False)))
+
+    # ------------------------------------------------------------ one DA Toolkit at a time
+
+    InUse = CaseInUse
+
+    @property
+    def is_held(self) -> bool:
+        return self._lock_fd is not None
+
+    def lock(self) -> None:
+        """Hold the case for this DA Toolkit, until unlock(): an advisory lock (flock) on a file
+        in its directory, which the system drops by itself if the app dies. Raises CaseInUse
+        when another DA Toolkit that is running holds it. Two of them with one case open each
+        wrote its whole state.json from their own memory, so the one that saved last wiped the
+        other's conversation. Where no lock can be had (a file system without them, a directory
+        that can't be written), the case is used without one, as before Nov 2026."""
+        if self._lock_fd is None:
+            self._lock_fd = _lock_dir(self.dir)
+            _sweep(self.dir)
+
+    def unlock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def take_lock_from(self, other: "Case") -> None:
+        """Hold the lock that `other` holds, which is this same case as this DA Toolkit had it
+        open: for a case opened again while it is open."""
+        self.unlock()
+        self._lock_fd, other._lock_fd = other._lock_fd, None
+
+    @contextmanager
+    def held(self):
+        """The case held (lock) while something is written into it, and let go after unless it
+        was held already. Raises CaseInUse."""
+        was_held = self.is_held
+        self.lock()
+        try:
+            yield self
+        finally:
+            if not was_held:
+                self.unlock()
+
+    def __del__(self):
+        fd = getattr(self, "_lock_fd", None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     @staticmethod
     def list_all(root: Path | None = None) -> list[dict]:
@@ -109,8 +175,15 @@ class Case:
 
     @staticmethod
     def delete(case_id: str, root: Path | None = None) -> None:
-        """Remove a case directory and everything in it."""
-        shutil.rmtree(_case_dir(case_id, root))
+        """Remove a case directory and everything in it. Raises CaseInUse when another DA
+        Toolkit has the case open: its sessions are writing into it."""
+        d = _case_dir(case_id, root)
+        fd = _lock_dir(d)
+        try:
+            shutil.rmtree(d)
+        finally:
+            if fd is not None:
+                os.close(fd)
 
     def edit(self, name: str, notes: str, sensitivity: str | None = None, client: str | None = None,
              history: bool | None = None) -> None:
@@ -217,16 +290,21 @@ class Case:
 
     def patch_chat_entry(self, index: int, expect: dict, **fields) -> bool:
         """Set `fields` on one chat entry of the saved state, if it still holds `expect`: a
-        result that arrived after the case was closed. Returns whether it did."""
-        state = self.load_state()
-        chat = (state or {}).get("chat")
-        if not isinstance(chat, list) or not 0 <= index < len(chat) or not isinstance(chat[index], dict):
+        result that arrived after the case was closed. Returns whether it did. Not while
+        another DA Toolkit has the case open: its own state is the one it saves."""
+        try:
+            with self.held():
+                state = self.load_state()
+                chat = (state or {}).get("chat")
+                if not isinstance(chat, list) or not 0 <= index < len(chat) or not isinstance(chat[index], dict):
+                    return False
+                if any(chat[index].get(k) != v for k, v in expect.items()):
+                    return False
+                chat[index].update(fields)
+                _write_state(self.dir / "state.json", state)
+                return True
+        except CaseInUse:
             return False
-        if any(chat[index].get(k) != v for k, v in expect.items()):
-            return False
-        chat[index].update(fields)
-        _write_state(self.dir / "state.json", state)
-        return True
 
     def log(self, event: str, **data) -> None:
         rec = {"ts": time.time(), "event": event, **data}
@@ -365,6 +443,38 @@ class _DraftOrder:
 _draft_seq = itertools.count(1)
 _drafts: dict[str, _DraftOrder] = {}       # case directory -> its draft saves
 _drafts_guard = threading.Lock()
+
+
+def _lock_dir(d: Path) -> int | None:
+    """A lock on the case directory `d`, as the file descriptor that holds it (closing it lets
+    go, and so does the end of the process, however it ends). Raises CaseInUse when another
+    holder has it; None when no lock can be had here."""
+    try:
+        fd = os.open(d / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise CaseInUse() from None
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _sweep(d: Path) -> None:
+    """Remove what a save that never finished left in the case directory (the app was killed
+    while writing): temporary files, each named for one save alone, that nothing will ever
+    rename or reuse. Only ones an hour old: a draft save may be writing its own right now."""
+    try:
+        old = time.time() - 3600
+        for f in d.iterdir():
+            if f.name.endswith(".tmp") and f.is_file() and not f.is_symlink() and f.stat().st_mtime < old:
+                f.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _case_dir(case_id: str, root: Path | None = None) -> Path:

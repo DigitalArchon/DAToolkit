@@ -169,6 +169,45 @@ def test_a_damaged_case_json_doesnt_break_the_case_list(tmp_path):
     assert found[listy.id]["name"] == "listy"                   # from the audit log's first event instead
 
 
+def test_a_save_never_writes_over_what_another_instance_saved(tmp_path):
+    """Two DA Toolkits each read config.toml when they started. The one whose copy is older
+    than the file writes nothing: until Nov 2026 it wrote its whole copy, and a host saved in
+    the other was gone."""
+    import pytest
+    path = tmp_path / "config.toml"
+    config.save(Config(hosts=[Host("old", "ssh", "10.0.0.1")]), path)
+    a, b = config.load(path), config.load(path)
+    a.hosts.append(Host("web01", "ssh", "10.0.0.2"))
+    config.save(a, path)
+    assert config.changed_elsewhere(b) and not config.changed_elsewhere(a)
+    b.settings.layout = {"chat_w": 500}
+    with pytest.raises(config.ChangedElsewhere):
+        config.save(b, path)
+    assert [h.name for h in config.load(path).hosts] == ["old", "web01"]
+    a.clients.append("Acme")                                    # the one that is current goes on saving
+    config.save(a, path)
+    assert config.load(path).clients == ["Acme"] and not list(tmp_path.glob(".config.toml.*.tmp"))
+    with pytest.raises(config.ChangedElsewhere):                # and the other stays refused, however often
+        config.save(b, path)
+
+
+def test_a_first_start_and_a_file_set_aside_still_save(tmp_path):
+    import pytest
+    path = tmp_path / "config.toml"
+    first, other = config.load(path), config.load(path)         # two first starts: no file yet
+    first.clients.append("Acme")
+    config.save(first, path)
+    with pytest.raises(config.ChangedElsewhere):                # there is a file now, and it isn't the other's
+        config.save(other, path)
+    path.write_text("[settings\n")
+    cfg, notice = config.load_or_set_aside(path)
+    assert notice
+    cfg.clients.append("Bolt")
+    config.save(cfg, path)
+    config.save(cfg, path)
+    assert config.load(path).clients == ["Bolt"]
+
+
 def test_an_empty_config_beside_cases_is_set_aside_like_a_broken_one():
     from datoolkit.case import Case
     path = config.config_dir() / "config.toml"
