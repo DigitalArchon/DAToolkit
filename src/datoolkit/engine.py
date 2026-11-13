@@ -945,7 +945,7 @@ class Engine:
             out.append({"id": m, "tier": tier, "allowed": tier in allowed, "vision": self.vision_of(prov, m),
                         "reasoning": caps.get("reasoning", False), "efforts": caps.get("efforts", []),
                         "tested": model_prompts.tested(m),
-                        # what DA Toolkit would decide without the technician's overrides (Settings → Providers)
+                        # what DA Toolkit would decide without the technician's overrides (Settings → AI providers)
                         "tier_auto": detect_tier(m, prov.base_url), "vision_auto": auto_vision,
                         "context": limit["tokens"] if limit else None, "context_source": limit["source"] if limit else "",
                         "context_auto": caps.get("context") or self._learned_ctx.get((prov.name, m)),
@@ -1091,7 +1091,7 @@ class Engine:
             return {"mode": "helper", "model": model, "helper": helper[1], "helper_provider": helper[0].name,
                     "helper_tier": helper[2]}
         what = (f"{model} can't read images." if vision is False else
-                f"It isn't known whether {model} can read images (mark it under Settings → Providers).")
+                f"It isn't known whether {model} can read images (mark it under Settings → AI providers).")
         return {"mode": "none", "model": model, "why": f"{what} {helper}"}
 
     def _params(self, prov: Provider, model: str) -> dict:
@@ -1637,7 +1637,7 @@ class Engine:
             # guard on the request then stopped it with an error of Python's own.
             raise UserError(f"{model} is an end-to-end encrypted (private/) model, which is only ever sent sealed, "
                             f"and {prov.name} is set to the Anthropic API, which can't send it so. Choose another "
-                            "model, or set the provider's API to OpenAI under Settings → Providers.")
+                            "model, or set the provider's API to OpenAI under Settings → AI providers.")
         if self.case and tier not in SENSITIVITY_TIERS[self.case.sensitivity]:
             raise UserError(f"This case is {self.case.sensitivity.upper()}: {tier.upper()}-tier models "
                             f"like {model} are not permitted.")

@@ -94,6 +94,15 @@ async def test_a_new_key_at_the_same_address_drops_the_attested_clients_made_wit
     assert engine._tee and not client.closed                             # another provider's key: nothing of this one's
 
 
+async def test_messages_name_the_settings_tab_as_the_page_does(env):  # noqa: F811
+    engine, _, _ = env
+    engine.cfg.active_provider, engine.cfg.active_model = "Fake", "TEE/glm-5.3"       # nobody says whether it reads images
+    assert "mark it under Settings → AI providers" in engine.vision_status()["why"]
+    engine.cfg.provider("Fake").api = "anthropic"
+    with pytest.raises(UserError, match="under Settings → AI providers"):
+        engine.select_model("Fake", "private/glm-5-3")
+
+
 # ---------------------------------------------------------------- the attestation shown
 
 async def test_a_changed_address_is_not_shown_as_verified(env):  # noqa: F811
@@ -168,7 +177,7 @@ async def test_private_models_are_not_offered_or_accepted_on_the_anthropic_api(t
     monkeypatch.setattr(engine_mod, "offers_private_mode", lambda base_url: True)
     monkeypatch.setattr(engine_mod, "list_private_models", never)
     assert [m["id"] for m in await engine.list_models("Compat")] == ["zz-plain-model"]
-    with pytest.raises(UserError, match="only ever sent sealed.*Compat is set to the Anthropic API"):
+    with pytest.raises(UserError, match="only ever sent sealed.*Compat is set to the Anthropic API.*Settings → AI providers"):
         engine.select_model("Compat", "private/zz-model")
     assert engine.cfg.active_model == ""
     engine.new_case("confidential client", "confidential")               # where a private/ model would be allowed
