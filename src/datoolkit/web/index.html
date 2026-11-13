@@ -62,7 +62,8 @@
       <div id="hyp-list"></div>
     </div>
     <div id="chat-log"></div>
-    <div id="chat-status" class="hidden" role="status" aria-live="polite"><span class="spinner"></span><span id="chat-status-text"></span></div>
+    <!-- what is happening is announced when it changes; the clock beside it, redrawn every second, is not -->
+    <div id="chat-status" class="hidden"><span class="spinner"></span><span id="chat-status-text" role="status" aria-live="polite"></span><span id="chat-status-clock" aria-hidden="true"></span></div>
     <form id="chat-form">
       <textarea id="chat-input" rows="3" aria-label="Message to the AI" placeholder="Describe the problem, answer the AI, or tell it what you think…  (Enter to send, Shift+Enter for newline, ↑ for history)"></textarea>
       <div id="attachments" class="hidden"></div>
@@ -122,7 +123,7 @@
 </section>
 
 <div id="modal-root"></div>
-<div id="toasts"></div>
+<div id="toasts" aria-live="polite" aria-relevant="additions"></div>
 
 <script src="/static/vendor/xterm.js"></script>
 <script src="/static/vendor/addon-fit.js"></script>

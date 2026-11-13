@@ -22,13 +22,17 @@
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
+/* The rows: top bar, banners, the workspace (chat and sessions), a splitter, the queue. The
+   workspace keeps at least 180px, so its panes never spill over the queue; app.js (clampQueueH)
+   keeps the queue short enough for that in a small window, and in one too small for all of it
+   the page itself scrolls rather than anything lying over anything else. */
 body {
   background: var(--bg);
   color: var(--text);
   font: 14px/1.45 system-ui, "Segoe UI", Ubuntu, Cantarell, sans-serif;
   display: grid;
-  grid-template-rows: auto auto 1fr 5px var(--queue-h);
-  overflow: hidden;
+  grid-template-rows: auto auto minmax(180px, 1fr) 5px var(--queue-h);
+  overflow-x: hidden; overflow-y: auto;
 }
 
 button {
@@ -98,14 +102,23 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 #modal-root { position: fixed; z-index: 100; }
 
 /* ---------- top bar */
+/* Every control keeps to one line; when the window is too narrow for all of them the bar wraps
+   onto a second row. The case's name and the model's are cut with an ellipsis (their tooltips
+   have them in full) so neither can push the rest about. */
 #topbar {
-  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 10px;
   background: var(--panel); border-bottom: 1px solid var(--border);
 }
+#topbar > *, #topbar button { white-space: nowrap; flex: none; }
+#topbar > .spacer { flex: 1 1 0; min-width: 0; }
+#case-btn { max-width: min(36ch, 42vw); overflow: hidden; text-overflow: ellipsis; }
+#model-btn { display: inline-flex; align-items: center; gap: 4px; max-width: min(52ch, 72vw); }
+#model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .brand { font-weight: 700; letter-spacing: .02em; margin-right: 6px; }
 .menu-wrap { position: relative; }
 .menu {
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 50; min-width: 240px;
+  max-height: 70vh; overflow-y: auto;
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 4px;
   box-shadow: 0 8px 24px rgba(0,0,0,.4); display: flex; flex-direction: column;
 }
@@ -117,7 +130,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 /* ---------- workspace */
 #workspace {
-  display: grid; grid-template-columns: var(--chat-w) 5px 1fr; min-height: 0;
+  display: grid; grid-template-columns: var(--chat-w) 5px minmax(0, 1fr); min-height: 0;
 }
 .splitter { background: var(--border); }
 .splitter.vertical { cursor: col-resize; }
@@ -136,7 +149,7 @@ body.chat-collapsed #chat-strip {
 #chat-strip .label { writing-mode: vertical-rl; color: var(--muted); }
 #chat-strip .unread { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
 #chat-toggle, #queue-toggle { padding: 0 6px; }
-body.queue-collapsed { grid-template-rows: auto auto 1fr 0 auto; }
+body.queue-collapsed { grid-template-rows: auto auto minmax(180px, 1fr) 0 auto; }
 body.queue-collapsed #split-h, body.queue-collapsed #queue-list { display: none; }
 body.queue-collapsed .queue-head { border-bottom: none; border-top: 1px solid var(--border); }
 /* a maximized remote desktop (see rdpMaximize): only the session, until Restore */
@@ -146,8 +159,11 @@ body.rdp-max #chat-pane, body.rdp-max #split-v, body.rdp-max #tabs { display: no
 body.rdp-max #workspace { grid-template-columns: 1fr; }
 body.rdp-max .term-host { inset: 0; }
 
-#chat-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
-#chat-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+/* The chat log always has room to read in (110px at least); if the pane is too short for that
+   with the hypotheses and the chat box, the pane scrolls. */
+#chat-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); overflow-x: hidden; overflow-y: auto; }
+#chat-pane > * { flex-shrink: 0; }
+#chat-log { flex: 1 1 0; min-height: 110px; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .msg { border-radius: 8px; padding: 8px 12px; max-width: 100%; overflow-wrap: anywhere; }
 .msg.user { background: #1c2a3d; align-self: flex-end; max-width: 92%; }
 .msg.assistant { background: var(--panel-2); }
@@ -178,13 +194,22 @@ body.rdp-max .term-host { inset: 0; }
 .spinner { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #chat-form { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); }
-#chat-input { flex: 1; resize: none; min-height: 60px; }
+#chat-input { flex: 1; min-width: 0; resize: none; min-height: 60px; }
 .chat-actions { display: flex; flex-direction: column; gap: 6px; justify-content: flex-end; }
+/* a short window (the app window's minimum is 900x600): the chat box and the hypotheses give
+   height back to the chat log */
+@media (max-height: 700px) {
+  #hyp-board { max-height: 24%; }
+  #chat-input { height: 46px; min-height: 46px; }
+  .chat-actions { flex-direction: row; flex-wrap: wrap; align-content: flex-end; justify-content: flex-end; max-width: 150px; }
+}
 
 /* ---------- terminals */
 #term-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #tabs { display: flex; align-items: center; gap: 6px; padding: 4px 6px; background: var(--panel); border-bottom: 1px solid var(--border); }
-#tab-list { display: flex; gap: 4px; overflow-x: auto; flex: 1; }
+#tabs > .menu-wrap { display: flex; gap: 6px; flex: none; }
+#tabs button { white-space: nowrap; }
+#tab-list { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; }
 .tab {
   display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; cursor: pointer;
   border: 1px solid transparent; white-space: nowrap; font-size: 13px;
@@ -202,7 +227,9 @@ body.rdp-max .term-host { inset: 0; }
 
 /* ---------- queue */
 #queue-pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
-.queue-head { display: flex; align-items: center; gap: 10px; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+.queue-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+.queue-head > * { white-space: nowrap; flex: none; }
+.queue-head > .spacer { flex: 1 1 0; min-width: 0; }
 .queue-head .title { font-weight: 600; }
 #queue-list { flex: 1; overflow-y: auto; }
 /* The command comes first: its column is never narrower than 320px, and the buttons take at most
@@ -296,8 +323,17 @@ body.rdp-max .term-host { inset: 0; }
 .model-row.blocked { opacity: .4; cursor: not-allowed; }
 .model-row .id { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-#toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
-.toast { background: var(--panel-2); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 8px 12px; max-width: 460px; box-shadow: 0 6px 20px rgba(0,0,0,.4); font-size: 13px; overflow-wrap: anywhere; }
+/* Toasts sit over the bottom of the sessions' area, just above the queue: not over the queue's
+   buttons, which they covered for as long as they showed. Each can be dismissed. (On the phone's
+   page, which has no queue pane, they stay at the bottom.) */
+#toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; pointer-events: none; }
+#queue-pane ~ #toasts { bottom: calc(var(--queue-h) + 21px); }
+body.queue-collapsed #queue-pane ~ #toasts { bottom: 52px; }
+body.rdp-max #queue-pane ~ #toasts { bottom: 16px; }
+.toast { display: flex; align-items: flex-start; gap: 10px; pointer-events: auto; background: var(--panel-2); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 8px 12px; max-width: min(460px, calc(100vw - 32px)); box-shadow: 0 6px 20px rgba(0,0,0,.4); font-size: 13px; overflow-wrap: anywhere; }
+.toast .toast-text { flex: 1; min-width: 0; }
+.toast .dismiss { flex: none; border: none; background: none; padding: 0 2px; color: var(--muted); font-size: 15px; line-height: 1.2; }
+.toast .dismiss:hover { color: var(--text); }
 .toast.error { border-left-color: var(--danger); }
 .toast.ok { border-left-color: var(--ok); }
 .fix-cmd { display: flex; align-items: center; gap: 8px; }
@@ -485,7 +521,7 @@ p.small.warn { color: var(--warn); }
 /* vision: what the current model can do with images */
 #vision-btn.native { color: var(--ok); }
 #vision-btn.helper { color: var(--warn); }
-#vision-btn.none { color: var(--muted); text-decoration: line-through; }
+#vision-btn.none { color: var(--warn); }
 .model-row .cap { font-size: 11px; color: var(--muted); font-family: system-ui, sans-serif; }
 .model-row .cap.off { opacity: .6; }
 .model-row .cap.tested { color: var(--ok); }

@@ -135,8 +135,12 @@ async function api(method, path, body) {
   return data;
 }
 
+// A toast goes by itself after `ms`, or at once with its ×. An error is announced to a screen
+// reader as an alert, the others when it is next idle (the list is aria-live).
 function toast(text, kind = "info", ms = 6000) {
-  const el = h("div", { class: `toast ${kind}` }, text);
+  const el = h("div", { class: `toast ${kind}`, role: kind === "error" ? "alert" : null },
+    h("span", { class: "toast-text" }, text),
+    h("button", { type: "button", class: "dismiss", title: "Dismiss", "aria-label": "Dismiss this message", onclick: () => el.remove() }, "×"));
   $("#toasts").append(el);
   setTimeout(() => el.remove(), ms);
 }
@@ -695,6 +699,8 @@ function renderTop() {
   const st = S.state;
   $("#case-btn").textContent = st.case ? (st.case.client ? `${st.case.name} · ${st.case.client}` : st.case.name) : "No case";
   $("#case-edit-btn").classList.toggle("hidden", !st.case);
+  // the bar shows the start of a long name; its tooltip has all of it
+  $("#case-btn").title = `${st.case ? `${$("#case-btn").textContent}\n` : ""}Start a new case, or open, edit or delete a previous one`;
   const sb = $("#sens-badge");
   sb.textContent = st.case ? st.case.sensitivity : "";
   sb.className = `badge clickable ${st.case?.sensitivity || ""}`;
@@ -1304,36 +1310,39 @@ const TOOL_PHASE = { propose_commands: "Preparing commands", update_hypotheses: 
 
 function clock(secs) { return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; }
 
+// The line has two parts: what is happening, which a screen reader announces when it changes (the
+// phase, whose turn it is), and the clock beside it, which it doesn't: while the AI answers the
+// line is drawn again every second, and each part is written only when its words differ. (Until
+// Nov 2026 the whole line was one live region, announced every second.)
 function renderStatus() {
-  const bar = $("#chat-status"), text = $("#chat-status-text");
+  const bar = $("#chat-status"), text = $("#chat-status-text"), ticking = $("#chat-status-clock");
   if (!S.state) return;
+  const say = (cls, words, counting = "") => {
+    bar.className = cls;
+    if (text.textContent !== words) text.textContent = words;
+    if (ticking.textContent !== counting) ticking.textContent = counting;
+  };
   if (S.state.busy) {
     const st = S.streaming || { phase: "waiting", startAt: Date.now(), lastAt: Date.now() };
     const now = Date.now(), total = Math.round((now - st.startAt) / 1000), quiet = Math.round((now - st.lastAt) / 1000);
     if ((st.searches || []).some((r) => r.status === "awaiting")) {
-      bar.className = "waiting";
-      text.textContent = `Waiting for you: approve or skip the web search in the AI's message  ·  ${clock(total)}`;
-      return;
+      return say("waiting", "Waiting for you: approve or skip the web search in the AI's message", `·  ${clock(total)}`);
     }
     if ((st.research || []).some((r) => r.status === "awaiting")) {
-      bar.className = "waiting";
-      text.textContent = `Waiting for you: approve or skip the research in the AI's message  ·  ${clock(total)}`;
-      return;
+      return say("waiting", "Waiting for you: approve or skip the research in the AI's message", `·  ${clock(total)}`);
     }
     if ((st.research || []).some((r) => r.status === "running")) {
-      bar.className = "busy";
-      text.textContent = `AI is responding: ${TOOL_PHASE.research}…  ·  ${clock(total)}`;
-      return;
+      return say("busy", `AI is responding: ${TOOL_PHASE.research}…`, `·  ${clock(total)}`);
     }
     let msg = { waiting: "Waiting for the model", reasoning: "Thinking", writing: "Writing",
       tool: TOOL_PHASE[st.tool] || "Working" }[st.phase] || "Working";
+    let silent = "";
     if (st.phase === "waiting" && total >= 8) msg += " (slow to start; still waiting)";
-    else if (st.phase !== "tool" && st.phase !== "waiting" && quiet >= 5) msg += `… still working, no new text for ${quiet}s`;
+    else if (st.phase !== "tool" && st.phase !== "waiting" && quiet >= 5) { msg += "… still working"; silent = `no new text for ${quiet}s  `; }
     else msg += "…";
-    bar.className = "busy";
-    text.textContent = `AI is responding: ${msg}  ·  ${clock(total)}`;
-    return;
+    return say("busy", `AI is responding: ${msg}`, `${silent}·  ${clock(total)}`);
   }
+  ticking.textContent = "";
   // checked first: after a failed request the last chat entry is the technician's own message
   if (S.state.can_retry) {
     bar.className = "failed";
@@ -1357,8 +1366,7 @@ function renderStatus() {
   if (pending) todo.push(`${pending} command${pending > 1 ? "s" : ""} to run or skip`);
   if (ready) todo.push(`${ready} result${ready > 1 ? "s" : ""} ready to send`);
   if (last.questions?.length) todo.push(`${last.questions.length} question${last.questions.length > 1 ? "s" : ""} to answer`);
-  bar.className = "done";
-  text.textContent = `✓ AI finished${S.lastTurn?.secs ? ` (${clock(S.lastTurn.secs)})` : ""}. Your turn${todo.length ? ": " + todo.join(" · ") : "."}`;
+  say("done", `✓ AI finished${S.lastTurn?.secs ? ` (${clock(S.lastTurn.secs)})` : ""}. Your turn${todo.length ? ": " + todo.join(" · ") : "."}`);
 }
 
 // NanoGPT no longer offers the private model the last message went to (nothing was sent): offer
@@ -4630,18 +4638,28 @@ async function doExport(act) {
 const MENUS = [...document.querySelectorAll(".menu")];     // the page's own, as it starts
 function hideMenus() { for (const m of MENUS) m.classList.add("hidden"); }
 
+// A menu opens under its button, to the side the stylesheet gives it, unless that would put part
+// of it outside the window (the top bar wraps in a narrow one, so a button can be anywhere).
 function toggleMenu(menu) {
   const wasHidden = menu.classList.contains("hidden");
   hideMenus();
-  if (wasHidden) menu.classList.remove("hidden");
+  if (!wasHidden) return;
+  menu.classList.remove("hidden");
+  menu.style.left = menu.style.right = "";
+  const at = menu.getBoundingClientRect();
+  if (at.left < 4) { menu.style.left = "0"; menu.style.right = "auto"; }
+  else if (at.right > window.innerWidth - 4) { menu.style.left = "auto"; menu.style.right = "0"; }
 }
 
 // ---- layout: pane sizes and collapsed panes, kept in the config (Engine.save_layout) so they
 // survive a restart; the page's own storage doesn't (private in the app window, a new origin
 // per launch in the browser). Applied once from the first state, then owned by the page.
 const layout = { chat_w: null, queue_h: null, chat_collapsed: false, queue_collapsed: false, loaded: false };
+// The queue leaves 400px to the top bar and the workspace, where the chat log needs room to read
+// in: in the app window at its smallest (900×600) it is 200px high at most.
+const QUEUE_H = 240;                  // the stylesheet's --queue-h
 const clampChatW = (px) => Math.max(280, Math.min(px, window.innerWidth - 320));
-const clampQueueH = (px) => Math.max(90, Math.min(px, window.innerHeight - 250));
+const clampQueueH = (px) => Math.max(90, Math.min(px, window.innerHeight - 400));
 
 function saveLayout(changes) {
   Object.assign(layout, changes);
@@ -4651,7 +4669,7 @@ function saveLayout(changes) {
 function applyLayout() {
   const root = document.documentElement;
   if (layout.chat_w) root.style.setProperty("--chat-w", `${clampChatW(layout.chat_w)}px`);
-  if (layout.queue_h) root.style.setProperty("--queue-h", `${clampQueueH(layout.queue_h)}px`);
+  root.style.setProperty("--queue-h", `${clampQueueH(layout.queue_h || QUEUE_H)}px`);
   document.body.classList.toggle("chat-collapsed", layout.chat_collapsed);
   document.body.classList.toggle("queue-collapsed", layout.queue_collapsed);
   const ct = $("#chat-toggle"), qt = $("#queue-toggle");

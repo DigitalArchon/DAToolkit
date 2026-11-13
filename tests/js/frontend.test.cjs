@@ -1525,6 +1525,95 @@ test("a button that shows only a symbol has a name for a screen reader, and the 
 
 // ------------------------------------------------------------------ the top bar
 
+test("a long case name is cut in the bar and whole in its tooltip, and the stylesheet keeps the bar's controls on one line each", async () => {
+  const long = "TKT-10422 Acme Dental: file server fs01 slow since the weekend's patch run, users on the second floor";
+  const app = await page("a", (s) => { s.case.name = long; s.case.client = "Acme Dental"; });
+  assert.equal(app.$("#case-btn").textContent, `${long} · Acme Dental`);
+  assert.equal(app.$("#case-btn").title, `${long} · Acme Dental\nStart a new case, or open, edit or delete a previous one`);
+  await app.event({ type: "state", state: state("none") });
+  assert.equal(app.$("#case-btn").title, "Start a new case, or open, edit or delete a previous one");
+  const css = fs.readFileSync(path.join(WEB, "style.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (selector) => css.split("}").map((r) => r.split("{")).filter(([sel]) => sel.split(",").some((x) => x.trim() === selector))
+    .map(([, body]) => body).join(";");
+  assert.match(rule("#topbar"), /flex-wrap:\s*wrap/);
+  assert.match(rule("#topbar > *"), /white-space:\s*nowrap/);
+  assert.match(rule("#case-btn"), /max-width:[^;]+;\s*overflow:\s*hidden;\s*text-overflow:\s*ellipsis/);
+  assert.match(rule("#model-name"), /text-overflow:\s*ellipsis/);
+  // the workspace never gives way to the queue, and the chat log keeps room to read in
+  assert.match(rule("body"), /grid-template-rows:\s*auto auto minmax\(180px, 1fr\) 5px var\(--queue-h\)/);
+  assert.match(rule("#chat-log"), /min-height:\s*110px/);
+  assert.match(rule("#chat-pane"), /overflow-y:\s*auto/);
+  // toasts above the queue, not over its buttons; the "no images" label is not struck through
+  assert.match(rule("#queue-pane ~ #toasts"), /bottom:\s*calc\(var\(--queue-h\) \+ 21px\)/);
+  assert.doesNotMatch(rule("#vision-btn.none"), /line-through/);
+});
+
+test("in a small window the queue leaves the workspace its room, and a menu opens inside the window", async () => {
+  const app = await page("a");
+  const queueH = () => app.document.documentElement.style.getPropertyValue("--queue-h");
+  app.call("applyLayout");
+  assert.equal(queueH(), "240px");
+  app.window.innerHeight = 600;                                   // the app window at its smallest
+  app.call("applyLayout");
+  assert.equal(queueH(), "200px");
+  app.window.innerHeight = 420;
+  app.call("applyLayout");
+  assert.equal(queueH(), "90px");
+  app.window.innerHeight = 1000;
+  app.run("layout.queue_h = 500");
+  app.call("applyLayout");
+  assert.equal(queueH(), "500px");
+  // the bar wrapped: Export sits at the left of its row, where a menu hung from its right edge would leave the window
+  const menu = app.$("#export-menu");
+  menu.getBoundingClientRect = () => ({ left: -150, right: 90, top: 80, bottom: 240 });
+  app.$("#export-btn").click();
+  assert.deepEqual([menu.classList.contains("hidden"), menu.style.left, menu.style.right], [false, "0", "auto"]);
+  menu.getBoundingClientRect = () => ({ left: 300, right: 540, top: 80, bottom: 240 });
+  app.$("#export-btn").click();
+  app.$("#export-btn").click();
+  assert.deepEqual([menu.style.left, menu.style.right], ["", ""]);
+});
+
+test("a toast can be dismissed and is announced; the status line announces what changed, not its clock", async () => {
+  const app = await page("a");
+  const D = app.run("Date");
+  let now = 1.8e12;
+  D.now = () => now;
+  const pass = async (secs) => { for (let i = 0; i < secs; i++) { now += 1000; await app.clock.tick(1000); } };
+  app.call("toast", "Saved.", "ok", 6000);
+  app.call("toast", "It failed.", "error", 12000);
+  const [ok, failed] = app.$("#toasts").querySelectorAll(".toast");
+  assert.equal(app.$("#toasts").getAttribute("aria-live"), "polite");
+  assert.deepEqual([ok.getAttribute("role"), failed.getAttribute("role")], [null, "alert"]);
+  assert.deepEqual(app.toasts(), ["Saved.", "It failed."]);
+  failed.querySelector("button.dismiss").click();
+  assert.deepEqual(app.toasts(), ["Saved."]);
+  await pass(6);
+  assert.deepEqual(app.toasts(), []);
+  // the status line
+  const text = app.$("#chat-status-text"), ticking = app.$("#chat-status-clock");
+  assert.deepEqual([text.getAttribute("aria-live"), ticking.getAttribute("aria-hidden"), app.$("#chat-status").getAttribute("aria-live")], ["polite", "true", null]);
+  await app.event({ type: "turn_start", model: "m", tier: "standard" });
+  assert.equal(text.textContent, "AI is responding: Waiting for the model…");
+  await app.event({ type: "delta", kind: "text", text: "Looking" });
+  await pass(1);
+  const said = text.firstChild;
+  assert.equal(text.textContent, "AI is responding: Writing…");
+  await pass(2);
+  assert.ok(text.firstChild === said, "the same words aren't written, and so not announced, again");
+  assert.equal(ticking.textContent, "·  0:03");
+  await pass(3);
+  assert.equal(text.textContent, "AI is responding: Writing… still working");
+  assert.equal(ticking.textContent, "no new text for 6s  ·  0:06");
+  const still = text.firstChild;
+  await pass(2);
+  assert.ok(text.firstChild === still);
+  assert.equal(ticking.textContent, "no new text for 8s  ·  0:08");
+  await app.event({ type: "turn_end", chat: [{ kind: "assistant", text: "Looking good." }] });
+  assert.match(text.textContent, /^✓ AI finished \(0:08\)\. Your turn/);
+  assert.equal(ticking.textContent, "");
+});
+
 test("a settings notice and a keyring problem show in the banners", async () => {
   const app = await page("a", (s) => {
     s.ui_notice = "config.toml couldn't be read; it was set aside as config.toml.broken-20261104-080000.";

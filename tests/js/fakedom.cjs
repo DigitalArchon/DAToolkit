@@ -778,7 +778,8 @@ function loadApp({ token = "tok", port = 48599, inFragment = false, page = "inde
   };
   app.posts = (p) => app.calls.filter((c) => c.method === "POST" && c.path === p);
   app.gets = (p) => app.calls.filter((c) => c.method === "GET" && c.path === p);
-  app.toasts = () => document.querySelectorAll("#toasts .toast").map((t) => t.textContent);
+  // what each toast says (without its dismiss button's ×)
+  app.toasts = () => document.querySelectorAll("#toasts .toast").map((t) => (t.querySelector(".toast-text") || t).textContent);
   // a reply held until the test lets it go: route(call) waits for release(value)
   app.hold = (key, value) => {
     let release;
