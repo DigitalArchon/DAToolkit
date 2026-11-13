@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -186,12 +187,25 @@ class Case:
         return kept.name
 
     def save_draft(self, text: str, images: list[str]) -> None:
-        """The chat box's message not sent yet and the photos attached to it (draft.json)."""
+        """The chat box's message not sent yet and the photos attached to it (draft.json).
+        Saves of one case land in the order they were asked for: the page saves as the
+        technician types, each save on a thread of its own, and one with photos takes long
+        enough to be overtaken by the next. Until Nov 2026 the older one could finish last and
+        put back photos just removed, and both wrote one draft.tmp. Each save takes a number as
+        it begins, and one that finds a later number already written does nothing."""
+        seq = next(_draft_seq)
         path = self.dir / "draft.json"
-        if not text.strip() and not images:
-            path.unlink(missing_ok=True)
-        else:
-            write_atomic(path, _json_bytes({"text": text, "images": images}), sync_dir=False)
+        data = _json_bytes({"text": text, "images": images}) if text.strip() or images else None
+        with _drafts_guard:
+            order = _drafts.setdefault(str(self.dir), _DraftOrder())
+        with order.lock:
+            if seq < order.landed:
+                return
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_atomic(path, data, sync_dir=False)
+            order.landed = seq
 
     def load_draft(self) -> dict:
         try:
@@ -337,6 +351,20 @@ def _read_state(path: Path) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"{path.name} doesn't hold a case's state")
     return data
+
+
+class _DraftOrder:
+    """One case's draft saves: the lock they are written under, and the number of the latest
+    one written (Case.save_draft)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.landed = 0
+
+
+_draft_seq = itertools.count(1)
+_drafts: dict[str, _DraftOrder] = {}       # case directory -> its draft saves
+_drafts_guard = threading.Lock()
 
 
 def _case_dir(case_id: str, root: Path | None = None) -> Path:
