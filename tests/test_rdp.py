@@ -44,6 +44,38 @@ def test_encode_and_incremental_parse():
         guac.Parser().feed("x.abc;")
 
 
+@pytest.mark.parametrize("bad", [
+    "0.,-4.", "4.sync,0.,-4.",            # a negative length moved the parser backwards: it never came out of these
+    "-1.;", "1.a,-1.b;", " 3.abc;", "+3.abc;", "1_0.abcdefghij;", "\uff13.abc;", "3 .abc;", ".abc;", "0x3.abc;",
+    "99999999999999999999.x", "1048577.x", "12345678", "9" * 5000,      # more than is ever taken, or no end to the digits
+    "abc",                                                             # and not a length at all, dot or no dot
+])
+def test_the_parser_takes_only_plain_lengths(bad):
+    import signal
+
+    def stuck(*_):
+        raise AssertionError(f"still parsing {bad!r}")
+    old = signal.signal(signal.SIGALRM, stuck)
+    signal.alarm(5)
+    try:
+        with pytest.raises(guac.GuacError, match="element"):
+            guac.Parser().feed(bad)
+        watch = guac.ConnectWatch()
+        with pytest.raises(guac.GuacError):
+            watch.feed(guac.encode("sync", "1") + bad)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def test_the_parser_waits_for_what_is_still_to_come():
+    p = guac.Parser()
+    assert p.feed("") == [] and p.feed("4") == [] and p.feed(".sy") == [] and p.feed("nc,10") == []
+    assert p.feed("48576." + "x" * guac.MAX_ELEMENT) == []            # the longest element taken, 1048576 characters
+    assert p.feed(";0.;") == [["sync", "x" * guac.MAX_ELEMENT], [""]]
+    assert guac.Parser().feed(guac.encode("x", "a\U0001F600b")) == [["x", "a\U0001F600b"]]
+
+
 # What guacd sends after `ready`, as recorded against Windows 11 (Nov 2026). guacd 1.3 starts
 # with the joining user's display (no sync) and sends its first sync once RDP is up; 1.6 sends a
 # sync straight away, ending a frame of only the pointer, before RDP connects.
@@ -93,7 +125,12 @@ class FakeGuacd:
             if not self.reply_ready:
                 conn.sendall(guac.encode("error", "Aborted. See logs.", "519").encode())
                 return
-            conn.sendall((guac.encode("ready", "$abc") + self.after).encode())
+            if isinstance(self.after, bytes):            # bytes that aren't the protocol, a moment into the session
+                conn.sendall(guac.encode("ready", "$abc").encode())
+                threading.Event().wait(0.3)
+                conn.sendall(self.after)
+            else:
+                conn.sendall((guac.encode("ready", "$abc") + self.after).encode())
             while True:
                 data = conn.recv(65536)
                 if not data:
@@ -144,6 +181,40 @@ async def test_handshake_error_from_guacd():
     with pytest.raises(guac.GuacError, match="Aborted"):
         await guac.handshake(r, w, "rdp", {}, 800, 600)
     w.close()
+
+
+async def _answering(*replies: bytes):
+    """A server that answers what it is sent with `replies`, one for each time it is written to."""
+    async def handle(reader, writer):
+        try:
+            for reply in replies:
+                await reader.read(65536)
+                writer.write(reply)
+                await writer.drain()
+            await reader.read(65536)
+        except OSError:
+            pass
+        writer.close()
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1]
+
+
+async def test_an_answer_that_isnt_utf8_is_not_guacd(monkeypatch):
+    server, port = await _answering(b"4.args,\xff\xfe\xfd;")
+    async with server:
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        with pytest.raises(guac.GuacError, match="isn't speaking the Guacamole protocol"):
+            await guac.handshake(r, w, "rdp", {}, 800, 600)
+        w.close()
+        monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", port))
+        assert await guac.probe(2) is False
+
+
+def test_guacd_sending_something_else_mid_session_ends_the_connection_with_a_reason(tmp_path, monkeypatch):
+    e = _relay(tmp_path, monkeypatch, FakeGuacd(after=guac.encode("sync", "7").encode() + b"\xff\xfe not the protocol"),
+               "RDP via guacd ended")
+    assert _rdp_events(e) == [("rdp_connecting", {}), ("rdp_connect_failed", {
+        "error": "what answered on guacd's port isn't speaking the Guacamole protocol (it sent bytes that aren't UTF-8)"})]
 
 
 # ---------------------------------------------------------------- certificate probe
@@ -210,6 +281,43 @@ async def test_fetch_legacy_and_refused():
     server, port = await fake_rdp_server("ssl-not-allowed")
     async with server:
         assert (await rdpcert.fetch("127.0.0.1", port))["tls"] is False
+
+
+@pytest.mark.parametrize("answer", [
+    b"\x03\x00\x00\x02",                  # a packet shorter than its own header: a negative read, unhandled
+    b"\x03\x00\x00\x00", b"\x03\x00\x00\x04", b"\x03\x00\x00\x05\xd0",
+])
+async def test_fetch_takes_a_malformed_answer_for_what_it_is(answer):
+    server, port = await _answering(answer)
+    async with server:
+        with pytest.raises(rdpcert.CertError, match="did not answer like an RDP server|refused the RDP connection|failed"):
+            await rdpcert.fetch("127.0.0.1", port)
+
+
+@pytest.mark.parametrize("fetch", [rdpcert.fetch, rdpcert.fetch_tls])
+async def test_a_connection_that_fails_while_the_certificate_is_read_is_a_certificate_error(monkeypatch, fetch):
+    class Reader:
+        async def readexactly(self, n):
+            raise OSError(113, "No route to host")           # the network went, between connecting and reading
+
+    class Writer:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            pass
+
+        async def start_tls(self, ctx):
+            raise OSError(113, "No route to host")
+
+        def close(self):
+            pass
+
+    async def connected(host, port):
+        return Reader(), Writer()
+    monkeypatch.setattr(asyncio, "open_connection", connected)
+    with pytest.raises(rdpcert.CertError, match="10.250.0.9:3389 failed: .*No route to host"):
+        await fetch("10.250.0.9", 3389)
 
 
 async def test_a_host_set_to_legacy_security_is_warned_about_not_pinned(rdp_env, tmp_path):

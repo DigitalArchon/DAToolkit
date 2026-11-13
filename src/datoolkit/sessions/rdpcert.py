@@ -102,9 +102,10 @@ async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
         writer.write(_connection_request(user))
         await writer.drain()
         head = await asyncio.wait_for(reader.readexactly(4), TIMEOUT)
-        if head[0] != 3:
+        length = struct.unpack(">H", head[2:4])[0]      # of the whole packet, these four bytes included
+        if head[0] != 3 or length < 4:
             raise CertError(f"{host}:{port} did not answer like an RDP server")
-        body = await asyncio.wait_for(reader.readexactly(struct.unpack(">H", head[2:4])[0] - 4), TIMEOUT)
+        body = await asyncio.wait_for(reader.readexactly(length - 4), TIMEOUT)
         if len(body) < 7 or body[1] & 0xF0 != 0xD0:
             raise CertError(f"{host}:{port} refused the RDP connection request")
         neg = body[7:]
@@ -134,7 +135,9 @@ async def fetch(host: str, port: int = 3389, user: str = "") -> dict:
         if not der:
             raise CertError(f"{host}:{port} sent no certificate")
         return {"tls": True, "protocol": protocol, "sha256": fingerprint(der), "sha1": thumbprint(der), **describe(der)}
-    except (asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError, ConnectionError) as e:
+    # any way a connection can fail once made (a reset, a timeout, the network going: OSError),
+    # or end early: the technician is told, as for a server that can't be reached
+    except (asyncio.IncompleteReadError, asyncio.TimeoutError, OSError) as e:
         raise CertError(f"TLS handshake with {host}:{port} failed: {e or type(e).__name__}") from e
     finally:
         writer.close()
@@ -156,7 +159,7 @@ async def fetch_tls(host: str, port: int) -> dict:
         if not der:
             raise CertError(f"{host}:{port} sent no certificate")
         return {"tls": True, "protocol": "tls", "sha256": fingerprint(der), "sha1": thumbprint(der), **describe(der)}
-    except (asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError, ConnectionError) as e:
+    except (asyncio.IncompleteReadError, asyncio.TimeoutError, OSError) as e:
         raise CertError(f"TLS handshake with {host}:{port} failed: {e or type(e).__name__}") from e
     finally:
         writer.close()

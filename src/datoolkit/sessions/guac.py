@@ -28,6 +28,11 @@ from pathlib import Path
 from ..hostenv import host_env
 
 INTERNAL = ""          # opcode of tunnel-internal instructions (uuid, ping)
+# The longest element taken (in characters): far above anything guacd sends (it cuts its own
+# instructions into pieces of a few kilobytes), and a bound on what a stream that only claims a
+# length can make the parser wait for and keep
+MAX_ELEMENT = 1 << 20
+_LENGTH_DIGITS = len(str(MAX_ELEMENT))
 UNAUTHORIZED = "769"   # guacd's status code for a login the server refused (a wrong password)
 HANDSHAKE_TIMEOUT = 20
 # Always this machine, on guacd's default port. The link to guacd is plain, unauthenticated
@@ -402,7 +407,12 @@ def enforces_pin(names: list[str], params: dict[str, str]) -> bool:
 
 
 class Parser:
-    """Incremental parser: feed text, get complete instructions as lists of strings."""
+    """Incremental parser: feed text, get complete instructions as lists of strings.
+
+    A length is one to seven ASCII digits and nothing else. int() also took a sign, spaces,
+    underscores and other scripts' digits: "-4" moved the parser backwards, and `0.,-4.` kept it
+    going round for ever, on the event loop, on a few bytes from whatever answered on guacd's
+    port; a length of a billion made it keep everything that followed. Until Nov 2026."""
 
     def __init__(self) -> None:
         self._buf = ""
@@ -413,13 +423,18 @@ class Parser:
         while True:
             elems, i, complete = [], start, False
             while True:
-                dot = buf.find(".", i)
+                dot = buf.find(".", i, i + _LENGTH_DIGITS + 1)
+                # the length's digits, as far as they have arrived: all of them when the dot has
+                length = buf[i:dot] if dot != -1 else buf[i:i + _LENGTH_DIGITS + 1]
+                if dot == -1 and not length:
+                    break                          # nothing of the next element yet
+                if not (length.isascii() and length.isdigit()) or len(length) > _LENGTH_DIGITS:
+                    raise GuacError(f"bad element length {length[:20]!r}")
                 if dot == -1:
                     break                          # length not complete yet
-                try:
-                    n = int(buf[i:dot])
-                except ValueError as e:
-                    raise GuacError(f"bad element length {buf[i:dot][:20]!r}") from e
+                n = int(length)
+                if n > MAX_ELEMENT:
+                    raise GuacError(f"element of {n} characters: more than is taken")
                 end = dot + 1 + n
                 if end >= len(buf):
                     break                          # value or terminator not here yet
@@ -480,12 +495,23 @@ class ConnectWatch:
         return events
 
 
+def decode(decoder, data: bytes) -> str:
+    """What guacd sent, as text. The protocol is UTF-8; anything else isn't guacd, or isn't
+    well, and is a GuacError like other things that aren't the protocol, not a decoding error
+    nobody catches."""
+    try:
+        return decoder.decode(data)
+    except UnicodeDecodeError as e:
+        raise GuacError("what answered on guacd's port isn't speaking the Guacamole protocol (it sent bytes that "
+                        "aren't UTF-8)") from e
+
+
 async def _read_instruction(reader: asyncio.StreamReader, parser: Parser, decoder, pending: list) -> list[str]:
     while not pending:
         data = await reader.read(65536)
         if not data:
             raise GuacError("guacd closed the connection during the handshake")
-        pending.extend(parser.feed(decoder.decode(data)))
+        pending.extend(parser.feed(decode(decoder, data)))
     return pending.pop(0)
 
 

@@ -975,8 +975,14 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             await ws.send_text(guac.tunnel_uuid() + leftover)
 
             async def down():            # guacd -> browser
+                nonlocal failure
                 while data := await reader.read(65536):
-                    text = decoder.decode(data)
+                    try:
+                        text = guac.decode(decoder, data)
+                    except guac.GuacError as e:      # not UTF-8: not guacd's protocol, and the end of this connection
+                        failure = str(e)
+                        await ws.send_text(guac.encode("error", f"RDP via guacd ended: {failure}", "519"))
+                        return
                     if text:
                         watched(text)
                         await ws.send_text(text)
@@ -996,6 +1002,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             finally:
                 for t in tasks:
                     t.cancel()
+                # each one's end is taken here (the page closing, guacd going): not left for the
+                # event loop to report as an exception nobody retrieved
+                await asyncio.gather(*tasks, return_exceptions=True)
         except (WebSocketDisconnect, RuntimeError, ConnectionError, asyncio.CancelledError):
             pass
         finally:
