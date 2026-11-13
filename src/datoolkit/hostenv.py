@@ -43,10 +43,12 @@ def _set_by_apprun(env) -> set[str]:
     the host bundles it picks from is its work, and REQUESTS_CA_BUNDLE equal to that too. A
     technician who had set SSL_CERT_FILE to that very file loses nothing by its absence (it is
     the system's default), and one with a bundle of their own keeps both variables."""
+    if APPRUN_SET in env:
+        # said by AppRun itself, however it was started: from the AppImage, or from an extracted one,
+        # where the runtime's own variables (APPDIR, APPIMAGE) aren't there to go by
+        return set(env[APPRUN_SET].split()) & set(CA_VARS)
     if not (env.get("APPDIR") or env.get("APPIMAGE")):
         return set()
-    if APPRUN_SET in env:
-        return set(env[APPRUN_SET].split()) & set(CA_VARS)
     found = set()
     if env.get("SSL_CERT_FILE") in APPRUN_CA_BUNDLES:
         found.add("SSL_CERT_FILE")

@@ -108,3 +108,18 @@ async def test_a_terminal_doesnt_get_appruns_ca_variables_and_the_winrm_console_
         assert f"cert=[{SYSTEM}] requests=[{SYSTEM}] appdir=[]".encode() in bytes(console.backlog)
     finally:
         await engine.stop()
+
+
+def test_an_extracted_appimages_apprun_is_taken_at_its_word_too(monkeypatch):
+    """AppRun run from an extracted image (as the lab's tests run it) has no APPDIR or APPIMAGE around
+    it: what it says it set still stays out of the technician's shells."""
+    for name in ("APPDIR", "APPIMAGE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", SYSTEM)
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", SYSTEM)
+    monkeypatch.setenv(hostenv.APPRUN_SET, "SSL_CERT_FILE REQUESTS_CA_BUNDLE")
+    env = hostenv.host_env()
+    assert not {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", hostenv.APPRUN_SET} & set(env)
+    monkeypatch.delenv(hostenv.APPRUN_SET)                     # no AppRun at all: they are the technician's own
+    env = hostenv.host_env()
+    assert env["SSL_CERT_FILE"] == SYSTEM and env["REQUESTS_CA_BUNDLE"] == SYSTEM
