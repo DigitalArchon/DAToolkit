@@ -702,6 +702,12 @@ class Engine:
             raise UserError(f"There is already a provider called {name}. The same address can be added again with "
                             f"another API key, under a name of its own (such as \"{name} PAYG\" beside \"{name} Sub Only\").")
         renamed = bool(original_name and original_name != name and old)
+        if "|" in name and not (old and old.name == name):
+            # "provider|model" is how a setting names a model (the reviewer, the vision helper, the
+            # recent models), and it is split at the first "|": one in the name would be read as
+            # the end of it. A provider saved with one before Nov 2026 keeps working until renamed.
+            raise UserError("Provider not saved. A provider's name can't contain | (it separates the provider from "
+                            "the model where a setting names both).")
         self._settings_ours()
         # The keyring first, every call to it, so one that refuses (none that keeps secrets safe,
         # a locked one, its prompt dismissed) leaves the config and what is in memory as they
@@ -775,7 +781,11 @@ class Engine:
     def delete_provider(self, name: str) -> None:
         """Remove a provider, its secrets first: a keyring that can't remove them (locked, its
         prompt dismissed) leaves the provider where it was, with a message, where until Nov 2026
-        it was gone from memory, still in config.toml, and its key still in the keyring."""
+        it was gone from memory, still in config.toml, and its key still in the keyring. With
+        it goes everything learned or set for it, so that a new provider of the same name
+        starts clean: its model list and what its models can do, and the settings that name it
+        (the reviewer, the vision helper, the research model, who pays for searches, the recent
+        models), which would otherwise pass to the newcomer unasked."""
         self._settings_ours()
         try:
             creds.delete_secret("provider", name)
@@ -786,6 +796,21 @@ class Engine:
         self._secrets_changed()
         self._forget_tee(name)
         self.cfg.providers = [p for p in self.cfg.providers if p.name != name]
+        task = self._caps_tasks.pop(name, None)
+        if task and not task.done():
+            task.cancel()
+        for cache in (self._caps, self._caps_failed, self._enclaves, self._research_auto, self._models):
+            cache.pop(name, None)
+        for cache in (self._unsupported, self._efforts, self._learned_ctx, self._hosts):
+            for key in [k for k in cache if k[0] == name]:
+                del cache[key]
+        s = self.cfg.settings
+        for key in ("review_model", "research_model", "vision_model"):
+            if getattr(s, key).startswith(name + "|"):
+                setattr(s, key, "")
+        if s.search_via == name:
+            s.search_via = ""
+        self.cfg.recent_models = [r for r in self.cfg.recent_models if not r.startswith(name + "|")]
         if self.cfg.active_provider == name:
             self.cfg.active_provider = self.cfg.providers[0].name if self.cfg.providers else ""
             self.cfg.active_model = ""
