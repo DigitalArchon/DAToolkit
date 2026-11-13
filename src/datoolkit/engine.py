@@ -2410,9 +2410,6 @@ class Engine:
         # security key's PIN, or a one-time passcode is something else (a wrong PIN counts
         # against the card's few tries)
         is_password = kind == "password" or bool(re.search(r"\bpassword\b", prompt, re.I))
-        if is_password:
-            # asked again: what was typed for this session before was refused, so it isn't saved
-            self._password_refused(sid)
         # A prompt from some other host (a jump host on the way, judged by the whole name,
         # not a part of it) is not ours to answer from the keyring, and what the technician
         # types for it is not this host's password: it is never offered for saving under it.
@@ -2425,7 +2422,7 @@ class Engine:
                 self._ssh_hostnames[key] = await asyncio.to_thread(ssh_mod.resolved_hostname, host)
             own = named if named == self._ssh_hostnames[key] else own
         other_host = bool(host and named and named != own)
-        if host and host.jump:
+        if host and host.kind == "ssh" and host.jump:
             # Never to a jump host: not one of the same name as the target (another port of one
             # machine), and not through an OpenSSH too old to say which server wrote a prompt.
             other_host = (other_host or named in ssh_mod.jump_hosts(host.jump)
@@ -2436,6 +2433,9 @@ class Engine:
             # password isn't offered to it; nor is it when the text mentions another host.
             mentioned = {_host_key(m) for m in _MENTIONED_HOST.findall(prompt)}
             other_host = bool(host.jump) or bool(mentioned - {own})
+        if is_password and not other_host:
+            # the host asks again: what was typed for this session before was refused, so it isn't saved
+            self._password_refused(sid)
         if sess and host and is_password and not other_host and not sess.used_stored_password:
             stored = self._get_secret_safe("host", host.name)
             if stored:

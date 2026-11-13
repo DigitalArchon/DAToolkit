@@ -432,6 +432,36 @@ async def test_a_jump_host_of_the_targets_own_name_gets_no_saved_password(env):
     assert await task is None
 
 
+async def test_another_hosts_prompt_says_nothing_about_this_hosts_password(env):
+    engine, _, events = env
+    engine.new_case("x", "open")
+    engine.cfg.hosts.append(Host("inner", "ssh", "inner.lan", user="bob", auth="password", jump="me@bastion"))
+    engine.sessions.spawn("inner", ["/bin/cat"], {}, name="inner", kind="ssh", host_name="inner")
+    task = asyncio.create_task(engine._askpass("inner", "bob@inner.lan's password: ", "askpass"))
+    prompt = await prompt_of(events)
+    engine.answer_prompt(prompt["id"], "typed", save=True)
+    assert await task == "typed" and engine.sessions.unsaved["inner"] == ("inner", "typed")
+    # the bastion asking for a password of its own is no refusal of the target's
+    events.clear()
+    task = asyncio.create_task(engine._askpass("inner", "(me@bastion) Password: ", "askpass"))
+    prompt = await prompt_of(events)
+    engine.answer_prompt(prompt["id"], None)
+    await task
+    assert engine.sessions.unsaved["inner"] == ("inner", "typed")
+    # the target asking again is
+    events.clear()
+    task = asyncio.create_task(engine._askpass("inner", "bob@inner.lan's password: ", "askpass"))
+    prompt = await prompt_of(events)
+    assert "inner" not in engine.sessions.unsaved
+    engine.answer_prompt(prompt["id"], None)
+    await task
+    # a jump host means something for ssh only: a WinRM host with one left in its settings gets its saved password
+    engine.cfg.hosts.append(Host("win", "winrm", "192.168.250.7", user="bob", auth="ntlm", winrm_ssl=False, jump="me@bastion"))
+    creds.set_secret("host", "win", "win-pw")
+    engine.sessions.spawn("win", ["/bin/cat"], {}, name="win", kind="winrm", host_name="win")
+    assert await engine._askpass("win", "Password for bob@192.168.250.7 (WinRM):", "password") == "win-pw"
+
+
 def test_jump_hosts_and_the_ssh_version(monkeypatch):
     import subprocess
     from types import SimpleNamespace
