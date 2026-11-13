@@ -4166,6 +4166,9 @@ function openSettings(tab = "providers") {
       const routeBtn = h("button", { type: "button", class: "small" });
       const fill = () => {
         const m = info(model.value.trim());
+        // (`id` is the model this row was made for; `named`, below, the one in its box now. Until
+        // Nov 2026 both were called id, and the first use of it here threw for any provider that
+        // had overrides: its form didn't open, and "Add a model" added nothing.)
         const t = tier.options.length ? tier.value : (p.tier_overrides?.[id] || "");
         tier.replaceChildren(...[["", `Auto${m ? ` (${m.tier_auto})` : ""}`], ["standard", "Standard"], ["tee", "TEE (attested)"], ["local", "Local (own hardware)"]]
           .map(([v, l]) => h("option", { value: v, selected: v === t }, l)));
@@ -4181,9 +4184,9 @@ function openSettings(tab = "providers") {
         routeBtn.textContent = r ? `⚡ ${ROUTE_LABELS[r.priority]}` : "Route…";
         // as routing.routable: Standard-tier models of a NanoGPT or OpenRouter provider (a tier set
         // here counts: one marked TEE or Local is never routed)
-        const id = model.value.trim();
-        const effTier = tier.value || m?.tier_auto || (/^(private|TEE)\//i.test(id) ? "e2ee" : "standard");
-        routeBtn.disabled = !routable() || !id || /^private\//i.test(id) || effTier !== "standard";
+        const named = model.value.trim();
+        const effTier = tier.value || m?.tier_auto || (/^(private|TEE)\//i.test(named) ? "e2ee" : "standard");
+        routeBtn.disabled = !routable() || !named || /^private\//i.test(named) || effTier !== "standard";
         routeBtn.title = routeBtn.disabled ? "Routes apply to Standard-tier NanoGPT and OpenRouter models, never to private/, TEE or Local ones" : "Choose which host serves this model";
       };
       model.addEventListener("input", fill);

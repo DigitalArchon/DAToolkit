@@ -955,6 +955,24 @@ test("control characters are taken out of what is pasted into a terminal, howeve
   assert.match(fs.readFileSync(path.join(WEB, "style.css"), "utf8"), /^\.prompt-text \{[^}]*overflow-wrap: anywhere/m);
 });
 
+test("a provider's form opens with its model overrides in it, and Add a model adds a row", async () => {
+  const app = await page("a", (s) => {
+    s.config.providers = [{ name: "Own box", kind: "local", kind_label: "Local", base_url: "http://localhost:11434/v1", has_key: false,
+      tier_overrides: { "qwen3:32b": "local" }, vision_overrides: {}, context_overrides: { "qwen3:32b": 32768 }, routes: {} }];
+  });
+  app.call("openSettings");
+  await app.clock.tick(50);
+  button(app.$(".modal .list-item"), "Edit").click();
+  const rows = () => app.$(".modal table.overrides").querySelectorAll("tbody tr");
+  assert.equal(rows().length, 1);
+  assert.deepEqual([rows()[0].querySelector("input").value, rows()[0].querySelector("select").value, rows()[0].querySelector("input.ctx").value],
+    ["qwen3:32b", "local", "32768"]);
+  button(app.$(".modal"), "Add a model").click();
+  assert.equal(rows().length, 2);
+  await app.type(rows()[1].querySelector("input"), "private/glm-5-3");
+  assert.equal(button(rows()[1], "Route…").disabled, true);
+});
+
 test("messages name the Settings tab as it is labelled: AI providers", async () => {
   const js = fs.readFileSync(path.join(WEB, "app.js"), "utf8");
   assert.doesNotMatch(js, /Settings → Providers/);
