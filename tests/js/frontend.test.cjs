@@ -973,6 +973,34 @@ test("a provider's form opens with its model overrides in it, and Add a model ad
   assert.equal(button(rows()[1], "Route…").disabled, true);
 });
 
+test("a baseline this case may not use is listed with the reason and can't be diffed", async () => {
+  const refused = "Taken in a Sovereign case: it can't be used from this Open one.";
+  const rows = [
+    { path: "/b/2.json", host: "fs01", taken: "2026-11-10T09:00", sections: ["services", "disks"], case: "c2", case_name: "TKT-9 Vault", client: "Acme", sensitivity: "sovereign", refused },
+    { path: "/b/1.json", host: "fs01", taken: "2026-11-01T10:00", sections: ["services"], case: "c1", case_name: "TKT-7 fs01 slow", client: "Acme", sensitivity: "open" },
+    { path: "/b/0.json", host: "fs01", taken: "2026-10-01T10:00", sections: ["services"], case: "", case_name: "" },     // as an older server lists one
+  ];
+  const app = await page("a", null, { "GET /api/baselines": () => ({ baselines: rows }),
+    "POST /api/baselines/diff": () => ({ host: "fs01", taken: "2026-11-01T10:00", changed: [], same: ["services"], text: "" }) });
+  await app.call("pickBaseline", { id: "local" });
+  await app.clock.tick(50);
+  const [vault, slow, old] = app.$(".modal .case-list").querySelectorAll(".case-row");
+  assert.deepEqual([button(vault, "Diff").disabled, button(vault, "Diff").title], [true, refused]);
+  assert.match(vault.textContent, /case TKT-9 Vault · client Acme sovereign/);
+  assert.ok(vault.textContent.includes(refused), "said in the row too, where a disabled button's tooltip may not show");
+  assert.equal(button(vault, "Delete").disabled, false);
+  button(vault, "Diff").click();
+  await app.clock.tick(50);
+  assert.deepEqual(app.posts("/api/baselines/diff"), []);
+  assert.equal(button(slow, "Diff").disabled, false);
+  assert.equal(slow.querySelector(".badge").getAttribute("class"), "badge open");
+  assert.equal(old.querySelector(".badge"), null);
+  assert.match(old.textContent, /1 section\(s\) · no caseDiff/);
+  button(slow, "Diff").click();
+  await app.clock.tick(50);
+  assert.deepEqual(plain(app.posts("/api/baselines/diff").map((c) => c.body)), [{ session_id: "local", baseline: "/b/1.json" }]);
+});
+
 test("messages name the Settings tab as it is labelled: AI providers", async () => {
   const js = fs.readFileSync(path.join(WEB, "app.js"), "utf8");
   assert.doesNotMatch(js, /Settings → Providers/);

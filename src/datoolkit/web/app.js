@@ -3195,11 +3195,18 @@ async function pickBaseline(sess) {
   const m = modal({ title: `Baselines · ${list[0].host}`, body: h("div", { style: "display:flex;flex-direction:column;gap:8px" },
     h("div", { class: "muted small" }, "Diff the items you ran in this session against a saved snapshot. Pick one taken while the machine was healthy."), rows),
     buttons: [{ label: "Close" }] });
-  const draw = () => rows.replaceChildren(...list.map((b, i) => h("div", { class: "case-row" },
+  // A row says whose snapshot it is (the case it was taken in, that case's client and sensitivity)
+  // where the server does, and one the server won't let this case use (b.refused, a sentence:
+  // another client's, or taken in a case of a higher sensitivity) can't be diffed: its button is
+  // off and the sentence is its tooltip and the line under the row. It can still be deleted.
+  const draw = () => rows.replaceChildren(...list.map((b, i) => h("div", { class: `case-row${b.refused ? " refused" : ""}` },
     h("div", {}, h("b", {}, (b.taken || "").replace("T", " ")), i === 0 ? h("span", { class: "muted small" }, " · newest") : null,
-      h("div", { class: "muted small" }, `${b.sections.length} section(s) · ${b.case_name ? `case ${b.case_name}` : b.case ? `case ${b.case} (deleted)` : "no case"}`)),
+      h("div", { class: "muted small" }, `${b.sections.length} section(s) · ${b.case_name ? `case ${b.case_name}` : b.case ? `case ${b.case} (deleted)` : "no case"}`
+        + (b.client ? ` · client ${b.client}` : ""), b.sensitivity ? [" ", h("span", { class: `badge ${b.sensitivity}` }, b.sensitivity)] : null),
+      b.refused ? h("div", { class: "small warn" }, b.refused) : null),
     h("div", { class: "row" },
-      h("button", { type: "button", class: "small primary", onclick: () => guarded(async () => { await showBaselineDiff(sess, b.path); m.close(); }) }, "Diff"),
+      h("button", { type: "button", class: "small primary", disabled: !!b.refused, title: b.refused || "Diff what you ran in this session against this snapshot",
+        onclick: () => guarded(async () => { await showBaselineDiff(sess, b.path); m.close(); }) }, "Diff"),
       h("button", { type: "button", class: "small ghost danger", title: "Delete this baseline from disk", onclick: () => guarded(async () => {
         if (!(await confirmModal("Delete baseline", `Delete the baseline of ${b.host} taken ${(b.taken || "").replace("T", " ")}? This can't be undone.`, "Delete", "danger"))) return;
         await api("POST", "/api/baselines/delete", { path: b.path });
