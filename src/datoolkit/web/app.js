@@ -60,9 +60,10 @@ const S = {
 // a host or a phone wrote is on the page. A lookup by id is answered from here, so an element that
 // came later with the same id (none should: md() makes none) could never stand in for the chat
 // box, the queue or the dialogs. $("#chat-input") is one of them and $("#chat-strip .unread") is
-// looked for inside one; $(selector, root) looks inside an element the caller holds. Nothing is looked for across
-// the whole page, where the chat comes before most of what is the page's own. (Until Nov 2026 a
-// lookup was document.querySelector, which a reply's <textarea id="chat-input"> answered first.)
+// looked for inside one; $(selector, root) looks inside an element the caller holds. Nothing is
+// looked for across the whole page, where the chat comes before most of what is the page's own.
+// (Until Nov 2026 a lookup was document.querySelector, which a reply's <textarea id="chat-input">
+// answered first.)
 const FIXED = new Map([...document.querySelectorAll("[id]")].map((el) => [el.id, el]));
 function $(sel, root) {
   if (root) return root.querySelector(sel);
@@ -1187,7 +1188,7 @@ function researchCard(rec) {
 const proposalCards = new Map();    // card element -> { num, cmd: its command box, size: the line under it }
 function proposalCard(num) {
   const el = h("div", { class: "pcard" });
-  const card = { num: Number(num), text: "", cmd: h("div", { class: "pcmd", tabindex: 0 }), size: h("div", { class: "cmd-size" }) };
+  const card = { num: Number(num), text: "", cmd: h("div", { class: "pcmd", role: "group", "aria-label": `Command #${num}` }), size: h("div", { class: "cmd-size" }) };
   proposalCards.set(el, card);
   watchCommandBox(card.cmd, card.size, () => card.text);
   fillProposalCard(el);
@@ -2634,6 +2635,8 @@ function fitCommandBox(box, again = false) {
     more = box.scrollHeight > box.clientHeight + 1;
   }
   box.classList.toggle("long", more);
+  // a card's box that scrolls can be scrolled from the keyboard too
+  if (box.localName !== "textarea") { if (more) box.setAttribute("tabindex", "0"); else box.removeAttribute("tabindex"); }
   info.note.textContent = more ? `${info.what}: scroll the box to read all of it` : info.lines > 1 ? info.what : "";
 }
 function fitCommandBoxes() { for (const box of commandBoxes.keys()) fitCommandBox(box, true); }
@@ -2723,7 +2726,14 @@ async function saveCommand(num, value) {
     const r = await api("POST", `/api/queue/${num}`, { command: value });   // throws: Run must not type the old one
     if (r.item) Object.assign(item, r.item);
   }
-  if (row) row._unsaved = false;
+  if (!row) return;
+  row._unsaved = false;
+  // the command as the server keeps it (trimmed, hidden characters taken out) is what the box shows
+  const box = $(".cmd", row);
+  if (document.activeElement !== box && box.value !== item.command) {
+    box.value = item.command;
+    fitCommandBox(box);
+  }
 }
 
 // The session an item is for, as its list shows. One the server refuses puts the list back on the

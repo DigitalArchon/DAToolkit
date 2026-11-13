@@ -559,6 +559,8 @@ test("a command taller than its box scrolls behind a bar that is always drawn, a
   await app.resized(shown);
   assert.equal(shown.classList.contains("long"), true);
   assert.equal(card.querySelector(".cmd-size").textContent, "62 lines, 5.2 MB: scroll the box to read all of it");
+  assert.equal(shown.getAttribute("tabindex"), "0", "a box that scrolls can be scrolled from the keyboard");
+  assert.equal(other.querySelector(".pcmd").getAttribute("tabindex"), null);
   assert.ok(button(card, "Run"));
   assert.equal(other.querySelector(".cmd-size").textContent, "");
   // the card keeps its box through queue updates (and so where it is scrolled), and is measured again
@@ -641,6 +643,18 @@ test("an edit that isn't saved yet stays in its box through queue updates, and R
   assert.deepEqual(app.terminals[0].pasted, ["uptime -p"]);
   await app.event({ type: "queue", queue: state("a", (s) => { s.queue[0].command = "uptime -s"; }).queue });
   assert.equal(box.value, "uptime -s");
+});
+
+test("once saved, the box shows the command as the server keeps it, which is what Run types", async () => {
+  const kept = { ...state("a").queue[0], command: "uptime -p", edited: true, hidden: ["removed 1× U+200B ZERO WIDTH SPACE"] };
+  const app = await page("a", null, { "POST /api/queue/1": (c) => ({ ok: true, item: { ...kept, ...(c.body.status ? c.body : {}) } }) });
+  termSocket(app).open();
+  const box = cmdBox(app, 1);
+  await app.type(box, "uptime\u200b -p  ");                // a zero-width space in it; not saved yet when Run is clicked
+  button(row(app, 1), "Run").click();
+  await app.clock.tick(0);
+  assert.equal(box.value, "uptime -p");
+  assert.deepEqual(app.terminals[0].pasted, ["uptime -p"]);
 });
 
 test("Run types the command the server recorded, and nothing if that isn't the one the technician was shown", async () => {
