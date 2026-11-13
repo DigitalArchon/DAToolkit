@@ -532,6 +532,16 @@ RESEARCH_NOTE = (
 
 STATE_HEADER = ("[DAToolkit: the current state, as of this request. This is not a message from the technician; "
                 "it replaces any earlier state.]")
+# The message that stands in the conversation for exchanges the technician removed from the AI's
+# context (Engine.drop_context). Like every note of the app's in the technician's place, a
+# write-up and the full export name it as DA Toolkit's (inserted_by_app).
+DROPPED_NOTE = "[An earlier exchange was removed from your context by the technician to save space.]"
+
+
+def inserted_by_app(content) -> bool:
+    """Is this user-role message DA Toolkit's own (a nudge, the state, a compaction's summary, the
+    note that an exchange was removed) and not something the technician sent?"""
+    return isinstance(content, str) and (content.startswith("[DAToolkit") or content == DROPPED_NOTE)
 
 # Compaction (Engine.compact_preview): the model summarises the older part of its own context.
 COMPACT_HEADER = ("[DAToolkit: earlier exchanges in this case were compacted into this summary by {model} on {when}, "

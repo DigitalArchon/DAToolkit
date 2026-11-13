@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .case import fence, utf8
-from .llm.prompts import STATE_HEADER
+from .llm.prompts import STATE_HEADER, inserted_by_app
 
 README = """\
 DA Toolkit full export of case "{name}" ({id}), made {when}.
@@ -74,6 +74,11 @@ def _message_md(m: dict) -> list[str]:
     if role == "user" and str(m.get("content", "")).startswith(STATE_HEADER):
         return ["**Current state (sent by DA Toolkit after the conversation, so the prompt cache keeps the rest)**", "",
                 fence(str(m["content"])[len(STATE_HEADER):].strip()), ""]
+    if role == "user" and inserted_by_app(m.get("content")):
+        # a nudge, a compaction's summary, the note that an exchange was removed: sent in the
+        # technician's place, and never typed by them
+        return ["**DA Toolkit → AI** (a note the app put in the conversation, not the technician's words)", "",
+                str(m["content"]), ""]
     if role == "user":
         return ["**Technician → AI**", ""] + [x for c in _content_md(m.get("content")) for x in (c, "")]
     if role == "assistant":

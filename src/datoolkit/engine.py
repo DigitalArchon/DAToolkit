@@ -182,7 +182,7 @@ _MANUAL_STATUS = {"ran": ("pending",), "inserted": ("pending",), "skipped": ("pe
                   "pending": ("pending", "ran", "inserted", "skipped", "withdrawn")}
 _STATUS_WORDS = {"sent": "sent to the AI", "withdrawn": "withdrawn by the AI"}
 # the message that stands for exchanges the technician removed from the AI's context
-_DROPPED = "[An earlier exchange was removed from your context by the technician to save space.]"
+_DROPPED = prompts.DROPPED_NOTE
 
 
 # How a provider says it won't take one of the generation settings: NanoGPT and Kimi ("does not
@@ -273,7 +273,21 @@ def _for_estimate(m):
         blocks = native.get("content") or []
         m = {"role": m.get("role"), "content": [{k: v for k, v in b.items() if k not in drop} for b in blocks
                                                 if isinstance(b, dict)]}
+    elif isinstance(m.get("content"), list):
+        # a photo is counted apart, at a fixed figure (IMAGE_TOKENS): not by the length of its base64
+        m = {**m, "content": [p for p in m["content"] if not (isinstance(p, dict) and p.get("type") == "image_url")]}
     return m
+
+
+# What a photo costs a model, roughly: providers charge by its size in pixels, about this much for
+# one as the app sends them, whatever its file weighs. Until Nov 2026 the context view counted
+# the base64 text, and one 300 KB photo showed as 100,000 tokens.
+IMAGE_TOKENS = 1500
+
+
+def _images_in(m) -> int:
+    content = m.get("content") if isinstance(m, dict) else None
+    return sum(1 for p in content if isinstance(p, dict) and p.get("type") == "image_url") if isinstance(content, list) else 0
 
 
 def _local_os() -> str:
@@ -2855,7 +2869,8 @@ class Engine:
 
     def context_view(self) -> dict:
         """What the model will receive on the next turn, grouped by technician turn, with size estimates."""
-        est = lambda m: (len(json.dumps(_for_estimate(m), ensure_ascii=False)) + 3) // 4  # noqa: E731 - rough tokens
+        est = lambda m: ((len(json.dumps(_for_estimate(m), ensure_ascii=False)) + 3) // 4  # noqa: E731 - rough tokens
+                         + IMAGE_TOKENS * _images_in(m))
         system = self._system_prompt() if self.case else ""
         groups, cur = [], None
         for i, m in enumerate(self.conv):
@@ -2982,8 +2997,13 @@ class Engine:
             ttl = self._cache_ttl(prov, model, tier) if whole else ""
             messages, extra = self._chat_request(static, state, conv if whole else conv[:end + 1], ttl, prov)
             if whole:
+                # The boundary by its place as well as by how it begins: two messages may begin
+                # alike ("ok", or the same pasted error), and until Nov 2026 only the opening 80
+                # characters said which was meant.
                 nxt = groups[upto + 1]["summary"][:80]
-                scope = f'everything in this conversation before the technician\'s message that begins "{nxt}"'
+                scope = (f"everything in this conversation before message {upto + 2} of the {len(groups)} that came to "
+                         "you from the technician's side (the technician's own, and DAToolkit's notes sent in their "
+                         f'place; this instruction not counted), the one that begins "{nxt}"')
                 keep = "That message and everything after it stay as they are, so leave them out of the summary. "
             else:
                 scope, keep = "the conversation above", ""
@@ -3811,9 +3831,12 @@ class Engine:
         if images and self.vision_status()["mode"] == "none":
             raise UserError(self.vision_status()["why"] + " Images can't be sent.")
         saved_images = self._save_images(self.clean_images(images))
-        # the first message of a case looks for similar past cases (off the loop, in the turn), and so
-        # does the next one of a case resumed from before its runbooks were kept (_similar_for)
-        similar_for = message if not self.conv and message.strip() else self._similar_for
+        # the first message of a case with words in it looks for similar past cases (off the loop, in
+        # the turn), and so does the next one of a case resumed from before its runbooks were kept
+        # (_similar_for). Until Nov 2026 only the very first message did: a case begun with a photo
+        # or results alone never looked.
+        first_words = not any(e.get("kind") == "user" and str(e.get("text") or "").strip() for e in self.chat)
+        similar_for = message if first_words and message.strip() else self._similar_for
         self._similar_for = ""
 
         parts, shown = [], []
@@ -4091,12 +4114,15 @@ class Engine:
                     entry.update(self._tee_sent_under(tee))
                 stream_kw = {"receipts": True} if tee and isinstance(client, LLMClient) else {}
                 static, state = self._prompt_parts()
-                messages, extra = self._chat_request(static, state, await self._conv_for_model(vision), ttl, prov)
+                conv_sent = await self._conv_for_model(vision)
+                messages, extra = self._chat_request(static, state, conv_sent, ttl, prov)
                 system = messages[0]["content"]
                 tools, tool_extra = self._chat_tools(turn.get("native_searches", 0))
                 extra = {**extra, **tool_extra}
                 start = self._req_conv_len if self._req_conv_len <= len(self.conv) else 0   # 0: context was trimmed
-                sent = self.conv[start:] + (messages[-1:] if messages[-1].get("_state") else [])
+                # the log holds what was sent: for a model that can't see images, the helper's
+                # description of each, not the image the conversation keeps
+                sent = conv_sent[start:] + (messages[-1:] if messages[-1].get("_state") else [])
                 round_reasoning, round_text = len(entry["reasoning"]), len(entry["text"])
                 in_flight = (system, sent, start, round_reasoning, round_text)
                 result = None
@@ -4757,17 +4783,39 @@ class Engine:
         return f"{case.id}-full-export.zip", data
 
     def _transcript_for_model(self) -> str:
-        transcript = []
+        """The conversation as a write-up is made from it. What DA Toolkit put in the technician's
+        place (a nudge to the AI, a compaction's summary, the note that an exchange was removed) is
+        named as the app's, and where the conversation no longer holds all of the case, the
+        transcript opens by saying so: until Nov 2026 all of it read "TECHNICIAN:", and a ticket
+        note could report the app's nudge as something the technician said, or a case with
+        exchanges removed as the whole of it."""
+        transcript, removed, compacted = [], 0, False
         for m in self.conv:
             if m["role"] == "user":
                 c = m["content"]
                 if isinstance(c, list):
                     c = " ".join(part.get("text", "") for part in c if part.get("type") == "text") + " [photo attached]"
-                transcript.append("TECHNICIAN:\n" + c)
+                if c == _DROPPED:
+                    removed += 1
+                    transcript.append("DA TOOLKIT (not the technician): an exchange that stood here was removed from the "
+                                      "AI's context by the technician. What it held is not in this transcript.")
+                elif isinstance(c, str) and c.startswith(_COMPACT_MARK):
+                    compacted = True
+                    transcript.append("DA TOOLKIT (not the technician): the exchanges before this point were replaced by "
+                                      "the summary below, which the AI wrote of them.\n" + c)
+                elif prompts.inserted_by_app(c):
+                    transcript.append("DA TOOLKIT (a note to the AI, not the technician's words):\n" + c)
+                else:
+                    transcript.append("TECHNICIAN:\n" + c)
             elif m["role"] == "assistant" and m.get("content"):
                 transcript.append("AI:\n" + m["content"])
             elif m["role"] == "assistant":
                 transcript.append("AI proposed: " + "; ".join(c["function"]["arguments"] for c in m.get("tool_calls", [])))
+        if removed or compacted:
+            gone = ([f"{removed} exchange(s) were removed from it"] if removed else []) + (
+                ["its earlier exchanges were replaced by a summary"] if compacted else [])
+            transcript.insert(0, "NOTE FROM DA TOOLKIT: this transcript is not the whole case: " + " and ".join(gone)
+                              + ". Write only of what it shows, and say that the record is partial.")
         if self.hypotheses:
             transcript.append("HYPOTHESIS BOARD:\n" + prompts.hypotheses_text(self.hypotheses))
         return "\n\n".join(transcript)
