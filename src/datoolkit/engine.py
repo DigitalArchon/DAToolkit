@@ -4172,9 +4172,11 @@ class Engine:
             # Of the case's names, those in the brief are let through: the technician was shown that
             # brief for the very reason that it names them, and approved it (a host called after its
             # product, `opnsense.lan`, would otherwise stop every search about the product).
-            brief = str(rec.get("brief") or "").lower()
-            known = identity.names() + [n for n in self._case_names() if n.lower() not in brief]
-            named = identity.check(query, known=known)
+            # What the brief named is what the same check finds in it (a host by its short name
+            # or its full one, a login with or without its domain: safety/identity.py).
+            known = self._known_names()
+            in_brief = {n.lower() for n in identity.check(str(rec.get("brief") or ""), known=known)}
+            named = [n for n in identity.check(query, known=known) if n.lower() not in in_brief]
             if named:
                 raise UserError("not searched: the query names " + ", ".join(named[:5]) + " (who or where a computer "
                                 "is), which mustn't leave in a search. Search again with general words.")
