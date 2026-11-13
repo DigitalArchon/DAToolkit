@@ -1214,9 +1214,11 @@ function fillProposalCard(el) {
   const sessOpen = (S.state.sessions || []).some((s) => s.id === item.session_id && !s.exited);
   let actions = null;
   if (pending) {
+    // not while the chat is moving under the pointer (justMoved)
+    const steady = () => (justMoved(el, S.chatMovedAt) ? undefined : runItem(num, "run"));
     const run = isWindowSession(item.session_id)
-      ? btn("Copy to run", () => runItem(num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Copy the command to paste into the window, and mark it run")
-      : btn("Run", () => runItem(num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
+      ? btn("Copy to run", steady, item.risk === "disruptive" ? "danger" : "primary", "Copy the command to paste into the window, and mark it run")
+      : btn("Run", steady, item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
     run.disabled = !sessOpen;
     actions = h("div", { class: "pactions" }, run,
       btn("Skip…", () => skipItem(item), "", "Skip, with a reason for the AI"),
@@ -1263,6 +1265,8 @@ function renderChat(scroll) {
     log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
     if (S.streaming) log.append(streamingBubble());
   });
+  if (S.chatDrawn) S.chatMovedAt = performance.now();        // every message is a new element now
+  S.chatDrawn = true;
   forgetGoneCards();                 // the cards just replaced
   requestAnimationFrame(() => { for (const card of proposalCards.values()) fitCommandBox(card.cmd); });
   if (!S.state.case) {
@@ -1273,7 +1277,15 @@ function renderChat(scroll) {
     log.append(h("div", { class: "empty" },
       "Describe the problem as you would to a colleague. The AI will talk it through with you, ask what it needs to know, and propose commands; nothing runs until you click Run."));
   }
-  if (stick) log.scrollTop = log.scrollHeight;
+  if (stick) chatToEnd(log);
+}
+
+// The chat follows its end while the technician is reading there. Whatever was under the pointer
+// then isn't any more: a card's Run waits a moment (justMoved).
+function chatToEnd(log) {
+  const was = log.scrollTop;
+  log.scrollTop = log.scrollHeight;
+  if (log.scrollTop !== was) S.chatMovedAt = performance.now();
 }
 
 function streamingBubble() {
@@ -1297,7 +1309,7 @@ function scheduleStreamRender() {
       if (old && S.streaming) old.replaceWith(streamingBubble());
       else if (S.streaming) log.append(streamingBubble());
     });
-    if (stick) log.scrollTop = log.scrollHeight;
+    if (stick) chatToEnd(log);
   });
 }
 
@@ -2389,6 +2401,30 @@ function sessionOptions(item) {
 
 const queueEmpty = h("div", { class: "empty" }, "No commands queued.");
 
+// Rows move while the AI works: it withdraws and reorders items, a reviewer's verdict makes a row
+// taller, a result is sent and its row goes. Run is one click, so a click that lands on a row
+// which came to be under the pointer less than MOVED_MS ago is taken to have been meant for what
+// was there before: it does nothing, and the row flashes. Each row's place in the list is noted
+// after every change to the queue's layout, and a row that is new or somewhere else has moved.
+// The chat's cards are held to the same rule while the chat is redrawn or follows its end.
+// (Until Nov 2026 the click ran whatever had arrived under it.)
+const MOVED_MS = 400;
+function noteRowsMoved() {
+  const now = performance.now();
+  for (const row of S.rows.values()) {
+    const top = row.offsetTop;
+    if (row._top !== undefined && row._top !== top) row._movedAt = now;
+    row._top = top;
+  }
+}
+function justMoved(el, movedAt) {
+  if (performance.now() - (movedAt ?? -Infinity) >= MOVED_MS) return false;
+  el.classList.remove("moved");
+  void el.offsetWidth;                // so the flash starts again
+  el.classList.add("moved");
+  return true;
+}
+
 function renderQueue() {
   if (!S.state) return;
   const showDone = $("#show-done").checked;
@@ -2398,10 +2434,17 @@ function renderQueue() {
   for (const [num, row] of S.rows) if (!keep.has(num)) { unwatchCommandBox($(".cmd", row)); row.remove(); S.rows.delete(num); }
   items.forEach((item, idx) => {
     let row = S.rows.get(item.num);
-    if (!row) { row = buildRow(item); S.rows.set(item.num, row); }
+    if (!row) {
+      row = buildRow(item);
+      S.rows.set(item.num, row);
+      if (S.queueDrawn) row._movedAt = performance.now();      // a new row, where there was another or none
+    }
     updateRow(row, item);
     if (list.children[idx] !== row) list.insertBefore(row, list.children[idx] || null);
   });
+  S.queueDrawn = true;
+  noteRowsMoved();
+  requestAnimationFrame(noteRowsMoved);       // and once the command boxes have been measured (updateRow)
   if (!items.length) {
     if (!queueEmpty.isConnected) list.append(queueEmpty);
   } else queueEmpty.remove();
@@ -2447,7 +2490,10 @@ function autosize(ta) { ta.style.height = "auto"; ta.style.height = `${ta.scroll
 // measured once and clipped the rest with no scroll bar: built while the queue was collapsed, a
 // row showed the first line of a command and Run typed all of it.)
 const commandBoxes = new Map();     // box -> { note: the line under it, text: () => what it holds, … }
-const commandResize = new ResizeObserver((entries) => { for (const e of entries) fitCommandBox(e.target); });
+const commandResize = new ResizeObserver((entries) => {
+  for (const e of entries) fitCommandBox(e.target);
+  noteRowsMoved();
+});
 function watchCommandBox(box, note, text) {
   commandBoxes.set(box, { note, text, sized: null, what: "", lines: 1, fitText: null, fitWidth: 0 });
   commandResize.observe(box);
@@ -2685,20 +2731,21 @@ function updateRow(row, item) {
   const num = item.num;
   const now = () => S.state.queue.find((i) => i.num === num) || item;
   const btn = (label, fn, kind = "", title = "") => h("button", { class: `small ${kind}`, title, onclick: () => guarded(fn) }, label);
+  const steady = (fn) => () => (justMoved(row, row._movedAt) ? undefined : fn());     // not on a row that just moved here
   const set = (status, extra = {}) => api("POST", `/api/queue/${num}`, { status, ...extra });
   const btns = [];
   if (pending) {
     if (isWindowSession(item.session_id)) {
-      const copy = btn("Copy to run", () => runItem(item.num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Copy the command to paste into the window, and mark it run");
+      const copy = btn("Copy to run", steady(() => runItem(item.num, "run")), item.risk === "disruptive" ? "danger" : "primary", "Copy the command to paste into the window, and mark it run");
       copy.disabled = !sessOpen;
       btns.push(copy);
     } else {
-      const run = btn("Run", () => runItem(item.num, "run"), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
-      const ins = btn("Insert", () => runItem(item.num, "insert"), "", "Type into the terminal without pressing Enter");
+      const run = btn("Run", steady(() => runItem(item.num, "run")), item.risk === "disruptive" ? "danger" : "primary", "Type into the terminal and press Enter");
+      const ins = btn("Insert", steady(() => runItem(item.num, "insert")), "", "Type into the terminal without pressing Enter");
       run.disabled = ins.disabled = !sessOpen;
       btns.push(run, ins);
     }
-    if (item.group) btns.push(btn("Run group", () => runGroup(item.group), "", "Type every pending item of this group at the same moment"));
+    if (item.group) btns.push(btn("Run group", steady(() => runGroup(item.group)), "", "Type every pending item of this group at the same moment"));
     if (item.dry_run) btns.push(btn("Dry run", () => api("POST", `/api/queue/${item.num}/dry-run`), "", `Queue the rehearsal first (${item.dry_run.description}): ${item.dry_run.command}`));
     if (item.risk === "read_only" && !item.watch && !item.dry_run_of) btns.push(btn("Watch", () => watchItem(now()), "", "Repeat this read-only command for a bounded time and keep only the changes"));
     btns.push(btn("2nd opinion", () => secondOpinion(now()), "", "Ask a reviewer model what this command does and what could go wrong"));

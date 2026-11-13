@@ -574,6 +574,54 @@ test("the session list goes back when the server refuses the change, and Run sav
   assert.deepEqual(app.terminals.map((t) => t.pasted), [[], ["uptime"]]);
 });
 
+test("a click on Run that lands on a row which has only just moved there does nothing, and the row flashes", async () => {
+  const app = await page("a", (s) => { s.chat = [{ kind: "assistant", text: "Start with these.", proposals: [3] }]; });
+  for (const n of [2, 3, 4, 5]) app.routes[`POST /api/queue/${n}`] = () => ({ ok: true });
+  termSocket(app).open();
+  const place = (tops) => { for (const [n, top] of Object.entries(tops)) row(app, n).offsetTop = top; };
+  place({ 1: 0, 2: 60, 3: 120, 4: 180 });
+  app.call("noteRowsMoved");
+  await app.clock.tick(1000);
+  // the AI withdraws #1 as the pointer comes down on its Run: #2 is there now
+  place({ 2: 0, 3: 60, 4: 120 });
+  await app.event({ type: "queue", queue: state("a", (s) => { s.queue[0].status = "withdrawn"; }).queue });
+  button(row(app, 2), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual([app.posts("/api/queue/2").length, app.terminals[0].pasted.length], [0, 0]);
+  assert.equal(row(app, 2).classList.contains("moved"), true);
+  button(row(app, 3), "Insert").click();                       // moved as well
+  await app.clock.tick(399);
+  assert.deepEqual(app.terminals[0].pasted, []);
+  await app.clock.tick(1);
+  button(row(app, 2), "Run").click();                          // it has been there a moment: meant
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, ["systemctl reload nginx"]);
+  // a row that is new, where another was or none: the same
+  await app.event({ type: "queue", queue: state("a", (s) => {
+    s.queue[0].status = "withdrawn";
+    s.queue[1].status = "ran";
+    s.queue.push({ ...s.queue[3], num: 5, command: "id" });
+  }).queue });
+  button(row(app, 5), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/queue/5"), []);
+  // a row that stayed where it was takes the click at once
+  button(row(app, 4), "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted, ["systemctl reload nginx", "cat /etc/hostname"]);
+  // a card in the chat, just redrawn under the pointer
+  await app.clock.tick(1000);
+  await app.event({ type: "chat", entry: { kind: "note", text: "Session local-2 opened." } });
+  const card = app.$("#chat-log").querySelector(".pcard");
+  button(card, "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual([app.posts("/api/queue/3").length, card.classList.contains("moved")], [0, true]);
+  await app.clock.tick(400);
+  button(card, "Run").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.terminals[0].pasted.at(-1), "df -h");
+});
+
 // ------------------------------------------------------------------ the clipboard and the connection
 
 test("a copy that fails says so, and Copy to run doesn't mark the item run over the old clipboard", async () => {
