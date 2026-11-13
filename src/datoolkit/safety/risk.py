@@ -1812,6 +1812,28 @@ def _nmcli(a, c=None):
     return _NMCLI.fullmatch(joined) is not None and not re.search(r"\bwifi (?:connect|hotspot|rescan|show-password)\b|\blldp (?!list)", joined + " ")
 
 
+def _pfctl(a, c=None):
+    """pf's control, where it shows: -s rules (or -sr, -vvsr), -t table -T show. Its other options load a rule set,
+    flush, enable, disable or kill states."""
+    i, shows = 0, False
+    while i < len(a):
+        x = a[i]
+        i += 1
+        if x == "-s" or x in ("-a", "-t", "-p", "-i"):
+            shows = shows or x == "-s"
+            i += 1
+        elif re.fullmatch(r"-[vqr]*s[A-Za-z]+", x):
+            shows = True
+        elif x == "-T":
+            if i >= len(a) or a[i] not in ("show", "test"):
+                return False
+            shows = True
+            i += 1
+        elif x.startswith("-") and not re.fullmatch(r"-[vqrh]+", x):
+            return False
+    return shows
+
+
 def _iptables(a, c=None):
     """iptables that lists (-L, -S): its other capital letters are all commands that change the rules."""
     listing, i = False, 0
@@ -2282,7 +2304,10 @@ _add("""ls ll la l dir vdir cat tac nl head tail more grep egrep fgrep zgrep zeg
     lsns lslogins lsipc lslocks lsattr lsscsi lsof lsinitramfs findmnt mountpoint id whoami groups users who w last lastb uname
     arch hostid tty logname getent getfacl getfattr namei realpath readlink basename dirname pwd echo true false : sleep seq expr
     bc cal locale diff cmp jq zipinfo which whereis type lsb_release modinfo numfmt locate mlocate plocate printenv cd pushd popd chdir help
-    apropos whatis getconf zdump numastat avahi-browse vainfo""", ANY)
+    apropos whatis getconf zdump numastat avahi-browse vainfo sockstat swapinfo kldstat opnsense-version freebsd-version clog""", ANY)
+_add("pkg", _forms(r"(?:info|query|rquery|version|which|search|stats)(?: \S+)*"))
+_add("gpart", _forms(r"(?:show|list|status)(?: \S+)*"))
+_add("camcontrol", _forms(r"(?:devlist|identify|inquiry)(?: \S+)*"))
 # bash's own that take a variable's name: a name with a subscript, a[...], has the subscript evaluated as
 # arithmetic, which can run a command, so the name must be a plain one
 _add("test [", _test)
@@ -2422,7 +2447,7 @@ _add("ss", _unless("-K --kill -D --diag"))
 _add("ldapsearch", _unless("-t -T"))
 _add("ausearch", _unless("--checkpoint"))
 _add("ip", _ip)
-_add("ifconfig", lambda a, c=None: sum(not x.startswith("-") for x in a) <= 1 and all(re.fullmatch(r"-[asv]+|(?!-)[\w.:-]+", x) for x in a))
+_add("ifconfig", lambda a, c=None: sum(not x.startswith("-") for x in a) <= 1 and all(re.fullmatch(r"-[asvlud]+|(?!-)[\w.:-]+", x) for x in a))
 _add("route", _each(r"-[neCFv46]+|print|PRINT"))
 _add("arp", _each(r"-[anveH]+|/[ag]|-i|--device|--numeric|--verbose|(?!-)[\w.:-]+"))
 _add("arping", _unless("-U -A"))
@@ -2450,6 +2475,8 @@ _add("ipset", _forms(r"(?:list|save|version|help)(?: \S+)*|", deny="-f --file", 
 _add("iptables ip6tables iptables-legacy ip6tables-legacy iptables-nft ip6tables-nft", _iptables)
 _add("iptables-save ip6tables-save", _only("-c --counters -t= --table= -V --version", operands=False))
 _add("nft", _nft)
+_add("pfctl", _pfctl)
+_add("wg", _forms(r"|show(?: \S+){0,2}|showconf \S+"))
 _add("ufw", _forms(r"status(?: verbose| numbered)?|show \S+|app (?:list|info \S+)|version", allow="--version"))
 _add("firewall-cmd", _each(r"--(?:state|version|check-config|permanent|direct|zone=\S+|(?:list|get|query|info)-[\w-]+(?:=\S*)?)",
                            need=r"--(?:state|version|check-config|(?:list|get|query|info)-[\w-]+(?:=\S*)?)"))
@@ -2748,7 +2775,7 @@ def _cmdlet(chk: "_Check", name: str, args: list, inblock: bool) -> bool:
 
 # Network devices: commands that display. `sh` is also a shell, so its first word must be one a
 # switch or a router completes to a `show` command.
-_DEVICE = {"show", "sh", "sho", "display", "dis", "get", "diagnose", "diag", "terminal", "term"}
+_DEVICE = {"show", "sh", "sho", "display", "dis", "get", "diagnose", "diag", "execute", "terminal", "term"}
 _DEVICE_FILTERS = {"include", "exclude", "begin", "section", "count", "match", "except", "find", "last", "display", "no-more", "nomore", "trim", "json",
                    "i", "inc", "incl", "e", "exc", "b", "beg", "s", "sec", "sect", "compare", "tail", "head", "sort", "uniq", "wc", "grep", "egrep"}
 _SH_WORDS = set("""run running-config start startup-config ver version ip ipv6 int interface interfaces vlan vlans mac arp cdp lldp log logging clock inv
@@ -2778,8 +2805,11 @@ def _device(name: str, a: list[str], words: list) -> bool:
     if name == "get":
         return bool(a) and a[0] in _FORTI_ROOTS
     if name in ("diagnose", "diag"):
-        return bool(set(a) & {"list", "status", "show", "info", "stats", "summary", "top"}) and not set(a) & {
-            "kill", "clear", "reset", "restart", "enable", "disable", "set", "delete", "flush", "purge", "shutdown", "reboot", "execute", "start", "stop"}
+        return bool(set(a) & {"list", "status", "show", "info", "stats", "summary", "top"} or a[:1] in (["hardware"], ["sniffer"])) and not set(a) & {
+            "kill", "clear", "reset", "restart", "enable", "disable", "set", "delete", "flush", "purge", "shutdown", "reboot", "execute", "start", "stop",
+            "test"}
+    if name == "execute":                        # FortiOS: its probes, and the log viewer with the filter it keeps for this console
+        return re.fullmatch(r"log display|log filter(?: \S+)+|ping6? \S+|traceroute \S+|tracert6 \S+|ping6?-options(?: \S+)+", " ".join(a)) is not None
     return re.fullmatch(r"(?:length|len|width|pager) \d+|(?:no )?monitor", " ".join(a)) is not None
 
 
