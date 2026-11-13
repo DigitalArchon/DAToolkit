@@ -79,8 +79,9 @@ async def test_a_baseline_of_unknown_origin_is_usable_only_in_a_sovereign_case(e
     saved = Path(engine.save_baseline(sid)["path"])
     data = json.loads(saved.read_text())
     saved.write_text(json.dumps({k: v for k, v in data.items() if k not in ("sensitivity", "client")}))   # as saved before
-    Case.delete(engine.case.id)
-    sid = _case(engine, monkeypatch, "today", "open")
+    gone = engine.case.id
+    sid = _case(engine, monkeypatch, "today", "open")             # the case it came from is closed, then deleted
+    Case.delete(gone)
     assert engine.list_baselines(sid)[0]["sensitivity"] is None
     with pytest.raises(UserError, match="only in a Sovereign case"):
         engine.diff_baseline(sid, str(saved))

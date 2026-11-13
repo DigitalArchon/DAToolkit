@@ -834,8 +834,10 @@ async def test_an_attestation_under_way_when_its_providers_address_changes_is_no
     state["gate"] = None
     gate.set()
     att = await settled(engine)
-    assert att["status"] == "failed" and "changed in Settings" in att["error"]
-    assert KEY not in engine._tee and calls == ["TEE/glm-5.3"]
+    # Saving the new address ends the attestation of the old one and has the model attested again
+    # where it is now (save_provider): the one that was under way is never kept, and what the top
+    # bar shows, and what a request goes out under, is the new address's.
+    assert att["status"] == "verified"
     client, shown = await engine._tee_guard(engine.cfg.provider("Fake"), "TEE/glm-5.3", "chat")
     assert client is made[0] and client.base_url == "https://other.example/api/v1"     # attested where it is now
     assert calls == ["TEE/glm-5.3"] * 2 and engine._tee[KEY][0] is client
