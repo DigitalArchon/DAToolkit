@@ -27,6 +27,8 @@ def appimage(monkeypatch):
 
 
 def test_the_bundles_named_here_are_the_ones_apprun_picks_from():
+    if not APPRUN.exists():
+        pytest.skip("no packaging/ beside these tests (not a source checkout)")
     text = APPRUN.read_text()
     listed = re.search(r"for bundle in \\\n((?:\s+\S+ \\\n)*\s+\S+); do", text).group(1)
     assert tuple(line.strip(" \\") for line in listed.splitlines()) == hostenv.APPRUN_CA_BUNDLES
