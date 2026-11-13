@@ -125,3 +125,38 @@ def test_the_rehearsal_on_offer_is_worked_out_once_for_each_command(monkeypatch)
     assert calls == ["rm -rf /srv/x", "sudo apt install htop"]                    # not five times each
     q.update(1, command="rm -rf /srv/y")
     assert q.to_list()[0]["dry_run"]["command"] == "ls -ld /srv/y" and q.to_list() and calls[2:] == ["rm -rf /srv/y"]
+
+
+# ---- a resumed case: what is still pending is rated by the rules in force now
+
+def _saved(num, command, **fields):
+    return {"num": num, "call_id": "c", "session_id": "s", "command": command, "purpose": "", "model_risk": "read_only", "risk": "read_only",
+            "risk_reasons": [], "original_command": command, "status": "pending", **fields}
+
+
+def test_pending_items_of_a_resumed_case_are_rated_again():
+    review = {"status": "done", "verdict": "ok", "notes": "fine"}
+    q = Queue.from_list([
+        _saved(1, "Stop-VM dc01 -TurnOff -Force"),                                  # the rules of the day it was saved had no word for it
+        _saved(2, "fdisk -l", risk="disruptive", risk_reasons=["disk/partition tool"]),   # nor knew a listing from a change
+        _saved(3, "df -h", model_risk="modifying", risk="modifying"),               # never below what the model said
+        _saved(4, "frobnicate --all", original_command="ls", note="ask first", review=review),
+        _saved(5, "sudo ufw status", risk="disruptive", cuts_session="may block SSH", risk_reasons=["cuts this session: may block SSH"]),
+        _saved(6, "Stop-VM dc02 -Force", status="ran", ran_at=1.0),                 # what has run keeps the rating it ran under
+        _saved(7, "ls -ld /srv", dry_run_of=1),                                    # a rehearsal from before they were rated
+        _saved(8, "Remove-Item C:\\x -WhatIf", dry_run_of=1),
+    ])
+    by = {p.num: p for p in q.items}
+    assert by[1].risk == "disruptive" and by[1].risk_reasons
+    assert (by[2].risk, by[2].risk_reasons) == ("read_only", [])
+    assert by[3].risk == "modifying"
+    assert by[4].risk == "modifying" and by[4].edited and by[4].note == "ask first" and by[4].review == review
+    assert by[5].risk == "disruptive" and by[5].cuts_session == "may block SSH" and "cuts this session: may block SSH" in by[5].risk_reasons
+    assert (by[6].risk, by[6].risk_reasons) == ("read_only", [])
+    assert by[7].risk == "read_only" and by[8].risk == "modifying"
+    assert q.add("c2", [{"command": "uptime"}])[0].num == 9
+
+
+def test_a_review_goes_when_the_command_it_was_of_had_hidden_characters():
+    q = Queue.from_list([_saved(1, "uptime" + chr(0x202E), review={"status": "done", "verdict": "ok"})])
+    assert q.items[0].command == "uptime" and q.items[0].review == {} and q.items[0].hidden

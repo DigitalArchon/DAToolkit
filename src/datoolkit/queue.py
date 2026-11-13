@@ -246,7 +246,16 @@ class Queue:
                 command, removed = hidden.clean(p.command)
                 if removed:
                     p.command, p.original_command, p.hidden = command.strip(), command.strip(), removed
-                    cls._classify(p, None)
+                # What is still to be run is rated by the rules in force now, not by those of the day it
+                # was saved (until Nov 2026 a resumed case kept its old ratings): from the model's own
+                # label up, as when it was queued. The review of this very command stands, and so does
+                # what was found about the session it would cut: the sessions aren't open again yet.
+                review, cut = ({} if removed else p.review), p.cuts_session
+                cls._classify(p, None)
+                p.review = review
+                if cut:
+                    p.cuts_session, p.risk = cut, "disruptive"
+                    p.risk_reasons = p.risk_reasons + [f"cuts this session: {cut}"]
             q.items.append(p)
         q._next = max((p.num for p in q.items), default=0) + 1
         return q
