@@ -167,3 +167,42 @@ def test_a_damaged_case_json_doesnt_break_the_case_list(tmp_path):
     assert found[nameless.id]["name"] == nameless.id and found[nameless.id]["sensitivity"] == "sovereign"
     assert Case.load(nameless.id, root=tmp_path).sensitivity == "sovereign"
     assert found[listy.id]["name"] == "listy"                   # from the audit log's first event instead
+
+
+def test_an_empty_config_beside_cases_is_set_aside_like_a_broken_one():
+    from datoolkit.case import Case
+    path = config.config_dir() / "config.toml"
+    config.private_dir(path.parent)
+    path.write_text(" \n")
+    assert config.load_or_set_aside() == (Config(), "")         # nothing here yet: a first start, no settings
+    Case.create("a ticket", "open")
+    cfg, notice = config.load_or_set_aside()
+    assert cfg == Config() and "it is empty" in notice and "config.toml.broken-" in notice
+    assert [p.read_text() for p in path.parent.glob("config.toml.broken-*")] == [" \n"] and not path.exists()
+    config.save(cfg, path)                                      # and the settings made next are saved
+    assert config.load_or_set_aside()[1] == ""
+
+
+def test_a_file_is_on_the_disk_before_it_takes_its_name(tmp_path, monkeypatch):
+    import pytest
+    path = tmp_path / "state.json"
+    path.write_bytes(b"old")
+    flushed, real_fsync, real_replace = [], os.fsync, os.replace
+
+    def fsync(fd):
+        flushed.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else path.read_bytes())
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    config.write_atomic(path, b"new")
+    assert flushed == [b"old", "dir"] and path.read_bytes() == b"new"      # flushed while the old file had the name
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def no_replace(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", no_replace)
+    with pytest.raises(OSError):
+        config.write_atomic(path, b"never")
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert path.read_bytes() == b"new" and [p.name for p in tmp_path.iterdir()] == ["state.json"]   # no temp file left

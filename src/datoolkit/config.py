@@ -72,6 +72,41 @@ def tighten_dirs() -> None:
                     private_dir(child)
 
 
+def write_atomic(path: Path, data: bytes, sync_dir: bool = True) -> None:
+    """`data` as the file `path`, whole or not at all. It is written to a temporary file of its
+    own in the same directory (two writers never share one, and it is 0600 from the start),
+    flushed to the disk, and only then renamed over `path`. Until Nov 2026 nothing was flushed:
+    a crash soon after a save could leave the new name on an empty file. With `sync_dir` the
+    directory is flushed after, so the rename outlasts a power cut too; a file saved many times
+    a minute goes without (a case's state.json): if its rename is lost, the file before it is
+    there, whole."""
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+    except BaseException:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+        raise
+    if not sync_dir:
+        return
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass                       # a file system that can't flush a directory: the file itself is on the disk
+    finally:
+        os.close(dir_fd)
+
+
 @dataclass
 class Provider:
     name: str
@@ -220,12 +255,30 @@ def from_dict(data: dict) -> Config:
     return cfg
 
 
+def _used_before(path: Path) -> bool:
+    """Whether DA Toolkit has been used here, and so had settings: there are cases, or pinned
+    certificates, or what an interrupted save of `path` left beside it. (The keyring can't be
+    asked what it holds without a name to ask for.)"""
+    try:
+        if any((data_dir() / "cases").iterdir()):
+            return True
+    except OSError:
+        pass
+    return (config_dir() / "rdp_pins.json").exists() or any(path.parent.glob(f".{path.name}.*.tmp"))
+
+
 def load(path: Path | None = None) -> Config:
     path = path or config_dir() / "config.toml"
     if not path.exists():
         return Config()
-    with path.open("rb") as f:
-        cfg = from_dict(tomllib.load(f))
+    raw = path.read_bytes()
+    if not raw.strip() and _used_before(path):
+        # DA Toolkit never writes an empty file: one beside cases is what a crash or a full disk
+        # left of the settings, not a first start. Until Nov 2026 it was read as "no settings",
+        # and the app started without a word, its providers and hosts gone; load_or_set_aside
+        # now keeps it and says so.
+        raise ValueError("it is empty, though DA Toolkit has been used on this computer")
+    cfg = from_dict(tomllib.loads(raw.decode("utf-8")))
     if _with_passwords(cfg):
         try:
             save(cfg, path)             # the keyring has what the file had: out of the file
@@ -297,13 +350,4 @@ def _without_passwords(data: dict) -> dict:
 def save(cfg: Config, path: Path | None = None) -> None:
     path = path or config_dir() / "config.toml"
     private_dir(path.parent)
-    # a temporary file of its own: two instances saving at once would write one config.tmp in turns
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")   # 0600 from the start
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            tomli_w.dump(_without_passwords(cfg.to_dict()), f)
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    write_atomic(path, tomli_w.dumps(_without_passwords(cfg.to_dict())).encode("utf-8"))

@@ -1844,19 +1844,38 @@ class Engine:
         """Resume a case from disk: conversation, chat history and queue. Sessions carry over."""
         if self.busy:
             raise UserError("Wait for the AI to finish (or stop it) before opening a case.")
-        # everything read first: a saved state that can't be read leaves the case open now as it was
-        # (the queue of one attached to the other, and then saved into it, otherwise)
-        try:
-            case = Case.load(case_id)
-            state = case.load_state() or {}
+        unreadable = (OSError, ValueError, TypeError, KeyError, AttributeError)
+
+        def restore(state: dict) -> tuple:
             conv, chat = list(state.get("conv", [])), list(state.get("chat", []))
             queue = Queue.from_list(state.get("queue", []))
             hypotheses, compactions = list(state.get("hypotheses", [])), list(state.get("compactions", []))
+            return state, conv, chat, queue, hypotheses, compactions
+
+        # everything read first: a saved state that can't be read leaves the case open now as it was
+        # (the queue of one attached to the other, and then saved into it, otherwise). A state.json
+        # that can't be read, or isn't there beside its backup, is read from the backup instead,
+        # the state as saved one change earlier (Case.save_state), and the case says so; until
+        # Nov 2026 a state.json cut short made its case unopenable.
+        lost = ""
+        try:
+            case = Case.load(case_id)
+            try:
+                state = case.load_state()
+                if state is None and case.has_backup():
+                    raise ValueError("state.json is missing")
+                state, conv, chat, queue, hypotheses, compactions = restore(state or {})
+            except unreadable as e:
+                backup = case.load_backup()
+                if backup is None:
+                    raise
+                state, conv, chat, queue, hypotheses, compactions = restore(backup)
+                lost = str(e)
             # the runbooks it had, read again and checked against its client and sensitivity as they are now
             saved = state.get("similar")
             similar = (search.reload_hits(saved or [], case.client, case.sensitivity)
                        if case.client and case.history else [])
-        except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+        except unreadable as e:
             raise UserError(f"Could not open case {case_id}: {e}") from e
         self.compact_cancel()        # a summary of the old case's conversation is no use now
         self.case, self.conv, self.chat, self.queue = case, conv, chat, queue
@@ -1869,6 +1888,14 @@ class Engine:
             # saved before cases kept them: looked up again, with its first message, on the next turn
             self._similar_for = next((e.get("text", "") for e in self.chat if e.get("kind") == "user" and e.get("text")), "")
         self.log("case_resumed", messages=len(self.chat), queue=len(self.queue.items))
+        if lost:
+            kept = case.set_state_aside()
+            self.log("state_restored_from_backup", error=lost, kept=kept)
+            said = (f"This case's saved state couldn't be read ({lost}), so it was opened from the copy kept of the "
+                    "save before it: the last change made before DA Toolkit closed may be missing."
+                    + (f" The unreadable file is kept in the case folder as {kept}." if kept else ""))
+            self.chat.append({"kind": "note", "text": said})
+            self.emit("toast", level="warn", text=said)
         self._attach_case()
         if self.chat:
             self.chat.append({"kind": "note", "text": f"Case resumed {datetime.now():%Y-%m-%d %H:%M}. "

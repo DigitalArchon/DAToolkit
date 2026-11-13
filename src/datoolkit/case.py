@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .config import data_dir, private_dir
+from .config import data_dir, private_dir, write_atomic
 
 SENSITIVITIES = ("open", "confidential", "sovereign")
+# What the copy of state.json as it was before the last save is called (Case.load_backup).
+BACKUP_SUFFIX = ".bak"
 
 
 def utf8(text: str) -> bytes:
@@ -145,16 +149,41 @@ class Case:
                    hypotheses: list[dict] | None = None, compactions: list[dict] | None = None,
                    last_usage: dict | None = None, similar: list[dict] | None = None) -> None:
         """Persist everything needed to resume the case later. `similar`: the past cases whose
-        runbooks are in its AI's context (id, score, matched terms; search.reload_hits)."""
-        _write_json(self.dir / "state.json", {"version": 2, "conv": conv, "chat": chat, "queue": queue,
-                                              "hypotheses": hypotheses or [], "compactions": compactions or [],
-                                              "last_usage": last_usage, "similar": similar or []})
+        runbooks are in its AI's context (id, score, matched terms; search.reload_hits). The
+        state.json before this one is kept as state.json.bak (load_backup)."""
+        _write_state(self.dir / "state.json", {"version": 2, "conv": conv, "chat": chat, "queue": queue,
+                                               "hypotheses": hypotheses or [], "compactions": compactions or [],
+                                               "last_usage": last_usage, "similar": similar or []})
 
     def load_state(self) -> dict | None:
+        """The saved state, None when there is none. Raises ValueError when state.json isn't one."""
         path = self.dir / "state.json"
         if not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _read_state(path)
+
+    def has_backup(self) -> bool:
+        return (self.dir / f"state.json{BACKUP_SUFFIX}").exists()
+
+    def load_backup(self) -> dict | None:
+        """The state as it was saved one time before the last (state.json.bak), for when
+        state.json can't be read; None when there is none. Raises ValueError like load_state."""
+        path = self.dir / f"state.json{BACKUP_SUFFIX}"
+        if not path.exists():
+            return None
+        return _read_state(path)
+
+    def set_state_aside(self) -> str:
+        """Move a state.json that can't be read out of the way (state.json.damaged-<time>), so
+        the next save doesn't keep it as the backup in place of the one that can. Returns its
+        new name, "" when there was none to move."""
+        path = self.dir / "state.json"
+        kept = path.with_name(f"{path.name}.damaged-{time.strftime('%Y%m%d-%H%M%S')}")
+        try:
+            path.replace(kept)
+        except OSError:
+            return ""
+        return kept.name
 
     def save_draft(self, text: str, images: list[str]) -> None:
         """The chat box's message not sent yet and the photos attached to it (draft.json)."""
@@ -162,7 +191,7 @@ class Case:
         if not text.strip() and not images:
             path.unlink(missing_ok=True)
         else:
-            _write_json(path, {"text": text, "images": images})
+            write_atomic(path, _json_bytes({"text": text, "images": images}), sync_dir=False)
 
     def load_draft(self) -> dict:
         try:
@@ -182,7 +211,7 @@ class Case:
         if any(chat[index].get(k) != v for k, v in expect.items()):
             return False
         chat[index].update(fields)
-        _write_json(self.dir / "state.json", state)
+        _write_state(self.dir / "state.json", state)
         return True
 
     def log(self, event: str, **data) -> None:
@@ -257,10 +286,57 @@ class Case:
         return path
 
 
+def _json_bytes(data: dict) -> bytes:
+    return utf8(json.dumps(data, ensure_ascii=False, default=str))
+
+
 def _write_json(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(utf8(json.dumps(data, ensure_ascii=False, default=str)))
-    tmp.replace(path)
+    """`data` as the JSON file `path`, whole and on the disk or not at all (config.write_atomic)."""
+    write_atomic(path, _json_bytes(data))
+
+
+def _write_state(path: Path, data: dict) -> None:
+    """state.json, with the one it replaces kept beside it as state.json.bak: a state.json that
+    can't be read made its case unopenable, and the conversation in it was lost."""
+    raw = _json_bytes(data)
+    _keep_previous(path)
+    write_atomic(path, raw, sync_dir=False)
+
+
+def _keep_previous(path: Path) -> None:
+    """The file as it is now, kept as <name>.bak: a second name for the same data (a hard
+    link), so nothing is copied and at no moment is either name missing; copied where the file
+    system has no hard links. One that isn't a whole JSON object (cut short, emptied) is not
+    kept: the backup that is there stays, the last state that could be read."""
+    try:
+        with path.open("rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(0)
+            first = f.read(1)
+            f.seek(max(0, size - 64))
+            last = f.read().rstrip()[-1:]
+    except OSError:
+        return
+    if first != b"{" or last != b"}":
+        return
+    bak = path.with_name(path.name + BACKUP_SUFFIX)
+    tmp = bak.with_name(f".{bak.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(path, tmp)
+        except OSError:
+            shutil.copyfile(path, tmp)
+        os.replace(tmp, bak)
+    except OSError:
+        tmp.unlink(missing_ok=True)      # no backup this time: the save itself goes on
+
+
+def _read_state(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name} doesn't hold a case's state")
+    return data
 
 
 def _case_dir(case_id: str, root: Path | None = None) -> Path:
