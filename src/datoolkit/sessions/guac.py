@@ -33,7 +33,7 @@ INTERNAL = ""          # opcode of tunnel-internal instructions (uuid, ping)
 # length can make the parser wait for and keep
 MAX_ELEMENT = 1 << 20
 _LENGTH_DIGITS = len(str(MAX_ELEMENT))
-UNAUTHORIZED = "769"   # guacd's status code for a login the server refused (a wrong password)
+UNAUTHORIZED = "769"   # guacd's status code for a connection the server didn't authorize
 HANDSHAKE_TIMEOUT = 20
 # Always this machine, on guacd's default port. The link to guacd is plain, unauthenticated
 # TCP carrying the password and the whole session, so it is never made over a network.
@@ -392,6 +392,14 @@ async def connect(timeout: float) -> tuple[asyncio.StreamReader, asyncio.StreamW
 
 def encode(*elements) -> str:
     return ",".join(f"{len(s)}.{s}" for s in (str(e) for e in elements)) + ";"
+
+
+def login_refused(error: str, code: str) -> bool:
+    """Whether guacd's `error` says the server refused the user name and password. Status 769
+    alone doesn't: guacd gives it to "Authentication failure (invalid credentials?)" and to
+    "Security negotiation failed (wrong security type?)" alike (seen against Windows 11, Nov
+    2026), and in the second the password was never tried."""
+    return code == UNAUTHORIZED and "authentication" in error.lower()
 
 
 def fingerprint_param(sha256: str) -> str:

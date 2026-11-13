@@ -2291,7 +2291,7 @@ class Engine:
         else:
             self.log("rdp_connect_failed", session_id=sess.id,
                      **(detail or {"error": "closed before the remote desktop connected"}))
-            if code == guac.UNAUTHORIZED:
+            if guac.login_refused(error, code):
                 # The server refused the login. A password typed for this session and ticked
                 # "save" is not kept; one the keyring supplied is named as that, with the way to
                 # replace it: guacd's own "Authentication failure" doesn't say a saved one was used.

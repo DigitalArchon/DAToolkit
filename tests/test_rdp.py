@@ -1130,6 +1130,8 @@ def test_guacd_refusing_the_handshake_is_a_failed_connection(tmp_path, monkeypat
     (GUACD_13_BADPASS, True, None, True),       # the saved password, refused: said to be that, with the way out
     (GUACD_16_BADPASS, False, None, False),     # one just typed and ticked "save", refused: not saved
     (GUACD_13_OK, False, "typed-pw", False),    # accepted: saved now
+    (GUACD_16_NLA_EXT, True, None, False),      # the same status for a security mode the server refuses: no word of the password
+    (GUACD_16_NLA_EXT, False, None, False),     # nor was a typed one tried: neither saved nor forgotten
 ])
 def test_an_rdp_password_is_saved_when_accepted_and_a_saved_one_refused_is_named(tmp_path, monkeypatch, stream, from_keyring,
                                                                                 kept, told):
@@ -1160,7 +1162,9 @@ def test_an_rdp_password_is_saved_when_accepted_and_a_saved_one_refused_is_named
             if any(k in ("rdp_disconnected", "rdp_connect_failed") for k, _ in _rdp_events(e)):
                 break
             threading.Event().wait(0.02)
-        assert creds.get_secret("host", "dc01") == kept and not e.sessions.unsaved
+        assert creds.get_secret("host", "dc01") == kept
+        # held for a later connection of the session only where the password was never tried
+        assert e.sessions.unsaved == ({"dc01": ("dc01", "typed-pw")} if stream == GUACD_16_NLA_EXT and not from_keyring else {})
         toasts = [x["text"] for x in emitted if x["type"] == "toast"]
         assert (["The password saved for dc01 was used, and the server refused it. To replace it: Settings → Hosts → dc01 → "
                  "Forget stored password, then open the session again and type the new one."] if told else []) == toasts
