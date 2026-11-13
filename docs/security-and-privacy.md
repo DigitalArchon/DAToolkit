@@ -3,7 +3,7 @@
 This is how DA Toolkit handles your security and your clients' privacy: what leaves this
 computer and where it goes, what stays, how keys and passwords are kept, what each kind of AI
 model can see, and what DA Toolkit can't protect you from. It describes DA Toolkit as of
-version 0.1.0b28 (November 2026). For how to use each feature, see the [manual](../MANUAL.md);
+version 0.1.0b29 (November 2026). For how to use each feature, see the [manual](../MANUAL.md);
 the sections named below are the manual's.
 
 ## In short
