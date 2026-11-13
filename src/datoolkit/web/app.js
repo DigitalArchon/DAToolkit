@@ -1419,43 +1419,73 @@ function caseSwitched() {
   }
   for (const url of imageCache.values()) if (url) URL.revokeObjectURL(url);
   imageCache.clear();
-  swapDraft().catch(() => {});
+  swapDraft().catch(showError);
 }
 
 // ------------------------------------------------------------------ the chat box's draft
 // Each case keeps what its chat box holds, a message not sent yet and the photos attached to
 // it (Engine.save_draft): it never goes out with another case's message, and it is back when the
 // case is opened again or the page reloads. S.draftCase is the case the box's contents are for.
-let draftTimer = null;
+//
+// A save takes what the box holds, and whose it is, at the moment it is asked for, and is sent
+// once the save before it has been answered: two never cross on their way, so an older text can't
+// land on a newer one. When another case opens the box is emptied at once, before the new case's
+// draft is fetched, so one case's unsent words are never on show in another, whether or not that
+// fetch works; the messages ↑ recalls are the open case's own. (Until Nov 2026 a draft that
+// failed to load, or two switches crossing, left the previous case's text in the box, to be
+// sent to the wrong case.)
+let draftTimer = null, draftSaves = Promise.resolve(), draftSwaps = 0;
 function saveDraftSoon() {
   if (S.loadingDraft) return;
   clearTimeout(draftTimer);
   draftTimer = setTimeout(() => saveDraft().catch(() => {}), 800);
 }
-async function saveDraft() {
+function saveDraft() {
   clearTimeout(draftTimer);
   draftTimer = null;
-  if (!S.draftCase) return;
-  await api("POST", "/api/draft", { case_id: S.draftCase, text: $("#chat-input").value, images: pendingImages.slice() });
+  if (!S.draftCase) return Promise.resolve();
+  const body = { case_id: S.draftCase, text: $("#chat-input").value, images: pendingImages.slice() };
+  const sent = draftSaves.then(() => api("POST", "/api/draft", body));
+  draftSaves = sent.catch(() => {});
+  return sent;
 }
-async function swapDraft() {
-  const was = S.draftCase, now = S.state.case?.id ?? null;
-  if (was && draftTimer) await saveDraft();         // the last of what was typed stays with its case
-  S.draftCase = now;
-  if (!now) return;
-  const box = $("#chat-input");
-  // typed (or photographed) before any case existed, to be sent once one starts: it is this one's
-  if (!was && (box.value.trim() || pendingImages.length)) return saveDraft();
-  const draft = await api("GET", `/api/draft?case_id=${encodeURIComponent(now)}`);
-  if (S.draftCase !== now) return;                  // another case opened meanwhile
+// The chat box and its photos, set without that counting as typing (nothing to save).
+function setComposer(text, images) {
   S.loadingDraft = true;
   try {
-    box.value = draft.text || "";
-    pendingImages.splice(0, pendingImages.length, ...(draft.images || []));
+    $("#chat-input").value = text;
+    pendingImages.splice(0, pendingImages.length, ...images);
     renderAttachments();
   } finally {
     S.loadingDraft = false;
   }
+}
+async function swapDraft() {
+  const swap = ++draftSwaps;
+  const was = S.draftCase, now = S.state.case?.id ?? null;
+  const box = $("#chat-input");
+  const typed = () => !!(box.value.trim() || pendingImages.length);
+  const carried = !was && typed();
+  const saving = was && draftTimer ? saveDraft() : null;     // the last of what was typed stays with its case
+  S.draftCase = now;
+  S.chatHistory = [];
+  S.histIdx = -1;
+  S.histDraft = "";
+  // typed (or photographed) before any case existed, to be sent once one starts: it is this one's
+  if (carried) return now ? saveDraft() : undefined;
+  if (was) setComposer("", []);
+  if (saving) await saving.catch((e) => toast(`What you had typed for the case you left couldn't be saved with it: ${e.message}`, "error", 12000));
+  if (!now) return;
+  let draft;
+  try {
+    draft = await api("GET", `/api/draft?case_id=${encodeURIComponent(now)}`);
+  } catch (e) {
+    if (swap === draftSwaps) toast(`This case's unsent message couldn't be fetched: ${e.message}`, "error", 12000);
+    return;
+  }
+  // another case opened meanwhile, or the technician has started typing in this one: left alone
+  if (swap !== draftSwaps || typed()) return;
+  setComposer(draft.text || "", draft.images || []);
 }
 
 const imageCache = new Map();
@@ -2836,14 +2866,19 @@ async function runItemNow(num, mode, { readOnly = false } = {}) {
         item.rollback ? h("p", { class: "small" }, `Rollback: ${item.rollback}`) : h("p", { class: "small warn" }, "No rollback was given for this command."),
         h("p", {}, `Target: ${sess.id} (${sess.target})`),
         h("button", { type: "button", class: "small", onclick: async (e) => {
-          e.target.disabled = true; review.classList.remove("hidden"); review.textContent = "Asking the reviewer…";
+          const asked = e.target;
+          asked.disabled = true; review.classList.remove("hidden"); review.textContent = "Asking the reviewer…";
           try {
             const r = await api("POST", `/api/queue/${num}/review`);
             review.replaceChildren();
             add(review, h("b", {}, `Second opinion (${r.model}${r.different_model ? "" : ", same model as the proposer"}): `),
               teeMark(r), h("div", { class: "pre" }, r.text));
+            asked.textContent = "Ask again";
+          } catch (err) {
+            review.textContent = `The reviewer couldn't be asked: ${err.message}`;
+          } finally {
+            asked.disabled = false;       // to ask again, whether it answered or not
           }
-          catch (err) { review.textContent = err.message; }
         } }, rv ? "Ask again" : "Get a second opinion"), review),
       mode === "run" ? "Run it" : "Insert it", "danger");
     if (!ok) return;
@@ -3270,7 +3305,13 @@ async function openSimilar() {
   const list = h("div", { class: "case-list" });
   const run = async () => {
     list.replaceChildren(h("div", { class: "muted small" }, "Searching…"));
-    const cases = (await api("GET", `/api/search?q=${encodeURIComponent(q.value)}`)).cases;
+    let cases;
+    try {
+      cases = (await api("GET", `/api/search?q=${encodeURIComponent(q.value)}`)).cases;
+    } catch (e) {
+      list.replaceChildren(h("div", { class: "warnbox" }, `The search didn't run: ${e.message}`));
+      return;
+    }
     list.replaceChildren(...(cases.length ? cases.map((c) => h("div", { class: "case-row", style: "flex-direction:column;align-items:stretch" },
       h("div", { class: "row" }, h("b", {}, c.name), h("span", { class: `badge ${c.sensitivity}` }, c.sensitivity), c.client ? h("span", { class: "badge" }, c.client) : null,
         h("span", { class: "muted small" }, `${c.started.slice(0, 10)} · matched ${c.matched.join(", ")}`), h("span", { class: "spacer" }), c.has_runbook ? h("span", { class: "badge read_only" }, "runbook") : null),
@@ -3371,8 +3412,21 @@ const SHOT_NOTE = "(result in the attached screenshot)";
 // through the same redaction preview as captured output; image already blacked out by the
 // technician) and point it out.
 async function openSendResults(fill = null) {
+  // one at a time: its captures and preview take a moment, in which a second click (or a quick
+  // button of a session) used to open a second dialog over the first
+  if (S.sendingResults) return toast("Send results is already open: send or cancel that first.");
   const items = readyItems();
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
+  S.sendingResults = true;
+  try {
+    await sendResultsDialog(items, fill);
+  } catch (e) {
+    S.sendingResults = false;
+    throw e;
+  }
+}
+
+async function sendResultsDialog(items, fill) {
   const target = fill ? waitingResults(fill.sid).pop() : null;
   const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" }
     : captureFor(i).then((c) => (i === target && fill.text ? { ...c, text: fill.text } : c)))));
@@ -3465,6 +3519,7 @@ async function openSendResults(fill = null) {
       },
     }],
     onClose: () => {
+      S.sendingResults = false;
       if (sent) return;
       $("#chat-input").value = message.value;
       pendingImages.splice(0, pendingImages.length, ...images);
@@ -4064,7 +4119,13 @@ function openSettings(tab = "providers") {
     const loadBtn = h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
       if (p._new) throw new Error("Save & test the provider first.");
       status.textContent = "Loading models…";
-      const got = (await api("GET", `/api/models?provider=${encodeURIComponent(p.name)}&refresh=false`)).models;
+      let got;
+      try {
+        got = (await api("GET", `/api/models?provider=${encodeURIComponent(p.name)}&refresh=false`)).models;
+      } catch (e) {
+        status.textContent = `✗ The model list couldn't be loaded: ${e.message}`;
+        return;
+      }
       models.splice(0, models.length, ...got);
       datalist.replaceChildren(...got.map((m) => h("option", { value: m.id })));
       for (const tr of rows.children) tr._fill();
@@ -4211,8 +4272,12 @@ function openSettings(tab = "providers") {
         toast("Pin removed. You'll be asked to verify the certificate on the next connection.", "ok");
         pane.replaceChildren(hostForm(x));
       }) }, "Forget pinned certificate") : null,
-      x.has_password ? h("button", { class: "small", style: "align-self:flex-start", onclick: () => guarded(async () => {
+      // the form then says there is none, with whatever else was typed into it left as it is
+      x.has_password ? h("button", { class: "small", style: "align-self:flex-start", onclick: (e) => guarded(async () => {
         await api("POST", `/api/hosts/${encodeURIComponent(x.name)}/forget-password`);
+        x.has_password = false;
+        f.password.placeholder = "Optional; stored in the OS keyring. Leave blank to be asked each time.";
+        e.target.remove();
         toast("Password removed from keyring.", "ok");
       }) }, "Forget stored password") : null,
       h("div", { class: "row" },
@@ -4473,8 +4538,8 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, "Searches go through NanoGPT to the provider in the clear, whatever the chat model's tier, and are billed to that NanoGPT key. Sovereign cases never search; Confidential cases always ask. Each query is redacted first and you can edit it before it runs. The same setting gates the research agent (its brief, searches and page fetches); see Settings → Model. The research agent searches with the answers provider when it wants a question answered with sources, and with the link finder when it wants the best pages to read itself. Confidential cases search only with Linkup (zero data retention), with no fallback; elsewhere a provider failing on NanoGPT's side falls back to Valyu."),
       h("div", { class: "row" }, testQ, h("button", { type: "button", onclick: () => guarded(async () => {
         testOut.textContent = "Searching…";
-        await api("POST", "/api/settings", Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])));
         try {
+          await api("POST", "/api/settings", Object.fromEntries(Object.entries(search).map(([k, el]) => [k, el.value])));
           const r = await api("POST", "/api/web-search-test", { query: testQ.value });
           testOut.replaceChildren(`✓ ${r.provider}: ${r.count} result(s)${typeof r.cost === "number" ? `, cost $${r.cost.toFixed(3)}` : ""}. ${r.note ? r.note + "." : ""}`,
             ...r.results.map((x) => h("div", {}, `· ${x.title || "(untitled)"} ${x.url}`)));
@@ -4584,7 +4649,10 @@ async function openPhone() {
             h("button", { class: "primary", onclick: () => { step = 2; render(); } }, "Fingerprint matches")))));
     } else if (!info.connect_qr) {        // none open, or the last one used or out of date: a new one
       body.replaceChildren(head, h("p", { class: "muted" }, "Making a connect code…"));
-      act("token");
+      api("POST", "/api/phone/token").then((made) => { info = made; render(); }, (e) => {
+        body.replaceChildren(head, h("div", { class: "warnbox" }, `No connect code could be made: ${e.message}`),
+          h("div", { class: "row" }, h("button", { type: "button", onclick: () => render() }, "Try again")));
+      });
     } else {
       body.replaceChildren(head,
         h("h3", {}, "Step 2 of 2: connect"),

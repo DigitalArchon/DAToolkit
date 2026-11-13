@@ -285,6 +285,126 @@ test("a draft that arrives after yet another case opened is not shown", async ()
   assert.equal(app.$("#chat-input").value, "about C");
 });
 
+test("another case's unsent text is never left in the box: it is emptied before the new case's draft is fetched, even if that fails", async () => {
+  const app = await page("a", null, { "POST /api/send": () => ({ ok: true }),
+    "GET /api/draft": (c) => (c.query.case_id === caseId("b") ? { __status: 500, body: { error: "The draft file can't be read." } } : { text: "", images: [] }) });
+  const box = app.$("#chat-input");
+  await app.type(box, "the first thing I asked about A");
+  app.$("#chat-form").dispatchEvent(new Event("submit"));
+  await app.clock.tick(0);
+  await app.type(box, "the admin password for A's firewall is");
+  app.run(`pendingImages.push(${JSON.stringify(PHOTO)}); renderAttachments()`);
+  await app.event({ type: "state", state: state("b") });
+  assert.equal(box.value, "", "not A's words, in B's box");
+  assert.equal(app.run("pendingImages.length"), 0);
+  assert.match(app.toasts().at(-1), /This case's unsent message couldn't be fetched: The draft file can't be read\./);
+  assert.deepEqual(drafts(app).at(-1), { case_id: caseId("a"), text: "the admin password for A's firewall is", images: [PHOTO] }, "kept with its own case");
+  // ↑ recalls the open case's messages, not the last one's
+  assert.equal(app.key(box, { key: "ArrowUp" }).defaultPrevented, false);
+  assert.equal(box.value, "");
+  // typing that starts before the draft arrives is not overwritten by it
+  const held = app.hold("GET /api/draft", { text: "C's old draft", images: [] });
+  await app.event({ type: "state", state: state("c") });
+  await app.type(box, "new words for C");
+  await held.release();
+  assert.equal(box.value, "new words for C");
+});
+
+test("a draft is saved only after the save before it has been answered, each with the text of its own moment", async () => {
+  const app = await page("a");
+  const held = app.hold("POST /api/draft", { ok: true });
+  const box = app.$("#chat-input");
+  await app.type(box, "first");
+  await app.clock.tick(800);
+  await app.type(box, "first, then more");
+  await app.clock.tick(800);
+  await app.type(box, "first, then more, and the end");
+  app.call("saveDraft").catch(() => {});
+  await app.clock.tick(0);
+  assert.deepEqual(held.calls.map((c) => c.body.text), ["first"], "one on its way; the others wait their turn");
+  await held.release();
+  assert.deepEqual(held.calls.map((c) => c.body.text), ["first", "first, then more", "first, then more, and the end"]);
+});
+
+test("Send results opens once however often it is asked for while it gathers the results", async () => {
+  const app = await page("a", (s) => { Object.assign(s.queue[0], { status: "ran", ran_at: 1 }); },
+    { "POST /api/preview": (c) => ({ items: c.body.texts.map((text) => ({ text, redactions: 0 })) }) });
+  const held = app.hold("GET /api/queue/1/capture", { text: "up 3 days" });
+  app.$("#send-results-btn").click();
+  app.$("#chat-results-btn").click();
+  await app.clock.tick(0);
+  await app.call("openSendResults", { sid: "local", text: "pasted" });
+  await held.release();
+  await app.clock.tick(50);
+  assert.equal(app.$("#modal-root").querySelectorAll(".modal").length, 1);
+  assert.equal(app.toasts().filter((t) => /Send results is already open/.test(t)).length, 2);
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(0);
+  app.$("#send-results-btn").click();                            // closed: it opens again
+  await app.clock.tick(50);
+  assert.equal(app.$("#modal-root").querySelectorAll(".modal").length, 1);
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(0);
+  // gathering failed: not left "open" for ever
+  app.routes["POST /api/preview"] = () => ({ __status: 500, body: { error: "The preview failed." } });
+  app.$("#send-results-btn").click();
+  await app.clock.tick(50);
+  assert.match(app.toasts().at(-1), /The preview failed/);
+  app.routes["POST /api/preview"] = (c) => ({ items: c.body.texts.map((text) => ({ text, redactions: 0 })) });
+  app.$("#send-results-btn").click();
+  await app.clock.tick(50);
+  assert.equal(app.$("#modal-root").querySelectorAll(".modal").length, 1);
+});
+
+test("a button or a line that says it is busy says what happened when the request fails", async () => {
+  const fails = (why) => () => ({ __status: 502, body: { error: why } });
+  const app = await page("a", (s) => {
+    Object.assign(s.queue[1], { risk: "disruptive", risk_reasons: ["restarts a service"] });
+    s.config.hosts = [{ name: "fs01", kind: "ssh", host: "fs01.lan", user: "bob", auth: "password", has_password: true }];
+  }, { "POST /api/queue/2/review": fails("The reviewer's provider is down."), "GET /api/search": fails("The index is being rebuilt."),
+    "GET /api/models": fails("401 from the provider."), "POST /api/hosts/fs01/forget-password": () => ({ ok: true }) });
+  termSocket(app).open();
+  // "Get a second opinion" in the dialog before a disruptive command
+  button(row(app, 2), "Run").click();
+  await app.clock.tick(50);
+  const ask = button(app.$(".modal"), "Get a second opinion");
+  ask.click();
+  await app.clock.tick(0);
+  assert.equal(ask.disabled, false, "it can be asked again");
+  assert.match(app.$(".modal .review").textContent, /The reviewer couldn't be asked: The reviewer's provider is down\./);
+  app.routes["POST /api/queue/2/review"] = () => ({ model: "x/reviewer", different_model: true, text: "It restarts nginx." });
+  ask.click();
+  await app.clock.tick(0);
+  assert.deepEqual([ask.disabled, ask.textContent], [false, "Ask again"]);
+  button(app.$(".modal"), "Cancel").click();
+  await app.clock.tick(0);
+  // "Searching…" in Similar past cases
+  await app.call("openSimilar");
+  await app.clock.tick(50);
+  assert.equal(app.$(".modal .case-list").textContent, "The search didn't run: The index is being rebuilt.");
+  button(app.$(".modal"), "Close").click();
+  await app.clock.tick(0);
+  // "Loading models…" in a provider's form
+  app.call("openSettings");
+  await app.clock.tick(50);
+  button(app.$(".modal .list-item"), "Edit").click();
+  button(app.$(".modal"), "Load the model list").click();
+  await app.clock.tick(0);
+  assert.doesNotMatch(app.$(".modal .content").textContent, /Loading models…/);
+  assert.match(app.$(".modal .content").textContent, /✗ The model list couldn't be loaded: 401 from the provider\./);
+  // "Forget stored password": the form says there is none now, and keeps what was typed into it
+  app.$(".modal .tabs-inline").querySelectorAll("button").find((b) => b.textContent === "Hosts").click();
+  await app.clock.tick(50);
+  button(app.$(".modal .list-item"), "Edit").click();
+  const user = app.$(".modal").querySelectorAll("input[type=text]").find((i) => i.value === "bob");
+  await app.type(user, "alice");
+  button(app.$(".modal"), "Forget stored password").click();
+  await app.clock.tick(0);
+  assert.equal(button(app.$(".modal"), "Forget stored password"), undefined);
+  assert.match(app.$(".modal input[type=password]").placeholder, /Leave blank to be asked each time/);
+  assert.equal(user.value, "alice");
+});
+
 test("a message sent leaves no draft behind in its case", async () => {
   const app = await page("a", null, { "POST /api/send": () => ({ ok: true }) });
   await app.type(app.$("#chat-input"), "check the disk");
