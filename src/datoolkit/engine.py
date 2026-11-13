@@ -631,6 +631,16 @@ class Engine:
             raise UserError(self.SETTINGS_ELSEWHERE) from None
         return True
 
+    def _no_attestation(self, slot: str = "chat") -> None:
+        """What `slot` (the chat model, or the vision helper) showed as attested is no longer what
+        is in use there: it isn't shown any more, and neither is the result of an attestation
+        still under way for it, which would otherwise arrive as "verified" for an address or a
+        model that nothing is sent to."""
+        task = self._attest_task if slot == "chat" else self._helper_attest_task
+        if task and not task.done():
+            task.cancel()
+        self._set_attestation(slot, None)
+
     def _changed(self) -> None:
         self.emit("state", state=self.snapshot())
 
@@ -751,8 +761,24 @@ class Engine:
             self.cfg.active_provider = name
         self._models.pop(name, None)
         self._secrets_changed()
+        if old and (old.base_url, old.api, old.tier_overrides) != (prov.base_url, prov.api, prov.tier_overrides):
+            self._provider_moved(prov)
         self._save()
         self._changed()
+
+    def _provider_moved(self, prov: Provider) -> None:
+        """A provider's address, API or tier marks changed. What the top bar shows as attested
+        was attested at the address as it was, for the model as it was rated: it is dropped,
+        the chat model is unselected if it can't be used as the provider is now, and whatever
+        attestation fits now is started. (A send was guarded all along: _tee_guard attests
+        again. Until Nov 2026 the bar went on saying "verified" for the old address.)"""
+        if self.cfg.active_provider == prov.name and self.cfg.active_model:
+            self._no_attestation("chat")
+            if not self._drop_disallowed_model():
+                self._attestation_for(prov, self.cfg.active_model, "chat")
+        if (self.cfg.settings.vision_model or "").startswith(prov.name + "|"):
+            self._no_attestation("helper")
+        self._refresh_helper_attestation()
 
     def _provider_renamed(self, old: str, new: str) -> None:
         """Settings that name a provider follow its new name ("provider|model", search_via,
@@ -805,6 +831,7 @@ class Engine:
             for key in [k for k in cache if k[0] == name]:
                 del cache[key]
         s = self.cfg.settings
+        helper_gone = s.vision_model.startswith(name + "|")
         for key in ("review_model", "research_model", "vision_model"):
             if getattr(s, key).startswith(name + "|"):
                 setattr(s, key, "")
@@ -814,6 +841,10 @@ class Engine:
         if self.cfg.active_provider == name:
             self.cfg.active_provider = self.cfg.providers[0].name if self.cfg.providers else ""
             self.cfg.active_model = ""
+            self._no_attestation("chat")         # nothing is selected: nothing is shown as attested
+        if helper_gone:
+            self._no_attestation("helper")
+        self._refresh_helper_attestation()
         self._save()
         self._changed()
 
@@ -884,6 +915,10 @@ class Engine:
                 try:
                     self._check_tier(prov, prov.default_model)
                     self.cfg.active_provider, self.cfg.active_model = prov.name, prov.default_model
+                    # chosen here, not by select_model: what is shown as attested follows it all the same
+                    self._no_attestation("chat")
+                    self._attestation_for(prov, prov.default_model, "chat")
+                    self._refresh_helper_attestation()
                 except UserError:
                     pass
             self._save(quiet=True)       # a default found for the session holds here, written or not
@@ -1149,7 +1184,7 @@ class Engine:
                 "until this one is closed but not remembered. Close this one and start it again to pick them up."))
         self.log("model_selected", provider=provider_name, model=model, tier=self.active_tier())
         self._schedule_caps(prov)
-        self.attestation = None
+        self._no_attestation("chat")         # the model before's, shown or still under way
         self._attestation_for(prov, model, "chat")
         self._refresh_helper_attestation()
         self._changed()
@@ -2109,18 +2144,21 @@ class Engine:
         except (OSError, ValueError):
             self._img_desc = {}
         self._drop_disallowed_model()
+        self._refresh_helper_attestation()       # a helper this case doesn't allow isn't in use, nor shown
         for s in self.sessions.roster():
             self.log("session_carried_over", **s)
         self._changed()
 
     def _drop_disallowed_model(self) -> bool:
-        """Unselect the chat model if the case's sensitivity doesn't allow it. True if it did."""
+        """Unselect the chat model if the case's sensitivity doesn't allow it. True if it did. Its
+        attestation goes with it: nothing is selected, so nothing is shown as attested."""
         prov = self.cfg.provider(self.cfg.active_provider)
         if prov and self.cfg.active_model:
             try:
                 self._check_tier(prov, self.cfg.active_model)
             except UserError:
                 self.cfg.active_model = ""
+                self._no_attestation("chat")
                 return True
         return False
 
