@@ -70,6 +70,30 @@ async def test_a_provider_name_cant_contain_the_separator(tmp_path):
     assert [p.name for p in engine.cfg.providers] == ["New Name"]
 
 
+async def test_a_new_key_at_the_same_address_drops_the_attested_clients_made_with_the_old_one(env):  # noqa: F811
+    engine, _, _ = env
+
+    class Attested:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def kept():
+        client = Attested()
+        engine._tee[("Fake", "TEE/glm-5.3")] = (client, 0.0, {"summary": "attested"})
+        return client
+
+    client = kept()
+    engine.save_provider({"name": "Fake", "base_url": BASE, "default_model": "x"}, original_name="Fake")
+    assert engine._tee and not client.closed                             # the key didn't change: kept
+    engine.save_provider({"name": "Fake", "base_url": BASE}, "sk-new", original_name="Fake")
+    assert engine._tee == {} and client.closed                           # it would have looked replies up with the old key
+    client = kept()
+    engine.save_provider({"name": "Other", "base_url": "https://other.example/v1"}, "sk-other")
+    assert engine._tee and not client.closed                             # another provider's key: nothing of this one's
+
+
 # ---------------------------------------------------------------- the attestation shown
 
 async def test_a_changed_address_is_not_shown_as_verified(env):  # noqa: F811

@@ -753,6 +753,11 @@ class Engine:
             self._forget_tee(name)
             for cache in (self._caps, self._caps_failed, self._enclaves):
                 cache.pop(name, None)
+        elif old and api_key:
+            # A new key at the same address: the attested client kept for each of its TEE models
+            # was made with the key before, and would go on looking up its replies' signatures
+            # with it. Dropped, so the next request attests again with the key as it is now.
+            self._forget_tee(name)
         if old:
             self.cfg.providers[self.cfg.providers.index(old)] = prov
         else:
