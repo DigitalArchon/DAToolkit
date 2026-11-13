@@ -3507,20 +3507,17 @@ async function openSendResults(fill = null) {
   if (S.sendingResults) return toast("Send results is already open: send or cancel that first.");
   const items = readyItems();
   if (!items.length) return toast("Nothing ready to send. Run or skip queue items first.");
-  S.sendingResults = true;
+  S.sendingResults = true;             // until the dialog closes, or the gathering fails
+  const target = fill ? waitingResults(fill.sid).pop() : null;
+  let caps, prev;
   try {
-    await sendResultsDialog(items, fill);
+    caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" }
+      : captureFor(i).then((c) => (i === target && fill.text ? { ...c, text: fill.text } : c)))));
+    prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text), nums: items.map((i) => i.num) })).items;
   } catch (e) {
     S.sendingResults = false;
     throw e;
   }
-}
-
-async function sendResultsDialog(items, fill) {
-  const target = fill ? waitingResults(fill.sid).pop() : null;
-  const caps = await Promise.all(items.map((i) => (i.status === "skipped" ? { text: "" }
-    : captureFor(i).then((c) => (i === target && fill.text ? { ...c, text: fill.text } : c)))));
-  const prev = (await api("POST", "/api/preview", { texts: caps.map((c) => c.text), nums: items.map((i) => i.num) })).items;
   const images = pendingImages.slice();
   if (target && fill.image) {
     if (images.length >= 4) toast("Up to four images per message: the screenshot wasn't added.");
