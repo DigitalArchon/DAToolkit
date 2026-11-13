@@ -21,15 +21,32 @@ def terms(text: str) -> set[str]:
     return {w for w in _WORD.findall(text.lower()) if w not in _STOP}
 
 
+def _runbook(d: Path) -> str:
+    """A case's runbook, "" when it has none."""
+    try:
+        return (d / "runbook.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+
+
 def _case_text(d: Path) -> tuple[str, str]:
-    """(searchable text, runbook text) for a case directory."""
+    """(searchable text, runbook text) for a case directory. The one place a search reads a
+    case's state.json: the list of cases it works from no longer does (Case.list_all), where
+    until Nov 2026 every state.json was parsed twice for each search, photos and all."""
     parts, runbook = [], ""
-    for name in ("case.json", "ticket-summary.md", "runbook.md"):
+    try:
+        # what the case says of itself, not the file as text: its keys ("messages", "history")
+        # would be words every case has
+        meta = json.loads((d / "case.json").read_text(encoding="utf-8"))
+        parts += [str(meta.get(key) or "") for key in ("name", "notes", "client")]
+    except (OSError, ValueError, AttributeError):
+        pass
+    for name in ("ticket-summary.md", "runbook.md"):
         p = d / name
         if p.exists():
             try:
                 t = p.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, ValueError):
                 continue
             parts.append(t)
             if name == "runbook.md":
@@ -91,7 +108,7 @@ def reload_hits(saved: list, client: str, max_sensitivity: str, root: Path | Non
         if (not c or c.get("client", "") != client or c["sensitivity"] not in SENSITIVITIES
                 or SENSITIVITIES.index(c["sensitivity"]) > allowed):
             continue
-        _, runbook = _case_text(base / c["id"])
+        runbook = _runbook(base / c["id"])       # the runbook alone: no need to read its conversation
         matched = s.get("matched") if isinstance(s.get("matched"), list) else []
         hits.append({**c, "score": s.get("score", 0), "matched": [str(m) for m in matched][:8], "has_runbook": bool(runbook),
                      "runbook": runbook[:4000]})

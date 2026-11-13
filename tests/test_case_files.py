@@ -1,5 +1,6 @@
 """A case's files on disk: written whole, the state before the last kept as a backup, draft saves
-in the order they were asked for, and one DA Toolkit at a time with the case open."""
+in the order they were asked for, the message count kept where the case list can read it, and
+one DA Toolkit at a time with the case open."""
 
 import json
 import threading
@@ -7,6 +8,7 @@ import threading
 import pytest
 
 from datoolkit import case as case_mod
+from datoolkit import search
 from datoolkit.case import Case, CaseInUse
 from datoolkit.engine import UserError
 
@@ -137,6 +139,60 @@ def test_many_draft_saves_at_once_leave_the_last_one_asked_for(tmp_path):
     assert c.load_draft()["text"] == "the last"
     c.save_draft("", [])
     assert not (c.dir / "draft.json").exists() and not list(c.dir.glob(".draft*"))
+
+
+# ---------------------------------------------------------------- the case list
+
+def test_the_case_list_reads_no_state_json(tmp_path, monkeypatch):
+    c = Case.create("counted", "open", root=tmp_path)
+    _save(c, "one", "two", "three")
+    assert json.loads((c.dir / "case.json").read_text())["messages"] == 3
+    old = Case.create("from before", "open", root=tmp_path)             # saved before case.json kept the count
+    _save(old, "one", "two")
+    meta = json.loads((old.dir / "case.json").read_text())
+    del meta["messages"]
+    (old.dir / "case.json").write_text(json.dumps(meta))
+    empty = Case.create("never saved", "open", root=tmp_path)
+    counts = {x["id"]: (x["messages"], x["resumable"]) for x in Case.list_all(root=tmp_path)}
+    assert counts == {c.id: (3, True), old.id: (2, True), empty.id: (0, False)}
+    assert json.loads((old.dir / "case.json").read_text()) == {**meta, "messages": 2}      # counted once, and kept
+
+    def no_parsing(path):
+        raise AssertionError(f"{path} was parsed")
+
+    monkeypatch.setattr(case_mod, "_count_messages", no_parsing)
+    assert {x["id"]: x["messages"] for x in Case.list_all(root=tmp_path)} == {c.id: 3, old.id: 2, empty.id: 0}
+    again = Case.load(old.id, root=tmp_path)
+    again.edit("from before, renamed", "")                               # an edit keeps the count
+    assert json.loads((old.dir / "case.json").read_text())["messages"] == 2
+
+
+def test_a_search_reads_each_state_once_and_reloading_hits_reads_none(tmp_path, monkeypatch):
+    for n in range(3):
+        c = Case.create(f"printer offline {n}", "open", root=tmp_path, client="Acme")
+        _save(c, "the spooler service keeps stopping")
+        (c.dir / "runbook.md").write_text("Restart the spooler.")
+    read, real = [], json.loads
+
+    def loads(text, *a, **kw):
+        data = real(text, *a, **kw)
+        if isinstance(data, dict) and "conv" in data:
+            read.append(1)
+        return data
+
+    monkeypatch.setattr(json, "loads", loads)
+    hits = search.search("spooler stopping", root=tmp_path)
+    assert len(hits) == 3 and len(read) == 3
+    read.clear()
+    again = search.reload_hits(hits, "Acme", "open", root=tmp_path)
+    assert [h["runbook"] for h in again] == ["Restart the spooler."] * 3 and read == []
+
+
+def test_a_case_json_key_is_not_a_word_every_case_matches(tmp_path):
+    c = Case.create("printer", "open", root=tmp_path)
+    _save(c, "the spooler keeps stopping")
+    assert search.search("messages history sensitivity", root=tmp_path) == []
+    assert [h["id"] for h in search.search("printer", root=tmp_path)] == [c.id]
 
 
 # ---------------------------------------------------------------- the lock

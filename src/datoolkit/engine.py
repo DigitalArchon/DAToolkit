@@ -512,12 +512,18 @@ class Engine:
             p["shown_url"] = netguard.shown(p["base_url"])      # for lists: the form's field has it whole
             info = providers_mod.describe(p["base_url"], p.get("api", ""))
             p.update(kind=info["kind"], kind_label=info["kind_label"], api_effective=info["api"])
+        pins = None      # the pin store, read once for the snapshot and not once for each host
         for h, host in zip(c["hosts"], self.cfg.hosts):
             h["has_password"] = self._has_secret("host", h["name"])
             port = self._pin_port(host)
             if port is not None:
-                pin = self.pins.get(h["host"], port)
-                h["pinned"] = pin["sha256"] if pin else ""
+                if pins is None:
+                    try:
+                        pins = self.pins._load()
+                    except (OSError, ValueError):
+                        pins = {}
+                pin = pins.get(f"{h['host'].lower()}:{port}")
+                h["pinned"] = pin["sha256"] if isinstance(pin, dict) and pin.get("sha256") else ""
         return c
 
     def _active_view(self) -> dict | None:
@@ -2725,6 +2731,8 @@ class Engine:
         except OSError:
             return 0
 
+    CAPTURE_MAX_BYTES = 4 * 1024 * 1024      # of one command's output, read from the transcript
+
     def capture(self, num: int) -> dict:
         """Output of a ran command taken from the session transcript on disk: the fallback when
         the terminal buffer no longer has it (page reloaded, session closed, case resumed)."""
@@ -2736,14 +2744,30 @@ class Engine:
             if (other.session_id == p.session_id and other.capture_start is not None
                     and other.capture_start > p.capture_start and (end is None or other.capture_start < end)):
                 end = other.capture_start
+        # At most CAPTURE_MAX_BYTES are read, the start and the end of the output (what is sent on
+        # keeps the head and the tail too: preview), with a line between saying how much wasn't
+        # read. Until Nov 2026 the whole of it was read on the event loop, however long: a
+        # command left tailing a log for a day froze every terminal while it was.
         try:
             with self.case.transcript_file(p.session_id).open("rb") as f:
+                if end is None:
+                    end = f.seek(0, os.SEEK_END)
+                size = max(0, end - p.capture_start)
                 f.seek(p.capture_start)
-                data = f.read() if end is None else f.read(max(0, end - p.capture_start))
+                if size <= self.CAPTURE_MAX_BYTES:
+                    parts = [f.read(size)]
+                else:
+                    head = f.read(self.CAPTURE_MAX_BYTES // 2)
+                    f.seek(end - self.CAPTURE_MAX_BYTES // 2)
+                    parts = [head, f.read(self.CAPTURE_MAX_BYTES // 2)]
         except OSError as e:
             return {"text": "", "error": f"Transcript not readable: {e}"}
-        text = data.decode("utf-8", errors="replace").strip("\n")
-        return {"text": text, "source": "transcript"}
+        texts = [part.decode("utf-8", errors="replace").strip("\n") for part in parts]
+        if len(texts) == 1:
+            return {"text": texts[0], "source": "transcript"}
+        skipped = size - self.CAPTURE_MAX_BYTES
+        return {"text": f"{texts[0]}\n[... {skipped:,} bytes of output not read from the transcript ...]\n{texts[1]}",
+                "source": "transcript", "truncated": True, "skipped_bytes": skipped}
 
     def preview(self, texts: list[str], nums: list[int | None] | None = None) -> list[dict]:
         s = self.cfg.settings

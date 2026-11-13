@@ -63,6 +63,10 @@ class Case:
     client: str = ""
     # feed the AI runbooks from this client's earlier cases (of the same or a lower sensitivity)
     history: bool = False
+    # how many entries the chat of its saved state has, kept in case.json so that listing the
+    # cases doesn't read every state.json; None for a case written before Nov 2026 (list_all
+    # counts those, once)
+    messages: int | None = field(default=None, compare=False)
     _lock_fd: int | None = field(default=None, init=False, repr=False, compare=False)
 
     @classmethod
@@ -79,7 +83,7 @@ class Case:
             case_id = f"{stem}-{n}"
         d = private_dir(base / case_id)
         case = cls(name=name, sensitivity=sensitivity, notes=notes, id=case_id, dir=d,
-                   started=now.isoformat(timespec="seconds"), client=client, history=bool(history))
+                   started=now.isoformat(timespec="seconds"), client=client, history=bool(history), messages=0)
         case.log("case_started", name=name, sensitivity=sensitivity, notes=notes, client=client, history=bool(history))
         case.write_meta()
         return case
@@ -91,7 +95,7 @@ class Case:
         meta = _read_meta(d)
         return cls(name=meta["name"], sensitivity=meta["sensitivity"], notes=meta.get("notes", ""),
                    id=case_id, dir=d, started=meta.get("started", ""), client=meta.get("client", ""),
-                   history=bool(meta.get("history", False)))
+                   history=bool(meta.get("history", False)), messages=_count(meta.get("messages")))
 
     # ------------------------------------------------------------ one DA Toolkit at a time
 
@@ -148,7 +152,10 @@ class Case:
 
     @staticmethod
     def list_all(root: Path | None = None) -> list[dict]:
-        """Summaries of every case on disk, newest first."""
+        """Summaries of every case on disk, newest first. How many messages each has comes from
+        its case.json (save_state keeps it there); until Nov 2026 every state.json was parsed
+        for it, photos and all, each time the list was shown. A case saved before then is
+        counted from its state.json once, and the count written into its case.json."""
         base = root or data_dir() / "cases"
         out = []
         if not base.is_dir():
@@ -163,12 +170,10 @@ class Case:
             summary = {"id": d.name, "name": meta["name"], "sensitivity": meta["sensitivity"],
                        "notes": meta.get("notes", ""), "started": meta.get("started", ""),
                        "client": meta.get("client", ""), "history": bool(meta.get("history", False)),
-                       "resumable": state.exists(), "messages": 0}
-            if state.exists():
-                try:
-                    summary["messages"] = len(json.loads(state.read_text(encoding="utf-8")).get("chat", []))
-                except (OSError, ValueError):
-                    pass
+                       "resumable": state.exists(), "messages": _count(meta.get("messages"))}
+            if summary["messages"] is None:
+                summary["messages"] = _count_messages(d)
+                _note_messages(d, summary["messages"])
             out.append(summary)
         out.sort(key=lambda c: c["id"], reverse=True)
         return out
@@ -217,17 +222,22 @@ class Case:
     def write_meta(self) -> None:
         _write_json(self.dir / "case.json", {"name": self.name, "sensitivity": self.sensitivity,
                                              "notes": self.notes, "started": self.started,
-                                             "client": self.client, "history": self.history})
+                                             "client": self.client, "history": self.history,
+                                             **({} if self.messages is None else {"messages": self.messages})})
 
     def save_state(self, conv: list[dict], chat: list[dict], queue: list[dict],
                    hypotheses: list[dict] | None = None, compactions: list[dict] | None = None,
                    last_usage: dict | None = None, similar: list[dict] | None = None) -> None:
         """Persist everything needed to resume the case later. `similar`: the past cases whose
         runbooks are in its AI's context (id, score, matched terms; search.reload_hits). The
-        state.json before this one is kept as state.json.bak (load_backup)."""
+        state.json before this one is kept as state.json.bak (load_backup), and the number of
+        messages goes into case.json when it has changed (list_all)."""
         _write_state(self.dir / "state.json", {"version": 2, "conv": conv, "chat": chat, "queue": queue,
                                                "hypotheses": hypotheses or [], "compactions": compactions or [],
                                                "last_usage": last_usage, "similar": similar or []})
+        if self.messages != len(chat):
+            self.messages = len(chat)
+            self.write_meta()
 
     def load_state(self) -> dict | None:
         """The saved state, None when there is none. Raises ValueError when state.json isn't one."""
@@ -475,6 +485,40 @@ def _sweep(d: Path) -> None:
                 f.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _count(value) -> int | None:
+    """A message count as case.json has it, None when it has none."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _count_messages(d: Path) -> int:
+    """How many chat entries the saved state has, read from state.json itself: for a case whose
+    case.json doesn't say."""
+    try:
+        chat = json.loads((d / "state.json").read_text(encoding="utf-8")).get("chat", [])
+        return len(chat) if isinstance(chat, list) else 0
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def _note_messages(d: Path, messages: int) -> None:
+    """Write the count into a case.json that has none, so the next listing needn't read
+    state.json. Under the case's lock, and into case.json as it is then: a DA Toolkit that has
+    the case open writes its own, and what it has written since is not put back."""
+    try:
+        fd = _lock_dir(d)
+    except CaseInUse:
+        return
+    try:
+        meta = json.loads((d / "case.json").read_text(encoding="utf-8"))
+        if isinstance(meta, dict) and _count(meta.get("messages")) is None:
+            _write_json(d / "case.json", {**meta, "messages": messages})
+    except (OSError, ValueError):
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _case_dir(case_id: str, root: Path | None = None) -> Path:
