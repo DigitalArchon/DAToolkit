@@ -286,7 +286,9 @@ undoing each other's work:
   is queued, and the AI is told which item was wrong so that it sends the call again.
 - A separate **sensitive** badge marks commands that may expose secrets or private data,
   whatever their risk level: reading key files, `/etc/shadow`, `.env` and credential files
-  (NetworkManager's connections, Windows paths too, and `find … -exec cat`), a computer's own
+  (NetworkManager's connections, Windows paths too, and `find … -exec cat`), a folder of
+  private keys packed or copied whole (`tar` or `scp -r` of `/etc/ssl/private` or Let's
+  Encrypt's `live` folder; listing it with `ls`, or reading a certificate, is not), a computer's own
   SSH settings, keys, browser data, saved passwords, mail and messages, listing personal folders
   (`~/Documents`), dumping the environment, shell history, secret stores, databases or a device
   configuration (`show running-config` and `sh run` as it is typed, `display
