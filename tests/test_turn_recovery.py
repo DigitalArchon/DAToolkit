@@ -157,3 +157,19 @@ def test_a_saved_conversation_with_an_unanswered_call_is_repaired_for_chat_compl
     assert out[3] == {"role": "tool", "tool_call_id": "c0", "content": NO_RESULT}
     assert "native" not in out[6]
     assert openai_messages(conv[:1]) == conv[:1]
+
+
+def test_a_tool_message_that_answers_no_call_is_left_out_for_chat_completions():
+    """A case saved mid-turn by an earlier version got its calls' answers after a later message; a
+    provider refuses the whole request for a tool message that answers nothing before it."""
+    call = lambda i: {"id": i, "type": "function", "function": {"name": "web_search", "arguments": "{}"}}  # noqa: E731
+    conv = [{"role": "user", "content": "vpn drops"},
+            {"role": "assistant", "content": "Let me check.", "tool_calls": [call("c0"), call("c1")]},
+            {"role": "user", "content": "and now?"},
+            {"role": "tool", "tool_call_id": "c0", "content": "late"},
+            {"role": "tool", "tool_call_id": "c1", "content": "late"},
+            {"role": "user", "content": "still there?"}]
+    out = openai_messages(conv)
+    assert [m["role"] for m in out] == ["user", "assistant", "tool", "tool", "user", "user"]
+    assert [m["content"] for m in out if m["role"] == "tool"] == [NO_RESULT, NO_RESULT]
+    assert unanswered(out) == []

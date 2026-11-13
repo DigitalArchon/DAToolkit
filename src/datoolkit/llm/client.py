@@ -121,14 +121,20 @@ NO_RESULT = "(no result: the turn ended before this tool call was answered)"
 
 def openai_messages(messages: list[dict]) -> list[dict]:
     """`messages` as chat completions takes them: anything another API keeps on them left out,
-    and every tool call answered before the next message (as anthropic_api.render does)."""
+    every tool call answered before the next message (as anthropic_api.render does), and no
+    tool message that answers no call."""
     out: list[dict] = []
     pending: list[str] = []          # tool call ids of the last assistant message not yet answered
     for m in messages:
         role = m.get("role")
         if role == "tool":
-            if m.get("tool_call_id") in pending:
-                pending.remove(m.get("tool_call_id"))
+            if m.get("tool_call_id") not in pending:
+                # An answer to no call of the assistant message before it (a case saved mid-turn
+                # by an earlier version, its answers added after a later message): a provider
+                # refuses the whole request for one, so it is left out. The call itself was
+                # answered in its place, with NO_RESULT.
+                continue
+            pending.remove(m.get("tool_call_id"))
         elif pending:
             out += [{"role": "tool", "tool_call_id": i, "content": NO_RESULT} for i in pending]
             pending = []
