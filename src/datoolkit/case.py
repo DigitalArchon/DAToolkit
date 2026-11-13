@@ -340,49 +340,64 @@ class Case:
                 "client": self.client, "history": self.history}
 
     def export_markdown(self, chat: list[dict], queue: list[dict], hypotheses: list[dict] | None = None) -> Path:
-        out = [f"# {self.name}", "",
+        """transcript.md: the conversation and the queue as Markdown. It is opened in viewers
+        that fetch what a page embeds, and holds text from the web and from models, so none of
+        that text is left able to act as markup of its own: free text is written with its
+        images and HTML inert (md_inert), a source's title and address are escaped (_md_link),
+        and what a model wrote into a table cell is shown as code. Until Nov 2026 a title with
+        "](" in it could point its link elsewhere, and "![](https://…)" in a reply was fetched
+        by the viewer, telling that server the transcript had been opened."""
+        out = [f"# {md_inert(_line(self.name))}", "",
                f"- Case id: `{self.id}`", f"- Started: {self.started}",
-               f"- Sensitivity: {self.sensitivity}"] + ([f"- Client: {self.client}"] if self.client else []) + [""]
+               f"- Sensitivity: {self.sensitivity}"] + ([f"- Client: {md_inert(_line(self.client))}"] if self.client else []) + [""]
         if self.notes:
-            out += ["## Notes", "", self.notes, ""]
+            out += ["## Notes", "", md_inert(self.notes), ""]
         out += ["## Conversation", ""]
         for entry in chat:
             kind = entry.get("kind")
             if kind == "user":
                 out += ["### Technician", ""]
                 if entry.get("text"):
-                    out += [entry["text"], ""]
+                    out += [md_inert(entry["text"]), ""]
                 for r in entry.get("results", []):
-                    out += [f"**#{r['num']} {r['status'].upper()}** on `{r['session_id']}`: {inline_code(r['command'])}", ""]
+                    # a command of several lines in a block of its own: a blank line in it would
+                    # end the paragraph, and an inline span with it
+                    several = "\n" in r["command"].strip()
+                    out += [f"**#{r['num']} {r['status'].upper()}** on {inline_code(_line(r['session_id']))}:"
+                            + ("" if several else f" {inline_code(r['command'].strip())}"), ""]
+                    if several:
+                        out += [fence(r["command"]), ""]
                     if r.get("note"):
-                        out += [f"> Note: {r['note']}", ""]
+                        out += [f"> Note: {inline_code(_line(r['note']))}", ""]
                     if r.get("text"):
                         out += [fence(r["text"]), ""]
                 for s in entry.get("snippets", []):
-                    out += [f"Terminal excerpt from `{s['session_id']}`:", "", fence(s["text"]), ""]
+                    out += [f"Terminal excerpt from {inline_code(_line(s['session_id']))}:", "", fence(s["text"]), ""]
                 for img in entry.get("images", []):
                     out += [f"![photo]({img})", ""]
             elif kind == "assistant":
-                out += [f"### AI ({entry.get('model', '')}, {entry.get('tier', '')})", "", entry.get("text", ""), ""]
+                out += [f"### AI ({md_inert(_line(entry.get('model', '')))}, {entry.get('tier', '')})", "",
+                        md_inert(entry.get("text", "")), ""]
                 if entry.get("citations"):     # Anthropic's search: the sources go with the text
-                    out += ["Sources: " + " · ".join(f"[{c.get('title') or c['url']}]({c['url']})" for c in entry["citations"]), ""]
+                    out += ["Sources: " + " · ".join(_md_link(c.get("title"), c.get("url")) for c in entry["citations"]), ""]
                 for q in entry.get("questions", []):
-                    opts = f" ({' / '.join(q['options'])})" if q.get("options") else ""
-                    out += [f"> **Question:** {q['question']}{opts}", ""]
+                    opts = f" ({' / '.join(md_inert(_line(o)) for o in q['options'])})" if q.get("options") else ""
+                    out += [f"> **Question:** {md_inert(_line(q['question']))}{opts}", ""]
                 if entry.get("proposals"):
                     out += ["Proposed: " + ", ".join(f"#{n}" for n in entry["proposals"]), ""]
             elif kind == "note":
-                out += [f"_{entry.get('text', '')}_", ""]
+                out += [f"_{md_inert(_line(entry.get('text', '')))}_", ""]
         if hypotheses:
             out += ["## Hypotheses", ""]
             for hyp in hypotheses:
                 mark = f" ({hyp['tech_mark']} by technician)" if hyp.get("tech_mark") else ""
-                out.append(f"- **{hyp.get('id')}** {hyp.get('text')} — {hyp.get('confidence', 0):.2f}, {hyp.get('status')}{mark}")
+                out.append(f"- **{hyp.get('id')}** {md_inert(_line(hyp.get('text')))} — {hyp.get('confidence', 0):.2f}, "
+                           f"{hyp.get('status')}{mark}")
             out.append("")
         out += ["## Command queue", "", "| # | Session | Command | Risk | Status | Rollback | Note |", "|---|---|---|---|---|---|---|"]
         for q in queue:
-            out.append(f"| {q['num']} | {q['session_id']} | {inline_code(_cell(q['command']))} | {q['risk']} | {q['status']} "
-                       f"| {_cell(q.get('rollback'))} | {_cell(q.get('note'))} |")
+            out.append(f"| {q['num']} | {_cell(md_inert(str(q['session_id'])))} | {inline_code(_cell(q['command']))} | {q['risk']} "
+                       f"| {q['status']} | {_code_cell(q.get('rollback'))} | {_code_cell(q.get('note'))} |")
         path = self.dir / "transcript.md"
         path.write_bytes(utf8("\n".join(out) + "\n"))
         return path
@@ -633,6 +648,133 @@ def inline_code(text: str) -> str:
 def _cell(text: str) -> str:
     """Text for a Markdown table cell: a | or a line break would end the cell or the row."""
     return str(text or "").replace("|", "\\|").replace("\n", " ")
+
+
+def _code_cell(text) -> str:
+    """A table cell of text a model wrote (an item's rollback, the reason it gave for a
+    withdrawal) or a technician typed: shown as code, so no link or image in it is one."""
+    return inline_code(_cell(text)) if str(text or "").strip() else ""
+
+
+def _line(text) -> str:
+    """`text` on one line."""
+    return " ".join(str(text or "").split())
+
+
+_FENCE = re.compile(r"( {0,3})(`{3,}|~{3,})(.*)$")
+_TICKS = re.compile(r"`+")
+_TICKS_OR_TILDES = re.compile(r"`{3,}|~{3,}")
+_FENCE_NAMES = re.compile(r"[ \t]*[\w+#.-]*[ \t]*", re.ASCII)     # after an opening fence: nothing, or a language
+# What md_inert makes inert in text: an image's "![", escaped, and the "<" that begins an HTML
+# tag, a comment or an autolink, written as &lt; (a backslash before it is not enough for a
+# viewer of the older Markdown kind, which takes "\<img" for a tag all the same). Any other
+# backslash and the character after it are stepped over: escaped already.
+_MD_FETCHES = re.compile(r"\\?<(?=[A-Za-z/!?])|\\.|!\[")
+
+
+def _escaped(m: re.Match) -> str:
+    found = m.group()
+    return "!\\[" if found == "![" else "&lt;" if found.endswith("<") else found
+
+
+def _inert_line(line: str) -> str:
+    """One line of Markdown text with its images and HTML made inert, outside its code spans. The
+    spans are found as CommonMark finds them (a run of backticks, to the next run of the same
+    length), and a run with no partner on its own line is escaped: left as it was, it would
+    pair with a run on a later line of the paragraph, and what this line took for code there
+    would not be code. A span with a "|" in it is not taken for code, nor is one after it up to
+    the next "|": were the line a table row, the "|" would end the cell and the span with it,
+    and the backticks left over would pair differently."""
+    pieces, i, start = [], 0, 0          # (text, is it code)
+    while i < len(line):
+        if line[i] == "\\":
+            i += 2
+        elif line[i] == "`":
+            run = _TICKS.match(line, i).group()
+            close = next((m for m in _TICKS.finditer(line, i + len(run)) if len(m.group()) == len(run)), None)
+            pieces.append((line[start:i], False))
+            if close:
+                pieces.append((line[i:close.end()], True))
+                i = close.end()
+            else:
+                pieces.append(("\\`" * len(run), False))
+                i += len(run)
+            start = i
+        else:
+            i += 1
+    pieces.append((line[start:], False))
+    out, unsure = [], False
+    for text, code in pieces:
+        if code and "|" in text:
+            unsure = True
+        elif not code and "|" in text:
+            out.append(_MD_FETCHES.sub(_escaped, text))
+            unsure = False
+            continue
+        out.append(text if code and not unsure else _MD_FETCHES.sub(_escaped, text))
+    return "".join(out)
+
+
+def md_inert(text) -> str:
+    """Markdown from a model or the web, written so that a viewer fetches nothing for it: an
+    image ("![alt](https://…)", or by reference) and raw HTML (<img src=…>) are shown as the
+    text they are: the "![" is escaped and the "<" written as &lt;. Emphasis, lists, links and
+    code stay Markdown, and what is in a fenced block or a code span is left as it is: nothing
+    in code is fetched. What counts as code is decided as CommonMark and GitHub's tables decide
+    it, and where two readings are possible it is not code: a backslash or an &lt; too many in
+    code shown, never an image fetched. So that there is one reading of where each fenced block ends, whether
+    it stands in a list item or not, a fence is closed before a line indented less than it
+    (which would end the item, and the block with it), a closing fence indented further than
+    it is moved back under it, and one still open at the end of the text is closed there: a
+    fence left open in one message would turn the next message's fence inside out. And a
+    fence opens only on a line that every viewer takes for one, the fence and at most a
+    language's name: with more after it (a "|", say) it is a table's header row to one viewer
+    and a fence to the next, so its fence is escaped and it opens none."""
+    out, fence_open, indent = [], "", 0
+    for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        rest = line.lstrip(" \t")
+        lead = len(line[:len(line) - len(rest)].expandtabs(4))
+        if fence_open and rest and lead < indent:
+            out.append(" " * indent + fence_open)
+            fence_open = ""
+        if fence_open:
+            run = _TICKS_OR_TILDES.fullmatch(rest.rstrip(" \t"))
+            if run and rest[0] == fence_open[0] and len(run.group()) >= len(fence_open) and lead <= indent + 3:
+                out.append(" " * indent + run.group())
+                fence_open = ""
+            else:
+                out.append(line)
+            continue
+        m = _FENCE.match(line)
+        if m and _FENCE_NAMES.fullmatch(m.group(3)):
+            fence_open, indent = m.group(2), len(m.group(1))
+            out.append(line)
+            continue
+        if m:
+            line = m.group(1) + "".join("\\" + c for c in m.group(2)) + m.group(3)
+        out.append(_inert_line(line))
+    if fence_open:
+        out.append(" " * indent + fence_open)
+    return "\n".join(out)
+
+
+def _md_words(text) -> str:
+    """Text from elsewhere (a page's title) as plain words on one line: every character
+    Markdown reads as markup is escaped, so a "](" in it can't end the link it is the text of,
+    and what HTML reads as markup is written as entities."""
+    words = _line(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return re.sub(r"([\\`*_\[\](){}#!|~])", r"\\\1", words)
+
+
+def _md_link(title, url) -> str:
+    """A source as a Markdown link: the title as plain words, the address with every character
+    that could end the link's target, or isn't a URL's, percent-encoded. An address that isn't
+    http(s) is shown as code, not linked."""
+    url = _line(url)
+    if not re.match(r"https?://", url, re.I):
+        return f"{_md_words(title)} {inline_code(url)}".strip() if url else _md_words(title)
+    target = re.sub(r"[^!#$%&'*+,\-./0-9:;=?@A-Z_a-z~\[\]]", lambda m: "".join(f"%{b:02X}" for b in utf8(m.group())), url)
+    return f"[{_md_words(title) or _md_words(url)}]({target})"
 
 
 def fence(text: str, lang: str = "") -> str:

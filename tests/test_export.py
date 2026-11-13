@@ -146,5 +146,5 @@ def test_markdown_keeps_backticks_in_commands_and_pipes_in_notes(tmp_path):
     md = case.export_markdown(chat, queue).read_text(encoding="utf-8")
     assert '``Get-PhysicalDisk \\| ForEach-Object { "$($_.FriendlyName)`n" }``' in md       # one code span, whole
     row = next(line for line in md.splitlines() if line.startswith("| 1 |"))
-    assert row.endswith("| not on prod \\| ask Bob first |") and row.count(" | ") == 6
+    assert row.endswith("| `not on prod \\| ask Bob first` |") and row.count(" | ") == 6   # the note as code
     assert '``Get-PhysicalDisk | ForEach-Object { "$($_.FriendlyName)`n" }``' in md            # the result line
