@@ -33,12 +33,13 @@ def replay_case(case_dir: Path) -> dict:
             kinds[e.get("id", "")] = e.get("kind", "local")
         elif ev == "proposal":
             out["proposals"] += 1
-            # classified as the queue does it (a cut session makes it disruptive, a rehearsal is
-            # read-only), so only a change of the rules shows, not how the label came about
+            # classified as the queue does it (a cut session makes it disruptive, a rehearsal of new
+            # reader text is read-only), so only a change of the rules shows, not how the label came about
             command, sid = str(e.get("command", "")), str(e.get("session_id", ""))
             p = Proposal(num=e.get("num") or 0, call_id="", session_id=sid, command=command, purpose="",
                          model_risk=str(e.get("model_risk", "modifying")), risk="modifying",
-                         original_command=command, dry_run_of=e.get("dry_run_of"))
+                         original_command=command, dry_run_of=e.get("dry_run_of"),
+                         rehearsal_reads=bool(e.get("rehearsal_reads")))
             Queue._classify(p, {sid: kinds.get(sid, "local")})
             level, reasons = p.risk, p.risk_reasons
             if level != e.get("risk"):

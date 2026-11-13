@@ -35,6 +35,7 @@ class Proposal:
     watch: bool = False                  # command was wrapped in a bounded watch loop
     cuts_session: str = ""               # local rule: this would cut the session it runs in
     dry_run_of: int | None = None        # this item rehearses another item
+    rehearsal_reads: bool = False        # ...and is new text that only reads (safety/dryrun.py's `reader`)
     sensitive: list[str] = field(default_factory=list)  # local rules: may expose secrets or private data
     review: dict = field(default_factory=dict)          # second opinion on this exact command (see Engine)
     hidden: list[str] = field(default_factory=list)     # invisible characters taken out of the command
@@ -72,13 +73,15 @@ class Queue:
         (the only open session, when there is exactly one). `session_kinds` (id -> kind) lets
         the blast-radius rule see which session a command would cut. `dry_run_of` marks the
         items as rehearsals of that item; it is never read from `raw_items`, which may come
-        from the model, because a rehearsal is classed read-only."""
+        from the model. A rehearsal is rated like any command; only one that is the reader
+        safety/dryrun.py itself offers for that item is taken as read-only at its word."""
         # The whole call is read before any of it is queued: an item that can't be read (not an
         # object, a command that isn't text) raises here, with nothing added. Until Nov 2026 the
         # items before it were queued already and the error then hid them from the chat and the
         # log, and the AI, told its call was invalid, sent them again.
         if insert_before is not None:
             self.get(insert_before)
+        offer = dry_run(self.get(dry_run_of).command) if dry_run_of is not None else None
         built, num = [], self._next
         for i, raw in enumerate(raw_items, 1):
             if not isinstance(raw, dict):
@@ -107,6 +110,7 @@ class Queue:
                 recipe=_text(raw, "recipe", i),
                 recipe_key=_text(raw, "recipe_key", i),
                 dry_run_of=dry_run_of,
+                rehearsal_reads=bool(offer and offer.reader and offer[0].strip() == command),
                 hidden=removed,
             )
             self._classify(p, session_kinds)
@@ -123,10 +127,13 @@ class Queue:
     @staticmethod
     def _classify(p: Proposal, session_kinds: dict[str, str] | None) -> None:
         p.risk, p.risk_reasons = risk.effective(p.model_risk, p.command)
-        if p.dry_run_of is not None and p.risk != "disruptive" and p.command == p.original_command:
-            # a rehearsal (apt -s, rsync -n, -WhatIf, plan) trips the same local rules as the
-            # real command; it is read-only by construction (safety/dryrun.py), but never below
-            # disruptive, and only as made: an edited one is judged like any other command
+        if p.dry_run_of is not None and p.rehearsal_reads and p.risk != "disruptive" and p.command == p.original_command:
+            # A rehearsal is rated by the rules above like any command: `Remove-Item -WhatIf` stays
+            # modifying, `kubectl delete --dry-run=server` disruptive, and `apt -s` or `ls -ld` come
+            # out read-only because the allow-list confirms them. Until Nov 2026 every rehearsal was
+            # forced to read-only, and some ran the real command. The one kind still taken at its
+            # word is new text that only reads (`crontab -l`, `sc.exe queryex`), which the rules
+            # confirm anyway: never below disruptive, and only as made, not once it is edited.
             p.risk, p.risk_reasons = "read_only", []
         p.sensitive = sensitive(p.command)
         p.review = {}                    # a review was of the old command or target

@@ -48,7 +48,7 @@ def test_session_impact_not_flagged(cmd, kind):
 def test_dry_run_forms():
     assert dry_run("sudo rsync -av /a/ /b/")[0].startswith("sudo rsync -n -v")
     assert dry_run("sudo apt install htop")[0] == "sudo apt install -s htop"
-    assert dry_run("Remove-Item C:\\x -Recurse")[0].endswith("-WhatIf")
+    assert dry_run("Remove-Item C:\\x -Recurse")[0] == "Remove-Item -WhatIf C:\\x -Recurse"     # straight after the cmdlet
     assert dry_run("terraform apply")[0] == "terraform plan"
     assert dry_run("rm -rf /tmp/x")[0] == "ls -ld /tmp/x"
     assert dry_run("df -h") is None
@@ -69,13 +69,15 @@ def test_dry_run_forms():
     "del foo; Remove-Item x", "Set-Content a b | Remove-Item", "rsync -a src/ dst/ > /tmp/log",
     "cp a b\nrm -rf /srv", "rm -rf $(cat list)"])
 def test_a_chained_line_gets_no_rehearsal_that_would_run_the_rest(command):
-    """A rehearsal is labelled read-only, but one that keeps the line's text rehearses only its
+    """A rehearsal must change nothing, but one that keeps the line's text rehearses only its
     first command: `ls -ld a b; mv c d` still moved c."""
     assert dry_run(command) is None
 
 
 def test_rehearsals_that_keep_none_of_a_chained_line_are_still_offered():
-    assert dry_run("net stop Spooler && net start Spooler")[0] == "sc queryex Spooler && sc enumdepend Spooler"
+    # sc.exe by its full name and one command a line: `sc` is Set-Content to Windows PowerShell 5.1, which has no &&
+    assert dry_run("net stop Spooler && net start Spooler")[0] == "sc.exe queryex Spooler\nsc.exe enumdepend Spooler"
+    assert dry_run('net.exe stop "Print Spooler"')[0] == 'sc.exe queryex "Print Spooler"\nsc.exe enumdepend "Print Spooler"'
     assert dry_run("systemctl restart nginx && systemctl status nginx")[0] == (
         "systemctl list-dependencies --reverse nginx --no-pager")
     assert dry_run("crontab -r && echo gone")[0] == "crontab -l"
@@ -90,6 +92,95 @@ def test_a_rehearsal_flag_goes_where_it_cannot_be_passed_on():
     assert dry_run("kubectl create job x --image=busybox -- sh -c 'echo hi'")[0] == (
         "kubectl create --dry-run=server job x --image=busybox -- sh -c 'echo hi'")
     assert dry_run("ansible-playbook site.yml")[0] == "ansible-playbook --check --diff site.yml"
+
+
+@pytest.mark.parametrize("command", [
+    # -WhatIf on the end would fall into the comment, and the real command run
+    "Remove-Item C:\\Temp\\old.log  # remove the stale log", "Remove-Item C:\\Temp\\old.log <# stale #>", "Set-Content C:\\x.txt 'a' # note",
+    # what is in parentheses, a subexpression or a script block runs as written, whatever switch follows
+    "Set-Content log.txt -Value (New-Item C:\\x -ItemType Directory)", "Add-ADGroupMember Admins -Members (New-ADUser tmp -PassThru)",
+    "Remove-Item $(Stop-VM x -Passthru).Path", "Get-ChildItem | ForEach-Object { Remove-Item $_ }",
+    # an earlier stage that is no known reader runs for real
+    "spsv Spooler -PassThru | Set-Service -StartupType Disabled", "Dismount-VHD D:\\x.vhdx -Passthru | Remove-Item",
+    "Get-Content a.txt | Out-File b.txt | Remove-Item c.txt",
+    # not a cmdlet known to honour -WhatIf: a script, a program, a cmdlet of some module
+    "stop-all.sh", "start-all.sh", "update-grub", "add-shell /bin/zsh", "install-agent.sh --token abc", "start-stop-daemon --stop --name nginx",
+    "Install-Agent -Token abc", "Enable-WindowsOptionalFeature -Online -FeatureName x",
+    # the line goes on, or stops being parsed
+    "Remove-Item C:\\x `", "Remove-Item C:\\x --% ", "Remove-Item 'C:\\x' -Force; # done", "Remove-Item x > log.txt",
+    # text inside another command's argument is not a command to rewrite
+    'schtasks /create /tn fix /tr "reg add HKLM\\Software\\X /v a /d 1 /f" /sc onlogon', 'sc create fix binPath= "cmd /c reg add HKLM\\Software\\X /v a /d 1 /f"',
+    "echo 'Remove-Item C:\\x'", "Write-Output 'x' > Set-Thing.txt",
+    # find with another action left, pacman that would still sync or clean, sed that writes or runs from its script
+    "find /data -mtime +30 -exec cp {} /archive/ \\; -delete", "find /srv -name '*.tmp' -exec mv {} /backup \\; -delete",
+    "find /var/log -name '*.log' -exec gzip {} \\; -exec rm {} \\;", "find /srv -fprint /tmp/list -delete", "find /srv -fls /tmp/l -delete",
+    "sudo pacman -Syu", "sudo pacman -Sy", "sudo pacman -Sc --noconfirm", "pacman -Syyu --noconfirm",
+    "sed -i -n '/error/w errors.txt' app.log", "sed -i 's/a/b/w /etc/other' f", "sed -i '1e touch /tmp/pwn' f",
+    # a request sent raw takes no dry run; a setting on the line can undo apt's -s
+    "kubectl delete --raw /api/v1/namespaces/prod/pods/x", "kubectl create --raw /api/v1/namespaces/prod/pods -f pod.json",
+    "apt-get -o APT::Get::Simulate=false install x", "terraform apply -out=plan",
+])
+def test_no_rehearsal_is_offered_where_it_could_run_the_real_thing(command):
+    assert dry_run(command) is None
+
+
+def test_whatif_goes_straight_after_the_cmdlet_and_only_readers_may_feed_it():
+    assert dry_run("Stop-Service Spooler -Force")[0] == "Stop-Service -WhatIf Spooler -Force"
+    assert dry_run("Get-ChildItem *.tmp | Remove-Item")[0] == "Get-ChildItem *.tmp | Remove-Item -WhatIf"
+    assert dry_run("Get-ADUser -Filter * | Where-Object Enabled -eq $false | Remove-ADUser")[0].endswith("| Remove-ADUser -WhatIf")
+    assert dry_run("New-Item x.txt -Value 'a # b'")[0] == "New-Item -WhatIf x.txt -Value 'a # b'"        # a # in quotes is no comment
+    assert dry_run("Remove-Item 'C:\\Program Files\\x' -Recurse")[0] == "Remove-Item -WhatIf 'C:\\Program Files\\x' -Recurse"
+    assert dry_run("Remove-Item x -whatif") is None and dry_run("Remove-Item x -WhatIf:$false") is None
+
+
+def test_a_rehearsal_is_rated_like_any_command():
+    """Until Nov 2026 a rehearsal was read-only for being one. Now the rules rate it: what they confirm as a
+    reader is read-only, a command that keeps its verb and adds a flag keeps its rating."""
+    from datoolkit.queue import Queue
+    q = Queue()
+
+    def rehearse(command, model_risk="modifying"):
+        (p,) = q.add("c", [{"session_id": "s", "command": command, "risk": model_risk}])
+        cmd, _ = q.rehearsal(p)
+        (r,) = q.add("dryrun", [{"session_id": "s", "command": cmd, "risk": "read_only"}], insert_before=p.num, dry_run_of=p.num)
+        return r
+
+    assert rehearse("Remove-Item C:\\x -Recurse").risk == "disruptive"            # Remove-Item -WhatIf ... -Recurse
+    assert rehearse("Set-Content C:\\x.txt 'a'").risk == "modifying"
+    assert rehearse("Restart-Service Spooler").risk == "disruptive"
+    assert rehearse("kubectl delete pod x").risk == "disruptive"
+    assert rehearse("pip install ./mypkg").risk == "modifying" and rehearse("ansible-playbook site.yml").risk == "modifying"
+    assert rehearse("dnf install -y foo").command == "dnf install --assumeno foo" and rehearse("yum remove foo").risk == "modifying"
+    # the ones the rules confirm as readers
+    for command in ("sudo apt install htop", "rsync -a --delete src/ host:dst/", "git clean -fdx", "rm -rf /srv/x", "cp -r a b",
+                    "sed -i 's/a/b/' /etc/x.conf", "find /tmp -name '*.tmp' -delete", "reg delete HKLM\\Software\\X /f", "terraform apply -auto-approve",
+                    "pacman -S firefox", "umount /mnt/nas"):
+        r = rehearse(command)
+        assert (r.risk, r.risk_reasons, r.rehearsal_reads) == ("read_only", [], False), (command, r.command, r.risk_reasons)
+    # and the ones made of new text that only reads, marked as such by safety/dryrun.py
+    for command, text in (("crontab -r", "crontab -l"), ("net stop Spooler", "sc.exe queryex Spooler\nsc.exe enumdepend Spooler"),
+                          ("sudo systemctl restart nginx", "systemctl list-dependencies --reverse nginx --no-pager"),
+                          ("docker rm -f web", "docker ps -a --filter name=web"), ("sudo ufw disable", "sudo ufw status verbose"),
+                          ("git reset --hard", "git status --short && git log --oneline -5"), ("write memory", "show archive config differences")):
+        r = rehearse(command)
+        assert (r.command, r.risk, r.rehearsal_reads) == (text, "read_only", True), (command, r.command, r.risk)
+    # a rehearsal that someone else's item claims to be is not taken at its word
+    (other,) = q.add("c", [{"session_id": "s", "command": "crontab -r", "risk": "modifying"}])
+    (fake,) = q.add("dryrun", [{"session_id": "s", "command": "frobnicate --all", "risk": "read_only"}], dry_run_of=other.num)
+    assert fake.risk == "modifying" and not fake.rehearsal_reads
+
+
+def test_rehearsals_that_look_before_a_change_do_what_they_say():
+    # the crontab that would be removed: the same user's, read as the same user
+    assert dry_run("crontab -r -u bob")[0] == "crontab -l -u bob" and dry_run("sudo crontab -u bob -r")[0] == "sudo crontab -l -u bob"
+    assert dry_run("sudo crontab -r")[0] == "sudo crontab -l" and dry_run("crontab -ri")[0] == "crontab -l"
+    # the firewall saved as root when the change is made as root, to a file of a new name; saving it is a change
+    saved = dry_run("sudo iptables -F")
+    assert saved[0].startswith("f=$(mktemp /tmp/iptables.XXXXXX) && sudo iptables-save > \"$f\"") and "sudo iptables -S" in saved[0]
+    assert not saved.reader and "/tmp/iptables.before" not in saved[0]
+    assert "sudo nft list ruleset > \"$f\"" in dry_run("sudo nft flush ruleset")[0] and "sudo" not in dry_run("nft flush ruleset")[0]
+    from datoolkit.safety.risk import effective
+    assert effective("read_only", saved[0])[0] == "modifying"
 
 
 def test_an_edited_rehearsal_is_judged_like_any_command():
