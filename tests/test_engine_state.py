@@ -1,5 +1,5 @@
-"""The engine's own state: how much of a transcript a capture reads, and how often a snapshot
-reads the pin store."""
+"""The engine's own state: a reply left at "checking", how much of a transcript a capture reads,
+and how often a snapshot reads the pin store."""
 
 from datoolkit.config import Host
 
@@ -9,6 +9,22 @@ from test_engine import env  # noqa: F401
 def _queue_one(engine, command="systemctl restart nginx"):
     engine.new_case("queue", "open")
     return engine.queue.add("c1", [{"session_id": "local", "command": command, "risk": "disruptive"}])[0]
+
+
+# ---------------------------------------------------------------- a reply left at "checking"
+
+async def test_a_reply_left_checking_when_the_app_closed_is_unchecked_on_open(env):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("tee", "open")
+    case = engine.case
+    engine.chat += [{"kind": "user", "text": "hello"},
+                    {"kind": "assistant", "text": "hi", "model": "TEE/glm-5.3", "tee_signature": "checking"},
+                    {"kind": "assistant", "text": "again", "model": "TEE/glm-5.3", "tee_signature": "verified"}]
+    engine._persist()
+    engine.new_case("other", "open")                     # as after a restart: no check of it is running
+    engine.open_case(case.id)
+    assert [e.get("tee_signature") for e in engine.chat[:3]] == [None, "unchecked", "verified"]
+    assert case.load_state()["chat"][1]["tee_signature"] == "unchecked"          # and saved so
 
 
 # ---------------------------------------------------------------- capture

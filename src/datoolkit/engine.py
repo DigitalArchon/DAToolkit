@@ -2090,6 +2090,13 @@ class Engine:
                 self.case.take_lock_from(case)       # still the open case, as it was
             case.unlock()
             raise UserError(f"Could not open case {case_id}: {e}") from e
+        if not any(self._tee_checking.values()):
+            # A TEE reply whose check never ended (the app was closed first) is saved as
+            # "checking", and nothing will ever finish it: it wasn't checked, and says so. Not
+            # while a check is running here: it may be this very reply's, of a case left a moment ago.
+            for entry in chat:
+                if isinstance(entry, dict) and entry.get("tee_signature") == "checking":
+                    entry["tee_signature"] = "unchecked"
         self.compact_cancel()        # a summary of the old case's conversation is no use now
         self._switch_case(case)
         self.conv, self.chat, self.queue = conv, chat, queue
