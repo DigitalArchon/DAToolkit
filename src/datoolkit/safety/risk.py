@@ -922,6 +922,7 @@ _STD_DIR = re.compile(r"(?:/usr(?:/local)?)?/s?bin/(?=[^/]+$)|(?:[A-Za-z]:\\Wind
 _CMDLET = re.compile(r"[A-Za-z]+-[A-Za-z][A-Za-z0-9]*")
 # cmd.exe doesn't know single quotes: `echo 'a & del /q x'` deletes there. A quoted text is given up
 # on when what follows an & or a | in it is, read as a command with arguments, one the deny-list rates.
+_PROGRAM_PATH = re.compile(r"[\\/%]|\.(?:exe|bat|cmd|com|ps1|vbs|msi)$", _I)
 _CMD_SPLIT = re.compile(r"[&|]\s*(?=[A-Za-z\\.%\"][^\s&|]*\s+\S)")
 
 
@@ -1292,8 +1293,12 @@ class _Check:
                     raise _No
                 self.device = True
                 return "device"
-            if before == "device" and all(x.plain for x in words) and (low in _DEVICE_FILTERS or (not args and _deny(name)[0] == "read_only")):
-                return "device"                  # `| include up`, or one more alternative of the pattern before it
+            if before == "device" and all(x.plain for x in words) and (
+                    (low in _DEVICE_FILTERS and (low != "compare" or re.fullmatch(r"|rollback \d+", " ".join(a))))
+                    or (not args and _deny(name)[0] == "read_only" and (low in _DEVICE_WORDS or _DEVICE_NAME.fullmatch(name)))):
+                # `| include up`; or one more alternative of the pattern before it (`| include up|down|Gi1/0/2`), which a
+                # POSIX shell would run as a command: only a word a device prints, or one shaped like a port or an address
+                return "device"
             if low in _ROUTEROS_MENUS and args:
                 return self.routeros(words)
             raise _No
@@ -1346,8 +1351,9 @@ def _read_as(text: str, bs: bool) -> tuple[bool | None, bool]:
                 pieces += 1
                 if pieces > 20:
                     raise _No                    # too many to rate each: not confirmed
-                if _deny(re.split(r"[&|]", q[m.end():], maxsplit=1)[0].replace(";", " "))[0] != "read_only":
-                    raise _No
+                piece = re.split(r"[&|]", q[m.end():], maxsplit=1)[0].replace(";", " ")
+                if _deny(piece)[0] != "read_only" or _PROGRAM_PATH.search(piece.split()[0]):
+                    raise _No                    # rated by the deny-list, or a program named by its path or its extension
         return True, lx.ambiguous
     except _Open:
         return None, lx.ambiguous
@@ -2776,8 +2782,15 @@ def _cmdlet(chk: "_Check", name: str, args: list, inblock: bool) -> bool:
 # Network devices: commands that display. `sh` is also a shell, so its first word must be one a
 # switch or a router completes to a `show` command.
 _DEVICE = {"show", "sh", "sho", "display", "dis", "get", "diagnose", "diag", "execute", "terminal", "term"}
-_DEVICE_FILTERS = {"include", "exclude", "begin", "section", "count", "match", "except", "find", "last", "display", "no-more", "nomore", "trim", "json",
-                   "i", "inc", "incl", "e", "exc", "b", "beg", "s", "sec", "sect", "compare", "tail", "head", "sort", "uniq", "wc", "grep", "egrep"}
+_DEVICE_FILTERS = {"include", "exclude", "begin", "section", "count", "match", "except", "no-more", "nomore", "trim", "json", "i", "incl", "e", "exc",
+                   "b", "beg", "s", "sec", "sect", "compare"}
+# words a device prints, which stand as alternatives in a filter's pattern (`| include up|down`), and the shape of a
+# port's or a VLAN's name or an address there (Gi1/0/2, Vlan10, 10.0.0.1): none is a program a POSIX shell would find
+_DEVICE_WORDS = set("""up down connected notconnect notconnected disabled err-disabled errdisabled administratively trunk access active inactive full
+    half auto error errors drops crc input output protocol vlan interface description hostname version uptime permit deny established idle
+    static native suspended routed unassigned assigned manual dhcp fail failed failure warning critical collisions runts giants duplex speed
+    flap flapping blocked forwarding listening learning designated alternate""".split())
+_DEVICE_NAME = re.compile(r"(?=[^/]*[A-Z0-9])[A-Za-z0-9][\w.:-]*(?:/[\w.:-]+)*")
 _SH_WORDS = set("""run running-config start startup-config ver version ip ipv6 int interface interfaces vlan vlans mac arp cdp lldp log logging clock inv
     inventory env environment proc processes mem memory flash boot users line spanning-tree span etherchannel port-channel access-lists access-list
     route bgp ospf eigrp crypto standby vrrp hsrp ntp snmp tech tech-support controllers power module switch stack license platform policy-map
