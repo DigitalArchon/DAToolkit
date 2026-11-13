@@ -8,6 +8,10 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # fallback. The bundled Python's own ssl module looks in /etc/ssl already. Where Debian and its
 # kin, Fedora and RHEL, openSUSE (/etc/ssl/ca-bundle.pem) and the rest keep it, in this order
 # (build-appimage.sh looks in the same places, for the builder's apt; DA Assistant's AppRun).
+# What is set here is for DA Toolkit itself, not for the technician's shells and the programs it
+# starts: DATOOLKIT_APPRUN_SET names the variables this script set, and the app takes them out of
+# what it hands on (hostenv.py).
+DATOOLKIT_APPRUN_SET=""
 if [ -z "${SSL_CERT_FILE:-}" ]; then
     for bundle in \
         /etc/ssl/certs/ca-certificates.crt \
@@ -17,11 +21,14 @@ if [ -z "${SSL_CERT_FILE:-}" ]; then
         /etc/ssl/cert.pem; do
         if [ -r "$bundle" ]; then
             export SSL_CERT_FILE="$bundle"
+            DATOOLKIT_APPRUN_SET="SSL_CERT_FILE"
             break
         fi
     done
 fi
 if [ -n "${SSL_CERT_FILE:-}" ] && [ -z "${REQUESTS_CA_BUNDLE:-}" ]; then
     export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+    DATOOLKIT_APPRUN_SET="${DATOOLKIT_APPRUN_SET:+$DATOOLKIT_APPRUN_SET }REQUESTS_CA_BUNDLE"
 fi
+export DATOOLKIT_APPRUN_SET
 exec "$HERE/usr/python/bin/python3" -I -m datoolkit "$@"
