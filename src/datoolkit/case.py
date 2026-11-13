@@ -548,24 +548,78 @@ def _read_meta(d: Path) -> dict | None:
 
 
 def _read_meta_raw(d: Path) -> dict | None:
-    """case.json; failing that (none, or damaged), the case_started event that began the audit log."""
+    """case.json; failing that (none, or damaged), what the audit log says the case is now
+    (_meta_from_log), which is written back as its case.json. A case.json that is there but
+    can't be read, beside a log that can't say either, is still a case: at the strictest
+    sensitivity, under its directory's name."""
+    damaged = False
     try:
         data = json.loads((d / "case.json").read_text(encoding="utf-8"))
         if isinstance(data, dict):
             return data
-    except (OSError, ValueError):
+        damaged = True
+    except FileNotFoundError:
         pass
+    except (OSError, ValueError):
+        damaged = True
+    meta = _meta_from_log(d)
+    if meta is None:
+        return {"name": d.name, "sensitivity": SENSITIVITIES[-1]} if damaged else None
+    meta["messages"] = _count_messages(d)
     try:
-        with (d / "events.jsonl").open(encoding="utf-8") as f:
-            first = json.loads(f.readline() or "{}")
+        fd = _lock_dir(d)
+    except CaseInUse:
+        return meta                 # open in another DA Toolkit, which writes its own case.json
+    try:
+        _write_json(d / "case.json", meta)
+    except OSError:
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return meta
+
+
+def _meta_from_log(d: Path) -> dict | None:
+    """What a case is, read from its whole audit log; None when the log doesn't begin with a
+    case_started event (not a case, or its log can't be read). The name, notes, client and
+    history flag are the latest any event set. The sensitivity is the highest any case_started
+    or case_edited event recorded, and the strictest there is when one of them names none that
+    is known or a line of the log can't be read: that line may have been the one that raised
+    it. Until Nov 2026 only the first event was read, so a case raised to Sovereign whose
+    case.json was lost came back as Open, and could be sent to any model."""
+    try:
+        with (d / "events.jsonl").open("rb") as f:
+            lines = [line for line in f if line.strip()]
+        first = json.loads(lines[0]) if lines else None
     except (OSError, ValueError):
         return None
     if not isinstance(first, dict) or first.get("event") != "case_started":
         return None
     started = datetime.fromtimestamp(first["ts"]).isoformat(timespec="seconds") if isinstance(first.get("ts"), (int, float)) else ""
-    return {"name": first.get("name", d.name), "sensitivity": first.get("sensitivity", "open"),
-            "notes": first.get("notes", ""), "started": started, "client": first.get("client", ""),
-            "history": bool(first.get("history", False))}
+    meta = {"name": d.name, "notes": "", "started": started, "client": "", "history": False}
+    strictest = len(SENSITIVITIES) - 1
+    level = 0
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            level = strictest
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("event") in ("case_started", "case_edited"):
+            for key in ("name", "notes", "client"):
+                if isinstance(rec.get(key), str):
+                    meta[key] = rec[key]
+            if "history" in rec:
+                meta["history"] = bool(rec["history"])
+            said = rec.get("sensitivity")
+            level = max(level, SENSITIVITIES.index(said) if said in SENSITIVITIES else strictest)
+        elif rec.get("event") == "client_changed" and isinstance(rec.get("client"), str):
+            meta["client"] = rec["client"]
+    meta["sensitivity"] = SENSITIVITIES[level]
+    return meta
 
 
 def inline_code(text: str) -> str:

@@ -112,6 +112,43 @@ def test_sensitivity_only_goes_up(tmp_path):
     assert Case.load(c.id, root=tmp_path).sensitivity == "confidential"
 
 
+def test_a_raised_case_whose_case_json_is_lost_comes_back_as_raised(tmp_path):
+    """case.json emptied (a crash) or deleted: the case is read from its audit log, at the highest
+    sensitivity any event recorded, not the one it was created with."""
+    c = Case.create("job", "open", "first notes", root=tmp_path)
+    c.edit("job at Acme", "second notes", "confidential", client="Acme", history=True)
+    c.edit("job at Acme", "second notes", "sovereign")
+    c.set_client("Acme Pty Ltd")
+    whole = json.loads((c.dir / "case.json").read_text())
+    (c.dir / "case.json").write_bytes(b"")
+    assert [(x["name"], x["sensitivity"]) for x in Case.list_all(root=tmp_path)] == [("job at Acme", "sovereign")]
+    again = Case.load(c.id, root=tmp_path)
+    assert (again.name, again.notes, again.sensitivity, again.client, again.history, again.started) == \
+        ("job at Acme", "second notes", "sovereign", "Acme Pty Ltd", True, c.started)
+    assert json.loads((c.dir / "case.json").read_text()) == whole          # and case.json is written again from it
+    (c.dir / "case.json").unlink()
+    assert Case.load(c.id, root=tmp_path).sensitivity == "sovereign"
+    assert json.loads((c.dir / "case.json").read_text()) == whole
+
+
+def test_a_log_that_cant_say_makes_the_case_the_strictest(tmp_path):
+    torn = Case.create("torn", "open", root=tmp_path)
+    with (torn.dir / "events.jsonl").open("ab") as f:
+        f.write(b'{"ts": 1, "event": "case_edited", "sensitivity": "sov\n')       # the line that may have raised it
+    (torn.dir / "case.json").unlink()
+    assert Case.load(torn.id, root=tmp_path).sensitivity == "sovereign"
+    odd = Case.create("odd", "open", root=tmp_path)
+    odd.log("case_edited", name="odd", sensitivity="top-secret")                # a level this version doesn't know
+    (odd.dir / "case.json").write_text("{")
+    assert Case.load(odd.id, root=tmp_path).sensitivity == "sovereign"
+    silent = Case.create("silent", "open", root=tmp_path)
+    (silent.dir / "case.json").write_text("{")
+    (silent.dir / "events.jsonl").unlink()                                      # neither file can say
+    found = Case.load(silent.id, root=tmp_path)
+    assert (found.name, found.sensitivity) == (silent.id, "sovereign")
+    assert (silent.dir / "case.json").read_text() == "{"                        # nothing made up is written back
+
+
 async def test_raising_the_open_case_drops_a_model_it_no_longer_allows(env):  # noqa: F811
     engine, _, events = env
     await engine.list_models("Fake")
