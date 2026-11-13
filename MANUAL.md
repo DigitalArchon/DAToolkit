@@ -26,12 +26,18 @@ DA Toolkit opens in its own window, which uses your system's WebKitGTK (see the
 display, it opens in your default web browser instead, with a banner saying why and what to
 install. To always use the browser, set **Settings → General → Open DA Toolkit in** (it applies
 from the next start); from a terminal, `datoolkit --browser` or `--window` overrides that for one
-run, and `--no-open` just prints the local URL. The browser is opened on a one-time code, not
+run, and `--no-open` runs it for the browser and just prints the local URL (with `--window` it is
+refused, saying which to leave out). `--port 48500` has the app listen on a port you choose
+instead of a free one picked at each start; it is on 127.0.0.1 either way. The browser is
+opened on a one-time code, not
 the app's token, since what a browser is opened with is on its command line for every user of
 the computer to read: the page exchanges the code once, within two minutes, for the token, and
 only a program of yours can. The address printed to open by hand carries the token after a
 `#`, which the browser never sends. In the browser, use **Quit** in the top bar to end
-DA Toolkit: closing the tab leaves it running. Nothing dropped on the app window replaces the
+DA Toolkit: closing the tab leaves it running. If the page loses its connection to DA Toolkit, a
+banner says so until it is back: what is shown may be out of date, and nothing can be run or
+sent meanwhile. A page left open from an earlier start says that its access token was refused:
+close it and open DA Toolkit again. Nothing dropped on the app window replaces the
 app: a file or a link dropped on it is refused (text dropped into a field still goes in). The
 app window's clipboard and Save dialog are
 the system's own; in the browser they're the browser's.
@@ -60,6 +66,28 @@ the system's own; in the browser they're the browser's.
 3. **+ Session** opens a local shell or a saved host (add hosts under **Settings → Hosts**).
 4. Describe the problem in the chat.
 
+**Two DA Toolkits at once.** DA Toolkit has one case open at a time, so with two tickets you may
+start it twice. That works, a case each, and the second says as it starts (in a banner, and on
+the terminal) that another is running with the same settings. Three things keep them from
+undoing each other's work:
+
+- **A case is open in one of them at a time.** Opening a case the other has open is refused
+  ("This case is open in another DA Toolkit; it would overwrite that one's conversation."), and
+  so are editing or deleting it, and renaming or deleting a client one of whose cases it has
+  open.
+- **Settings are saved by one of them.** Each read `config.toml` when it started, and a save
+  writes the whole file. Once one of them has saved anything (a provider, a host, a client, a
+  setting, the model chosen, even a pane dragged to another size), the other's copy is behind
+  the file, and a change to the settings made there is refused whole, the keyring untouched:
+  "Settings were changed by another DA Toolkit that is running. Close this one and start it
+  again to pick them up; nothing was saved here." The pane sizes and the model you choose in
+  the one that is behind still hold there until it is closed, without being saved (a notice
+  says so once for the model). A `config.toml` edited by hand while the app runs is treated
+  the same way: it is not overwritten.
+- **The guacd container is shared.** Where DA Toolkit runs guacd's container for RDP, both use
+  the one container, and it is removed when the last of them to use it closes its last RDP
+  session or quits.
+
 ## Workflow
 
 - **Layout.** Drag the bars between the chat, the terminals and the queue to resize them.
@@ -68,6 +96,10 @@ the system's own; in the browser they're the browser's.
   has written something since). **▾** on the queue header hides the queue list but keeps the
   header, with its counts and **Send results**. Attaching a photo or screenshot shows the
   chat again. Sizes and hidden panes are saved in the config and come back next launch.
+  At the app window's smallest size (900×600) the top bar wraps as a whole, a long case or
+  model name is cut with an ellipsis (hover the case's for all of it), and a browser window too
+  small for everything scrolls as a page, so no pane lies over another. Notices appear above the
+  queue, each with a **×** to dismiss it.
 - The chat is a conversation: the AI says what it makes of each result, what it wants to check
   next and why, and asks you what no command can tell it (when it started, what changed).
   Its questions come with quick-reply buttons that fill your reply; press Enter to send.
@@ -76,9 +108,12 @@ the system's own; in the browser they're the browser's.
   Each proposal also appears as a card in the AI's message, with Run / Skip… / Force skip,
   and hypothesis moves (▲ ▼ ✓ ✕) are shown inline.
 - The AI can change its mind: it withdraws pending commands it no longer wants (wrong syntax
-  for the shell, superseded) and reorders the rest. Withdrawn items leave the queue (tick
-  **show done** to see them) and **Restore** puts one back. The AI sees the queue, so it
-  knows what is still pending and what has run but not been sent.
+  for the shell, superseded) and reorders the rest. It can do that only to what it queued
+  itself, a recipe it queued included: the steps of a recipe you queued, a tool transfer and
+  its hash check, a rollback and a dry run stay where you put them, and the AI is told they are
+  yours. Withdrawn items leave the queue (tick **show done** to see them) and **Restore** puts
+  one back. The AI sees the queue, so it knows what is still pending and what has run but not
+  been sent.
 - If a model replies with commands but no message (thinking models sometimes go straight from
   reasoning to tool calls), DA Toolkit asks it once for the message, offering it no tools that
   time so it can only write.
@@ -86,8 +121,12 @@ the system's own; in the browser they're the browser's.
   "Let's get a baseline first") but it queued nothing, or asks you to run items that are no
   longer pending (skipped, withdrawn or already run), DA Toolkit asks it once to queue them or
   correct itself. A model that writes its tool call into the message as text (some smaller
-  and local models print `<tool_call>…` markup) has it read back as a real call; the markup is
-  taken out of the message and the commands go to the queue like any other.
+  and local models print `<tool_call>…` markup) has it read back as a real call when the markup
+  ends the message, on a line of its own and outside a code block: the commands go to the queue
+  like any other, and a note in the message says what was taken out ("[A tool call written here
+  as text was read as a call: propose_commands]"). Markup a model only quotes (in the middle of
+  a sentence, in backticks or a code block, from a log or a page it read) stays in the message
+  as text, and a Claude model's is never read as a call: Claude makes its calls as calls.
 - A queued command with a placeholder in it (`<NAS_IP>`, `PATH/TO/file`, `x.x.x.x`) is sent back
   to the AI with a request to withdraw it and queue the real command; check such items before
   running them.
@@ -96,9 +135,15 @@ the system's own; in the browser they're the browser's.
   release notes and exact syntax. By default each query appears in the AI's message for you to
   edit, approve or skip; "search without asking" applies to Open cases only, Confidential cases
   always ask, and Sovereign cases never search, because queries reach the search provider in
-  the clear. Secrets are blanked out of a query first; a query that names an e-mail, MAC or
-  private IP address, or this computer's own names, waits for you even when searching without
-  asking, and its card says what it names. Characters no one can see (a zero-width space inside
+  the clear. Secrets are blanked out of a query first. A query that says who or where a
+  computer is waits for you even when searching without asking, and its card says what it
+  names: an e-mail address, a MAC address (as Cisco and HP write one too), an IP address that
+  isn't a public one (IPv4 or IPv6), the server of a `\\server\share` path, this computer's own
+  names (your login and real name, the host name), the case's client, and the host, domain and
+  login of each open session to another machine. A name is found as it may be written: `dc01`
+  for `dc01.acme-corp.local`, `acme_ws01` or `acme ws01` for `ACME-WS01`, the user or the domain
+  of `ACME\jsmith`. Words too common to name anyone (`root`, `administrator`, `firewall`,
+  `server`) are not looked for. Characters no one can see (a zero-width space inside
   a key or an address) are taken out before either check, and what was checked is what is sent.
   Searches are billed to the NanoGPT key; each search card shows its cost.
   Providers differ a lot. Measured over three queries (September 2026), Perplexity found the
@@ -114,8 +159,9 @@ the system's own; in the browser they're the browser's.
 - **Anthropic's own search** (Settings → General → Searches for the chat model): when the chat
   model is a Claude model on an Anthropic provider, Claude can search with Anthropic's web
   search instead. It runs inside Claude's request, on Anthropic's side, so **no query can be
-  shown to you first**: Claude searches as it works, up to 4 searches a request, billed by
-  Anthropic. It is used only for Open cases; Confidential cases use the gated NanoGPT search
+  shown to you first**: Claude searches as it works, up to 4 searches a turn (as the gated
+  search allows), billed by Anthropic. It is used only for Open cases; Confidential cases use
+  the gated NanoGPT search
   (or none, without NanoGPT), and Sovereign cases never search. Its searches still show on the
   AI's message ("Anthropic (unasked)"), with their results, and the sources Claude cites are
   listed under its reply (and in the exported transcript). The top bar shows **🔎 Anthropic
@@ -145,9 +191,11 @@ the system's own; in the browser they're the browser's.
   - It is gated like web search: by default you approve (and can edit) the brief first; in
     "search without asking" mode on an Open case it runs straight away; Confidential cases
     always ask; Sovereign cases never research. The agent sees only the brief, never the case,
-    so edit out anything that identifies the client. A brief (or a page's address) that names an
-    e-mail, MAC or private IP address waits for you in every mode, and the agent's own searches
-    that name one are refused.
+    so edit out anything that identifies the client. A brief (or a page's address) that names
+    what a search is held for (an address, this computer's names, the case's client, a
+    session's host or login: see Web search above) waits for you in every mode. The agent's
+    own searches, which nobody is asked about, are refused when they name one, except what the
+    brief you approved names itself.
   - It can only fetch URLs that appeared in its search results or as links on pages it read,
     so a hostile page can't send it to a URL of its own making (a URL can carry data out).
     Budget per task: 6 searches, 12 pages, 10 minutes; at most 2 tasks per AI turn.
@@ -160,13 +208,27 @@ the system's own; in the browser they're the browser's.
     at an AI, those passages are cut out (the AI is told how many), and the rest is returned
     in full (up to 40,000 characters). A URL that didn't come from a search result, a report or
     your own message is always asked about, even in "without asking" mode.
-  - Reports are kept on this machine for 30 days. The same question about the same product
-    version in a later case reuses the report (the card says "reused") instead of researching
-    again; the AI can ask for a fresh one if it doesn't answer the question.
+  - Reports are kept on this machine for 30 days, each with the client and the sensitivity of
+    the case it was written for. The same question about the same product version in a later
+    case reuses the report (the card says "reused") instead of researching again; the AI can
+    ask for a fresh one if it doesn't answer the question. A brief is written from a case, so
+    a report is reused only within one client (or between cases that have none), and only by a
+    case at least as sensitive as the one it came from. Where briefs wait for your approval,
+    the kept report is looked up after you have approved.
 - **Retry.** When a request fails or you stop it, the status line (and the error note in the
   chat) offers **Retry with ‹model›**: the last message is sent again, once, with whichever
   model is selected now. So when a model is overloaded, pick another and retry; nothing needs
   retyping or re-attaching.
+- **A reply that didn't arrive whole.** When the connection closes before the provider has said
+  the reply is complete (a proxy's time limit, a server that crashed), the turn ends as an
+  error with Retry: what arrived stays on screen, and no command or other call in it is taken.
+  A reply the provider ended early itself gets a note under it, "The reply was cut off at the
+  output limit." or "… by the provider's content filter.": the calls that were written whole
+  are carried out, and the one being written when it stopped is not. A turn that ends with
+  nothing to show (an empty reply, or one cut off before any of it came) says so and offers
+  Retry. One turn has six rounds (each search, and each time DA Toolkit asks the model again,
+  takes one); a turn that uses them all says that it stopped there, and your next message lets
+  it carry on.
 - The line above the chat box always says whose turn it is: *AI is responding* (with the
   phase, e.g. "Preparing commands", and a note if no text has arrived for a few seconds) or
   *✓ AI finished. Your turn*, with what is waiting for you.
@@ -199,6 +261,18 @@ the system's own; in the browser they're the browser's.
   characters, and look-alike spaces (made plain spaces). Line breaks and tabs stay. The item
   then says what was removed, and the AI is told. From the AI, that is a sign of prompt
   injection.
+- **The command box shows all of its command, and Run types that command.** The box grows
+  with its text up to 400 px (less in a low window) and scrolls past that, with a scroll bar
+  that is always drawn. A command of several lines says how many under the box, and one too long for
+  the box says so there ("62 lines, 5.2 MB: scroll the box to read all of it"); the command
+  on a card in the chat follows the same rule. **Run**, **Insert**, Ctrl+Shift+Enter and **Run
+  group** first save what is in the box and then type the command as the server holds it: if
+  the item is no longer the one you were shown (it was edited in another window), nothing is
+  typed and it is pending again. An emptied box runs nothing: Run and Insert refuse it and say
+  to skip the item instead, and Escape in the box brings the saved command back. Rows move
+  while the AI works (it withdraws and reorders items, a reviewer's verdict makes a row
+  taller), so a click that lands on a row which moved there less than half a second ago does
+  nothing, and the row flashes.
 - **Skip…** takes an optional note that is passed to the AI (e.g. "not allowed on prod").
   **Force skip** skips in one click; the AI is told you chose not to run it, with no reason.
 - **Send results** collects each command's output from the terminal (from where you ran it
@@ -206,15 +280,38 @@ the system's own; in the browser they're the browser's.
   receives only what you send. Whatever you've typed in the chat box (and any attached
   photo) is sent with it, and the AI's open questions are shown with their quick replies,
   so you can answer them there. Cancel puts your message back in the chat box.
+- **What redaction blanks, and what it doesn't.** Redaction looks for secrets that something
+  names. It blanks the value of a setting whose name says password, secret, token, key or
+  credential (`DB_PASS`, `bindpw`, `api_key`; Windows' wording in German, French and other
+  languages too), whole, in `name=value` and `name: value` lines, JSON, YAML, XML (a pfSense
+  `config.xml`, a Wi-Fi profile), connection strings and addresses (`https://user:pass@host`,
+  `?key=…`); the secrets in device configurations (Cisco, Junos, FortiGate, HP); passwords on
+  the command lines of common tools (`mysql -p…`, `sqlcmd -P`, `net use`, `sshpass -p`,
+  `--password`); private keys, also in base64; password hashes; `Authorization` and `Cookie`
+  headers; a BitLocker recovery key; and the tokens of well-known services by their shape.
+  Each becomes `[REDACTED]` (or `[REDACTED PRIVATE KEY]`, `[REDACTED HASH]`), and the review
+  dialog says how many were made. It does not blank a secret that nothing names: a bare base64
+  string, a password in a table's column or in a sentence, `user:password` on a line of its
+  own. Nor does it touch names, addresses, host names or other personal data. It is a safety
+  net: read what you send, and edit out the rest.
+- A password you type into a queued command (`sshpass -p …`, `mysql -p…`) is blanked the same
+  way wherever that command goes to a model: in the header of its result, in the queue the AI
+  sees, in a second opinion. The queue on your screen, the audit log and what is typed keep
+  the command as you wrote it.
 - **Send terminal selection** sends any highlighted terminal text.
 - If the terminal buffer no longer has a command's output (page reloaded, session closed,
   case resumed), the output is taken from the session's transcript file instead. The
-  review dialog says when this happened.
+  review dialog says when this happened. At most 4 MB of one command's output is read from the
+  transcript, its start and its end, with a line between saying how much was not read.
 - The review dialog also warns when captured output looks like a prompt injection (text
   that tries to give the AI instructions). The AI is told to ignore such text, but you see
   it first and can edit it out.
 - **Resume a case**: the case dialog lists earlier cases. Opening one restores the
-  conversation, chat and queue; open sessions carry over.
+  conversation, chat and queue; open sessions carry over. A case whose saved state can't be
+  read (a crash or a full disk cut the file short) opens from the copy kept of the save before
+  it, and a note in the chat says that the last change may be missing; the unreadable file
+  stays in the case folder. A case whose `case.json` is lost comes back at the highest
+  sensitivity its audit log ever recorded for it, and as Sovereign where the log can't say.
 - **Delete cases**: in the same list, **Delete** removes a case from disk (conversation,
   queue, audit log, transcripts, request log, images, runbook), or tick several and use
   **Delete selected**. The filter box narrows the list. The open case can't be deleted;
@@ -244,7 +341,15 @@ the system's own; in the browser they're the browser's.
   **Retry**: compact or remove earlier exchanges, then retry, or pick a model with a larger
   window. Some local servers (Ollama) cut an over-long prompt silently instead of refusing it;
   set their context window in the provider's Model overrides so the figure warns in time.
-- Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V.
+- Terminal copy/paste: Ctrl+Shift+C / Ctrl+Shift+V. Control characters are left out of what
+  you paste into a terminal (line breaks and tabs stay), and a notice says how many: an escape
+  sequence in the clipboard would end the shell's bracketed paste and run the lines after it.
+- A link that a session's output sets on its text (a terminal hyperlink) opens like a link in
+  the chat: `http` and `https` only, in your browser, and always after a dialog that names the
+  address in full, since the text on screen can say anything. Plain addresses in the output
+  are not made into links.
+- A terminal whose connection to DA Toolkit drops connects again by itself, with the session's
+  recent output shown again.
 
 ### Hypothesis board
 
@@ -278,12 +383,25 @@ steps = [
 
 Queue the **Baseline snapshot** recipe on a healthy host, run the items, then **Recipes ▾ →
 Save baseline**. Later, run the same recipe and open **Saved baselines: diff or delete**: it
-lists the host's baselines, newest first, with the case each was taken in. **Diff** gives a
-unified diff per section (services, ports, routes, disks, packages, firewall, cron, users, …)
-that you can send to the AI; pick one taken while the machine was healthy. **Delete** removes
+lists the host's baselines, newest first, with the case each was taken in, its client and its
+sensitivity. **Diff** gives a unified diff per section (services, ports, routes, disks,
+packages, firewall, cron, users, …) that you can send to the AI; pick one taken while the
+machine was healthy. Both snapshots are redacted before they are compared, so a section in
+which only a secret changed is still listed, without the old or the new value ("differs only
+in values that were redacted: a password, key or other secret changed"). **Delete** removes
 a baseline, for example one saved by mistake on a broken machine. Baselines belong to the
 host, not the case: deleting a case leaves them. They live under
 `~/.local/share/datoolkit/baselines/<host>/`.
+
+A baseline is filed under the host's name or address, which two clients' machines can share
+(`192.168.1.1`), and a diff is made to be sent to the open case's model. So each baseline
+keeps the client and the sensitivity of the case it was taken in (that case's as they are now,
+while it exists), and a case can diff only against a baseline it may see: not one taken in a
+case of a higher sensitivity, and not one taken for another client. Such a baseline is listed
+with the reason and its **Diff** is off; it can still be deleted. One saved by an earlier
+version whose case is gone says nothing of where it came from, and can be compared only in a
+Sovereign case. The diff dialog names the case, client and sensitivity of the baseline it
+shows.
 
 ### Safer changes
 
@@ -305,8 +423,12 @@ host, not the case: deleting a case leaves them. They live under
   to know what a command does before running it), or from the disruptive confirmation, asks a
   reviewer model what it does, what could go wrong, whether it exposes sensitive data, and for
   a verdict (proceed / proceed with care / do not run). Set a
-  different model under **Settings → Model** (it must be allowed by the case sensitivity);
-  the reviewer sees only the command and the case notes, never the proposer's reasoning.
+  different model under **Settings → Model** (it must be allowed by the case sensitivity).
+  The reviewer is sent the command with its risk label, stated purpose and rollback (a
+  password typed into it blanked, as for the chat model), what the local rules flagged on it,
+  the case's name and notes, the session it is for (kind, target, OS and shell) and the
+  hypothesis board; never the conversation or the proposer's reasoning. After an answer or an
+  error the button reads **Ask again**.
   **Automatic review** (off / disruptive commands / everything flagged) asks it in the
   background as each command is queued, and the verdict shows on the item; click it for the
   full review. It only adds warnings: a "do not run" verdict asks for confirmation before a
@@ -314,7 +436,9 @@ host, not the case: deleting a case leaves them. They live under
   Automatic reviews run only on the chosen reviewer, never the chat model.
 - **Paired probes.** When the AI gives two commands the same `group` (a capture on one side,
   a ping from the other), **Run group** types them into their sessions at the same moment and
-  the results carry start times.
+  the results carry start times. Which commands share a group is the AI's choice, so Run group
+  always shows first what it will type: each command with its number, session and target, and
+  what Run would have asked about for it.
 - **Watch.** **Watch** on a read-only item wraps it in a bounded loop (every N seconds, M
   samples). When you send the result, iterations identical to the previous one are dropped.
 
@@ -357,22 +481,35 @@ host, not the case: deleting a case leaves them. They live under
   ICC profiles, PNG text chunks, JPEG comments, extra APNG frames and bytes appended after the
   image are all dropped, whatever the page sent. Only that cleaned image is stored (as a
   generic `img-N.png` / `img-N.jpg`) and sent; the original file name never leaves the page.
+  The page shrinks what you attach to 2048 px on its long side. The server takes a picture of
+  up to 4096 px a side and about 12.6 million pixels (a phone's full 12-megapixel photo), and
+  refuses a larger or a damaged one ("Could not use an attached image: …"), going by the
+  size the file states before any of it is decoded.
 - **Exports are saved where you choose**: the app window opens the system Save dialog (in
   `--browser` mode the browser downloads the file). A copy still goes into the case folder.
-  - **Export transcript (Markdown)** is the readable case record.
+  - **Export transcript (Markdown)** is the readable case record. Text that came from the web
+    or from a model (a source's title and address, the AI's messages, a rollback or a note in
+    the queue table) is written so that it can't act as markup of its own: an image or an
+    HTML tag in it is shown as text, so a viewer that reads Markdown as CommonMark does
+    (GitHub, VS Code's preview) fetches nothing when you open the file, and a source's title
+    can't point its link elsewhere. Your own photos are still images.
   - **Full export** is a ZIP with every request DA Toolkit made to a model, in order: the
-    system prompt (in full whenever it changed), the messages sent, the model's reasoning as
+    system prompt (in full whenever it changed), the messages sent (as sent: for a model that
+    can't see images, the vision helper's description where the image was; a note DA Toolkit
+    put in the conversation itself is labelled "DA Toolkit → AI"), the model's reasoning as
     the provider returned it, and its reply with tool calls (`full-transcript.md`); the images
     exactly as the model received them; the AI-written documents; and the raw data (request
     log, conversation, chat, queue, hypotheses, audit log). Raw terminal transcripts are
     optional because they are unredacted. Cases started before request logging existed get
     their earlier conversation reconstructed, marked as such.
-  - Ticket summary, client update and runbook have **Save as…** next to Copy.
+  - Ticket summary, client update and runbook have **Save as…** next to Copy. The model that
+    writes them is told which messages were DA Toolkit's own notes and not your words, and,
+    where exchanges were removed or compacted, that what it reads is not the whole case.
 - **Context ▾ → Timeline replay** plays the case back: events on the left, the terminal
   transcript on the right, on one slider.
 - **Context ▾ → What the AI knows** shows the exact context the model gets next turn, with a
-  size estimate per exchange, and lets you remove exchanges from it. The chat and the audit
-  log keep them.
+  size estimate per exchange (a photo counts as 1,500 tokens, about what providers charge for
+  one), and lets you remove exchanges from it. The chat and the audit log keep them.
 - **Compact** (in the same dialog) has the chat model summarise the older exchanges, by
   default all but the last two, which stay word for word. The summary keeps the problem,
   findings with their evidence, every change made to a system, what was ruled out, your
@@ -382,17 +519,20 @@ host, not the case: deleting a case leaves them. They live under
   chat model, so the case's sensitivity rules apply as usual, and with Claude it reads the
   conversation from the prompt cache while that is warm. Applying changes the start of the
   conversation, so the next turn writes the shorter context to the cache once (see Prompt
-  caching). After a request that was too long, only the part to summarise is sent. The
+  caching). After a request that was too long, only the part to summarise is sent, and a
+  compaction that turns out too long itself is tried again that way. The
   previous context is saved in the case folder (`context-before-compact-N.json`), and
   **Undo last compaction** puts it back while the summary still opens the conversation;
   exchanges added since are kept.
 - **Export ▾ → Client update** writes the plain-language version of the ticket note.
 - **Export ▾ → Distil runbook** turns a solved case into `runbook.md`. A runbook reaches the
   AI in a later case only within one client: the new case must belong to a client and have
-  **Include this client's history** ticked, and then, when its first message resembles one of
+  **Include this client's history** ticked, and then, when its first message with words in it
+  (a case may begin with a photo or with results alone) resembles one of
   that client's earlier cases of the same or a lower sensitivity (a Confidential case may use
   Open and Confidential ones, an Open case only Open ones), those cases are noted in the chat
-  and their runbooks go into the AI's context as leads. A case with no client, or with the box
+  and their runbooks go into the AI's context as leads: text from an earlier case, which the
+  AI is told not to take as instructions. A case with no client, or with the box
   unticked, never gets another case's runbook, and nothing from one client's cases reaches
   another client's. Changing the client or unticking the box drops them again. A case opened
   again keeps its runbooks (read afresh, and only those still of its client and sensitivity).
@@ -421,7 +561,11 @@ server room, a switch's serial port) and want the next step in your hand.
 
 **Port and firewall.** The companion always listens on the same port, 48443 unless you change
 it in **Settings → General**, so with a firewall on you only open that one
-(`sudo ufw allow 48443/tcp`). The main window stays on 127.0.0.1 and is never on the LAN.
+(`sudo ufw allow 48443/tcp`). It listens on one address, the one its codes carry: this
+computer's address on the network its default route leaves by, so it is not also offered on a
+client's VPN or a container bridge. Only where the computer has no such
+address to name does it listen on every interface. The main window stays on 127.0.0.1 and is
+never on the LAN.
 A request without the phone's token is refused on its headers, before any of its body is read,
 so nobody on the network can tie the app up by sending it data.
 
@@ -464,10 +608,13 @@ phone checks again); a new one is also made when it expires, after about two yea
   token for its tab only.
 - Every answer on the companion's port says it may not be cached, framed by another page or
   sent on as a referrer.
-- The companion's port serves only the phone's page and its API: the case name, the last 30
-  chat messages, the queue, the hypothesis board and the list of open sessions. It can mark
-  queue items ran, skipped or pending (with a note), mark hypotheses, and send a photo with a
-  description to the AI. It cannot reach a terminal or run anything, open or close sessions,
+- The companion's port serves only the phone's page and its API. **The phone receives** the
+  case's name and sensitivity (not its notes, its client or its folder), the last 30 chat
+  messages, the queue with its commands, the hypothesis board and the list of open sessions
+  (each one's id, kind and target). It can mark queue items ran, skipped or pending (with a
+  note), mark hypotheses, and send a photo with a description to the AI. Its "pending" undoes
+  its own ran or skipped: a command the AI withdrew can be restored only at the computer. It
+  cannot reach a terminal or run anything, open or close sessions,
   see settings, prompts or credential dialogs, or send results or plain messages. Whatever
   the AI proposes in reply still needs your click on the computer.
 - The chat does go to the phone, so think twice before pairing on a Confidential case.
@@ -478,8 +625,14 @@ phone checks again); a new one is also made when it expires, after about two yea
 with a SHA-256 each. **Send to session** queues the transfer: `scp` from a local shell for
 SSH hosts (with the host's key, jump host and options, as its session uses them), or an inline
 PowerShell write (under 4 MB) for WinRM sessions, followed by the tool's run command. The hash
-is checked on arrival (for SSH, by a read-only item between the copy and the run, which prints
-the copy's SHA-256 next to the one it must have) and nothing runs without your click.
+is checked on arrival and nothing runs without your click. For SSH the check is a read-only
+item between the copy and the run, which compares the copy's SHA-256 with the one it must have
+and says which: `sha256sum -c` prints `OK` or `FAILED`, and on a Windows host "OK: the SHA-256
+matches" or "MISMATCH: the file is not the one in the tool cache; do not run it". The WinRM
+command ends by printing `True` or `False` for the same comparison. The tool's file name is
+passed as data to whichever shell reads it, so a space or a `$(…)` in it does nothing; a name
+no command can carry safely (a control character; for a Windows host over SSH also `"`, `$`,
+a backtick, `%` or `!`) is refused with a message to rename the file.
 
 ### Training provider
 
@@ -499,19 +652,37 @@ the rules. From the AppImage, run `DAToolkit-<version>-x86_64.AppImage replay`.
 
 | Keys | Action |
 |---|---|
-| Alt+1 … Alt+9 | Switch terminal tab |
+| Ctrl+Shift+1 … 9 | Switch session tab, from anywhere |
+| Alt+1 … Alt+9 | Switch session tab, except inside a terminal, where Alt+digit goes to the program (tmux, irssi, the shell) |
 | Ctrl+Shift+Enter | Run the next pending **read-only** command (never a modifying, disruptive or sensitive one, or one the reviewer said not to run) |
 | Ctrl+Shift+K | Focus the chat box (showing the chat if it is hidden) |
 | ↑ / ↓ in the chat box | Recall earlier messages |
 | Enter / Shift+Enter | Send / newline |
 | Ctrl+Shift+C / V | Copy / paste in the terminal |
 
+Everything that acts on a click can be reached and pressed from the keyboard. The model list
+takes the arrow keys, Home and End, with Enter or Space to choose (the down arrow leads into it
+from the filter); session tabs, the `#N` chips, the sensitivity badge and a route's hosts take
+Tab, then Enter or Space. A dialog holds the keyboard while it is open: Tab goes round inside
+it, Escape closes it wherever the focus is, and the focus returns to what had it. A dialog you
+have typed or changed something in (Settings, a case or host form, Send results) asks **Close
+without saving?** before Escape or a click outside it discards that. A prompt that arrives by
+itself while you are typing (a session asking for a password or a host key, a phone asking to
+pair) does not take your keys into its field: it says so, and they go nowhere until you click
+the field or press Tab.
+
 ## AI providers
 
 Settings → AI providers holds as many providers as you like, each an address, an API key (in
 the keyring) and the API it speaks. The model picker lists each one's models, and the top bar
 always shows the provider the chat model is on, beside the model (hover it for the kind, the
-API and the address).
+API and the address). A provider's name can't contain `|`, which separates provider and model
+where a setting names both. Deleting a provider removes its key and everything DA Toolkit had
+learned or set for it (its models' details and context windows, its place as reviewer, vision
+helper or research model, its recent models), so a provider added later under the same name
+starts with nothing. When the keyring can't be used (it is locked, or its unlock prompt was
+dismissed), saving, renaming or deleting a provider or a host is refused and nothing is
+changed.
 
 | Add… | Address | Speaks | What it brings |
 |---|---|---|---|
@@ -526,12 +697,26 @@ API and the address).
 wherever it points: the error says where the provider redirected, so you can put its new
 address in Settings → AI providers if it has moved. An address that answers with something
 other than the API (a web page, a network's sign-in page, an address missing its `/v1`) is an
-error naming the status and content type it answered with, never an empty reply.
+error naming the status and content type it answered with, never an empty reply. A server that
+takes no connection (a local model server that is switched off) fails the request after ten
+seconds; a reply that has begun may take minutes between its pieces.
+
+**A proxy is used only beyond your own network.** DA Toolkit has no proxy setting of its own:
+its requests go through the proxy your environment names (`HTTPS_PROXY`, `HTTP_PROXY`,
+`ALL_PROXY`), if any. A provider on this machine or its local network (an address the Local
+tier counts: see [Model tiers](#model-tiers-and-end-to-end-encryption)) is always reached
+directly, for every request and its model list, so the key and a Sovereign case's
+conversation never pass a proxy on their way to a model server of your own. Nothing else of the
+environment rides along: the variables the OpenAI and Anthropic libraries read by themselves
+(`OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_CUSTOM_HEADERS`, `ANTHROPIC_CUSTOM_HEADERS`) add
+no header to a request, and a provider is sent its own key only.
 
 The **API** is worked out from the address (Anthropic's for `api.anthropic.com`, OpenAI's for
 everything else) unless you choose it. An Anthropic-compatible service gets the plain Messages
 API request (messages, tools, system prompt, temperature) without Anthropic's own extras; if
-it has no model list, the provider's default model is the one offered.
+it has no model list, the provider's default model is the one offered. A provider set to the
+Anthropic API lists no `private/` models and can't be given one: those are only ever sent
+sealed, which the OpenAI path does.
 
 **On Anthropic's own API** the request uses what only it has:
 
@@ -545,7 +730,9 @@ it has no model list, the provider's default model is the one offered.
   only and is sent again, word for word, every time after (it then costs nothing). After a
   compaction, a removed exchange or an edited case note, Claude's earlier reasoning is left
   out of what follows the change (it was written for a conversation that no longer exists),
-  and the conversation carries on.
+  and the conversation carries on. A Claude model newer than this version of DA Toolkit knows
+  is sent what the newest it knows need (append-only, adaptive thinking, no temperature), since
+  each generation has been the stricter one.
 - When one of Anthropic's safeguards declines a request (security work can trip the cyber
   classifier), Anthropic retries it on another Claude model where it can, and the AI's message
   says which model answered. When nothing could, the message says so, and nothing the declined
@@ -638,14 +825,27 @@ out in [Security and privacy](docs/security-and-privacy.md).
 | Tier | Detected from | What the provider can see |
 |---|---|---|
 | **Standard** | anything else | Everything |
-| **TEE** | ids starting `TEE/` or `phala/` | Attested before anything is sent (for most `TEE/` models, RedPill's gateway, which passes each request on to the machine that runs the model), but prompts pass NanoGPT's gateway **in the clear** |
+| **TEE** | ids with `TEE` as one of their `/` parts (`TEE/…`, `…/tee/…`; case doesn't matter), ids starting `phala/`, and ids ending `-tee` or `:tee` | Attested before anything is sent (for most `TEE/` models, RedPill's gateway, which passes each request on to the machine that runs the model), but prompts pass NanoGPT's gateway **in the clear** |
 | **E2EE** | NanoGPT `private/…` ids, however written (`Private/…` too) | Ciphertext only, plus your account, the model, timing, sizes and usage |
-| **Local** | localhost / private-IP base URL | Nothing leaves your network |
+| **Local** | a base URL on this machine or its local network (see **Local trusts your network** below), whatever the model is called | Nothing leaves your network |
+
+The first of these that applies is the tier: one you set for the model in the provider's Model
+overrides, then Local for any model at a local address, then E2EE for a `private/` id, then
+TEE, and Standard for the rest.
 
 **Requests go over https, or not at all.** A base URL that is plain `http://` is accepted
-only for this machine and its local network: `localhost`, `127.x`, `10.x`, `172.16`–`31.x`,
-`192.168.x`, link-local addresses and `.local` names, which is how a model server of your own
-is reached. For any other address, Settings → AI providers will not save it, and a
+only for this machine and its local network, which is how a model server of your own is
+reached:
+
+- `localhost`, and names ending `.localhost` or `.local`;
+- `127.x` and `::1` (this machine);
+- `10.x`, `172.16`–`31.x` and `192.168.x`;
+- link-local addresses (`169.254.x`, `fe80::…`) and IPv6 unique local ones (`fc00::/7`, such
+  as `fd00::5`).
+
+A name is judged as written and never looked up to see where it points. A `.lan` name is not
+on the list: it counts as Local (below) but is reached over https only. For any other address,
+Settings → AI providers will not save it, and a
 `config.toml` edited by hand to hold one sends nothing (chat, model list, attestation, web
 search and research alike): the app says why instead. The address is never rewritten to
 https for you, and certificates are always checked. An address is judged whole:
@@ -655,18 +855,26 @@ refused; so is one with a space, a backslash or a control character in it.
 A user name and password written into an address (`https://user:pass@host/v1`, a model server
 behind one) are kept in the keyring, as the API key is: `config.toml` has the address without
 them, and no message, notice or log shows them (the address is shown as
-`https://…@host/v1`). They are put back only while the file's address is that same one, so
+`https://…@host/v1`). The page itself is given the address whole, since the provider's form
+in Settings shows it for you to edit; the provider list and the top bar show it without. They
+are put back only while the file's address is that same one, so
 editing the file to another server doesn't hand it the password; taking the password out of
-the address in Settings takes it out of the keyring. An API key with a line break, a space or
+the address in Settings takes it out of the keyring. A password found in a `config.toml` that
+was edited by hand, or written by an earlier version, is moved to the keyring and out of the
+file at the next start; where no keyring can take it, it stays in the file and is used from
+there, so on such a computer the file can hold that one secret. An API key with a line break,
+a space or
 another character no API key has (picked up where it was copied from) is refused when saved,
 and one stored before is refused before anything is sent with it, saying so without quoting it.
 
-**Local trusts your network.** A base URL counts as Local when its host is `localhost`, a
-private or link-local IP, or a name ending `.local` or `.lan`, so Confidential and Sovereign
+**Local trusts your network.** A base URL counts as Local when its host is `localhost`, an
+IP address plain http is accepted for (this machine's, a private, link-local or unique local
+one: the list above), or a name ending `.local` or `.lan`, so Confidential and Sovereign
 cases may use it. With `http://` to a private IP or a `.local` name, prompts (client data
 included) and the API key cross the LAN unencrypted, and such a name is only as trustworthy
 as your DNS. Use Local over the network only on a LAN you trust, or put the model server
-behind HTTPS (a `.lan` name is reached over https only).
+behind HTTPS (a `.lan` name is reached over https only). A Local provider is never reached
+through a proxy from your environment (see [AI providers](#ai-providers)).
 
 Override a model's tier (Standard, TEE or Local; never E2EE) under **Settings → AI providers →
 the provider → Model overrides**.
@@ -709,7 +917,9 @@ edit. Sovereign cases do neither.
    run that fails reports its error to it.
 4. **Show and log it.**
    - The top bar shows **🔐 attested**; hover for the enclave, release and key fingerprint,
-     and click to re-check.
+     and click to re-check. A re-check attests the enclave again there and then, whatever
+     attestation is kept; if it fails, none is left in force and nothing is sealed to the
+     enclave until one holds.
    - Replies are marked "end-to-end encrypted".
    - Each attestation is recorded in the case's `events.jsonl`.
    - Attestation is redone every five minutes (time the computer spends asleep counts).
@@ -728,8 +938,11 @@ says why.
 Like SealedLore, DA Toolkit doesn't use NanoGPT's `npx @nanogpt/private-mode@latest` proxy,
 because that would let NanoGPT change the code that holds your plaintext.
 
-Verifying an enclave contacts NanoGPT's relay (for the attestation bundle), Sigstore and
-GitHub.
+Verifying an enclave contacts NanoGPT's relay (for the attestation bundle), Tinfoil's mirrors
+of GitHub (`github-proxy.tinfoil.sh`: the router's latest release and its Sigstore bundle) and
+of AMD's and Intel's certificate services (`kds-proxy.tinfoil.sh`, `tdx-proxy.tinfoil.sh`), and
+Sigstore's public trust root (`tuf-repo-cdn.sigstore.dev`). Nothing of the case goes to any of
+them, and no key to Tinfoil's mirrors or Sigstore.
 
 **How TEE attestation works** (`src/datoolkit/llm/tee.py`, `dcap.py`, `nras.py`, `ethsig.py`,
 ported from SealedLore with the checks unchanged, `dcap.py` and `nras.py` kept alike in every
@@ -740,10 +953,18 @@ app of the author's that attests TEE models, and tested against a real attestati
    fresh random nonce. Nothing goes to a TEE model (chat, vision helper, write-ups, the
    second-opinion reviewer, compaction or the research agent) until that holds, and it is made
    again before a send once it is 15 minutes old (time the computer spends asleep counts), or
-   once one of the model's replies has failed its check (step 4). Nothing is sent while the
+   once one of the model's replies has failed its check (step 4). That is looked at before
+   every request, not only a turn's first: each further round of a turn and each request of a
+   research run waits for it too, so a turn that outlasts its attestation, or a re-check
+   refused while it runs, stops there. Nothing is sent while the
    model is being attested either (it was just chosen, or chosen again, or you clicked to
-   re-check): a request made then waits for what that attestation finds. One that is refused
+   re-check, also while a request was already waiting): a request made then waits for what
+   that attestation finds. One that is refused
    leaves no earlier attestation in force, so nothing more goes to the model until one holds.
+   An attestation is of the address it was made at: change a provider's address in Settings,
+   delete the provider or pick another model, and the top bar shows none until the model in
+   use is attested as it is now. A new API key saved for the provider has its TEE models
+   attested again before the next request, since each reply's record is looked up with the key.
    - The Intel TDX quote's own bytes must bind the enclave's reply-signing key and our nonce
      (never NanoGPT's JSON copy of them), or bind RedPill's attested keys, that key among
      them, and our nonce. For per-instance providers (Chutes), each instance's key, bound
@@ -759,8 +980,10 @@ app of the author's that attests TEE models, and tested against a real attestati
      with a receipt that holds (step 4). A report that doesn't bind our nonce is refused;
      where NanoGPT has none (models only Chutes or Tinfoil serves), the model's own evidence
      is taken as before. An attestation the provider took too long for is asked once more
-     with a new nonce, and may take up to a minute and a half (Chutes' evidence covers every
-     instance).
+     with a new nonce; each request may take up to a minute and a half (Chutes' evidence
+     covers every instance). One attestation as a whole, Intel's and NVIDIA's checks included,
+     is given three minutes; past that it is refused ("wasn't done within 3 minutes, and was
+     given up") and can be tried again.
    - The quote is verified up to Intel's SGX root, which is pinned in the code: the PCK chain
      (every certificate that signed another a certificate authority allowed to), Intel's own
      TDX quoting enclave (checked on every quote, whether or not Intel's service can be
@@ -774,7 +997,11 @@ app of the author's that attests TEE models, and tested against a real attestati
      only its signature goes unchecked; keys fetched before are used when fresh ones can't be.
 2. **Refuse** evidence relayed for a nonce the relay chose (replayable) when the gateway can't
    stand in, no attestation at all (Tinfoil-hosted `TEE/` models; use their `private/` twin),
-   attested keys past their expiry, or anything that fails the checks above. Nothing is sent.
+   attested keys past their expiry, evidence in no shape to be read (refused as that, "…
+   couldn't be read"), or anything that fails the checks above. Nothing is sent. Whatever a
+   refusal quotes of the relay or the provider is shown as Private Mode's relay errors are: on
+   one line, cut short and without invisible characters, since a refusal is shown in the top
+   bar, logged and, when a research run fails on it, passed to the AI.
 3. **Partial** when nothing failed but something couldn't be checked, isn't current, or falls
    short: Intel's collateral or NVIDIA's service or keys out of reach, no GPU evidence
    offered, **GPUs not tied to the quote** (NanoGPT's report carries GPU evidence made for our
@@ -822,11 +1049,16 @@ app of the author's that attests TEE models, and tested against a real attestati
    research run takes the mark of its worst reply:
    - **✔ verified**: signed by the attested key, for the exact bytes received, its receipt
      (where read) holding. For a model RedPill serves, the receipt says the machine the reply
-     came from was verified: that last part is the gateway's word;
+     came from was verified: that last part is the gateway's word. A model attested itself is
+     verified by its own key's signature, with a receipt or without, so the tooltip says
+     whether one was read: without one, nothing says the machine running the model was
+     verified;
    - **signed, text not compared**: signed by the attested key, but NanoGPT rebuilds this
      model's replies, so the text can't be compared with the record;
    - **⚠ reply not verified**: no record of the reply could be read (the provider keeps none,
-     it was out of reach, or the gateway's keys changed since the attestation), or, for a model
+     it was out of reach, the gateway's keys changed since the attestation, or the reply named
+     neither an id nor a receipt to look its record up by, or was cut short by Stop or a
+     failed stream), or, for a model
      attested through RedPill's gateway alone, its record came with no receipt that holds: the
      gateway's signature says only that the reply passed through it, and the receipt is its
      word that the model's own enclave answered;
@@ -842,7 +1074,10 @@ app of the author's that attests TEE models, and tested against a real attestati
 
    A failed check is also said in a notice, and the model is attested again before anything
    more is sent to it; a request made while a reply of the same model is still being checked
-   waits for that check. A research report with a failed check isn't kept for later cases.
+   waits for that check. Where a model was attested again between two requests of a turn, each
+   reply is checked against the attestation its own request went out under. A reply whose
+   check was still running when DA Toolkit closed reads "⚠ reply not verified" when its case is
+   opened again. A research report with a failed check isn't kept for later cases.
 
 What this proves: a genuine, current, non-debug Intel TDX machine (and, where evidence is
 offered, NVIDIA GPUs) holds the keys, live, bound to our nonce, and each reply's record was
@@ -854,7 +1089,9 @@ which is the gateway's word. The prompt also passes NanoGPT's gateway in the cle
 stay out of Confidential cases; for that, use a `private/` model. Verifying contacts NanoGPT,
 Intel (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`) and NVIDIA
 (`nras.attestation.nvidia.com`). Intel's collateral and NVIDIA's keys are cached for an hour
-(time asleep counts). With **Name the provider behind each TEE reply** on (below, off by
+(time asleep counts); Intel's only once all of it has been read and its signatures checked, so
+an answer that wasn't Intel's (a proxy's or a portal's page) is asked for again the next time.
+With **Name the provider behind each TEE reply** on (below, off by
 default), `api.redpill.ai` too.
 
 **Name the provider behind each TEE reply** (Settings → Model → TEE models, off by default)
@@ -882,7 +1119,19 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
 - **SSH** uses your system `ssh`, so `~/.ssh/config`, keys, the agent, jump hosts and
   known_hosts all work.
   - Password and host-key prompts appear as dialogs. A saved password is supplied once per
-    session; if it's rejected, you're asked.
+    session; if it's rejected, you're asked. A prompt is taken off the screen at once when the
+    program that asked has gone (ssh gave up, or its session was closed).
+  - **A saved password goes only to the host that is asking for it.** It answers a password
+    prompt (never a key's passphrase, a PIN or a one-time code), and only one that names the
+    session's own host in text no server can write: OpenSSH's own `user@host's password:`, or
+    the `(user@host)` it puts before a prompt a server worded. A jump host on the way never
+    gets the target's password, whatever its prompt says, and what you type for a jump host
+    isn't offered for saving as the target's. Behind a jump host (the host's **Jump host**
+    field), a prompt that names no host is shown to you and not answered from the keyring;
+    and where this computer's OpenSSH is older than 8.4, which doesn't say which server worded
+    a prompt, no prompt behind a jump host is. With so old an OpenSSH, put a jump host in that
+    field and not only in `~/.ssh/config`: DA Toolkit can't see one that is only there, and
+    would take its bare `Password:` for the target's.
   - Old network gear may need extra options, e.g. `KexAlgorithms=+diffie-hellman-group14-sha1`.
 - **WinRM** opens a PowerShell remoting console (pypsrp) supporting NTLM, Kerberos, Negotiate
   and Basic, on 5985 or 5986.
@@ -893,7 +1142,12 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
     domain's DNS (on its network, or over the VPN), or named in `/etc/krb5.conf`. Since it
     needs a name, plain HTTP (5985) works only for `.local` domains (see below); elsewhere use
     HTTPS (5986). The AppImage brings the Python side; MIT Kerberos' `libgssapi_krb5` comes from
-    the system, where OpenSSH already put it. A failure says which of these it was.
+    the system, where OpenSSH already put it. Run from source, DA Toolkit needs its `kerberos`
+    extra for this: `.venv/bin/pip install -e ".[kerberos]"`, which compiles the gssapi and
+    krb5 packages (neither publishes a Linux wheel), so install MIT Kerberos' headers and a C
+    compiler with Python's headers first (`sudo apt install libkrb5-dev gcc python3-dev`; the
+    Kerberos headers are `krb5-devel` on Fedora and part of `krb5` on Arch). A failure says
+    which of these it was.
     Negotiate with `DOMAIN\user`, or with an address, uses NTLM.
   - Commands are single-line. `Read-Host` and `Get-Credential` prompts and tab completion are
     not supported.
@@ -906,7 +1160,10 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
     providers; a host further away must use HTTPS. Basic authentication over plain HTTP sends
     the password in the clear, so it also needs **Allow Basic over plain HTTP** ticked on the
     host; NTLM and Kerberos encrypt the exchange themselves. Both rules are checked when the
-    host is saved and again when a session opens.
+    host is saved and again when a session opens. A host on this machine or its local network
+    is always connected to directly, never through a proxy from your environment
+    (`HTTP_PROXY` and the like), which would otherwise be handed that password; a host
+    further away goes through the proxy, if one is set.
   - **The certificate is always checked.** Over HTTPS it is verified against the system's CA
     store, or, with **Validate certificate** unticked (a self-signed listener), by DA Toolkit
     itself: on first connection you are shown its fingerprints to verify, and it is pinned; a
@@ -938,23 +1195,43 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
     what you have) when you open an RDP host, and stops and removes it when the last RDP
     session closes or DA Toolkit quits. You download the image once (`podman pull`, which the
     dialog shows); DA Toolkit never downloads it itself, and uses exactly the pinned 1.6.0
-    image. A guacd that's already running, such as the distribution's service, is used as is
-    and left alone. If you set up the always-running `guacd` container that earlier versions
+    image. The container is run with `--pull=never`, with no capabilities and unable to gain
+    privileges: guacd reads what RDP servers send it and needs neither. Two DA Toolkits
+    running at once share the one container, and it is removed when the last of them to use it
+    closes its last RDP session or quits. A guacd that's already running, such as the
+    distribution's service, is used as is and left alone. If you set up the always-running
+    `guacd` container that earlier versions
     suggested, remove it so DA Toolkit can manage its own: `podman rm -f guacd`, and
     `systemctl --user disable podman-restart.service` if nothing else uses it.
   - **Certificates are trusted on first use and pinned.** Before every connection DA Toolkit
-    reads the server's TLS certificate itself. The first time it shows you the subject,
-    issuer, SHA-256 fingerprint and the SHA-1 thumbprint Windows itself shows, to verify (on
+    reads the server's TLS certificate itself. The first time it shows you the SHA-256
+    fingerprint and the SHA-1 thumbprint Windows itself shows, and under them the subject and
+    issuer, to verify (on
     Windows: `Get-ChildItem 'Cert:\LocalMachine\Remote Desktop'` in PowerShell, or the Remote
     Desktop certificate in `certlm.msc`; `.GetCertHashString('SHA256')` on it gives the
     SHA-256); after that, a different certificate blocks the connection until you forget the
-    pin in Settings → Hosts. Servers offering only legacy RDP security have no
-    certificate, so you are warned on every connection. With guacd 1.6 or later (the
+    pin in Settings → Hosts. The fingerprints stand first because the subject and issuer are
+    text the server chooses: each is shown on one line, cut to 200 characters, so nothing in a
+    certificate can draw a fingerprint line of its own (the same in WinRM's prompt). Servers
+    offering only legacy RDP security have no
+    certificate, so you are warned on every connection. A server whose certificate is pinned
+    and which now offers no TLS at all is refused like one whose certificate changed, unless
+    you set the host to legacy RDP security yourself: the answer that declines TLS is
+    unencrypted, and anyone on the way can write it. With guacd 1.6 or later (the
     container) the pin is also handed to guacd, which checks the certificate on the
     connection itself; guacd 1.3 (Ubuntu's and Mint's package) cannot, so there the check
-    and guacd's connection are separate TLS sessions. The **Negotiate (any)** security mode
+    and guacd's connection are separate TLS sessions, and DA Toolkit reads the certificate
+    again before each connection the tab makes (Reconnect, a fit-to-window reconnect, a page
+    reload) and holds it to the one the session was opened with; another certificate, or
+    none, ends that connection with the reason in the tab. The **Negotiate (any)** security
+    mode
     connects with what the server chose when its certificate was read (NLA or TLS), so a
     downgrade to legacy RDP security, which has no certificate to check, is refused.
+  - **The pin file.** Pins are kept in `rdp_pins.json`. If that file can't be read (cut short,
+    emptied, edited into something else), it is never taken for "no pins": it is set aside as
+    `rdp_pins.json.unreadable-<date>-<time>`, the connection being opened is refused with a
+    message naming both files, and from then on every RDP and WinRM host asks you to check its
+    certificate again, as on a first connection.
   - The toolbar sends Ctrl+Alt+Del, Win and Win+R (keys the app window can't capture), takes
     a screenshot to the chat, sends text you copied on the remote desktop to the AI, and puts
     text on the remote clipboard or types it.
@@ -968,7 +1245,14 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
     fitted again each way.
   - **Run/Insert types a queued command into whichever window has focus** on the remote
     desktop (confirmed once per session). Output isn't captured; in the Send results dialog,
-    paste it, use "Copied text", or attach a screenshot.
+    paste it, use "Copied text", or attach a screenshot. Typing there is key presses, which
+    sets three rules. A command with a tab or another control character in it is refused
+    before anything is typed (a tab would be the Tab key, which moves the focus or completes a
+    name): replace the tab with spaces, or put the text on the remote clipboard with **Paste
+    text…**, whose **Type it** follows the same rule. Every line break is the Enter key, so
+    **Insert** of a command of several lines would run all but its last line, and asks every
+    time before it does. And while a command is being typed, your own key presses in that
+    desktop are held back, so none lands in the middle of it.
   - Limits: no smart-card or USB redirection, text-only clipboard, one monitor.
 - **Window sessions** work through a window on your own screen: typically a ScreenConnect
   control window, but TeamViewer, AnyDesk, a VM console or an iDRAC/iLO console work the
@@ -978,7 +1262,12 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
     first (a browser tab counts only when it's a console, such as iDRAC or iLO, not the
     tool's website). Pick one and give it a name (suggested from the title, e.g. the
     computer's name).
-    The window is followed by its X window id, so moving or resizing it doesn't matter.
+    The window is followed by its X window id, so moving or resizing it doesn't matter, and
+    is known by the process and class it had when you picked it as well: the X server hands a
+    closed window's id to a later window, and a session whose id is another program's window
+    by then says its window has closed instead of showing that one. What the AI is told of
+    the session is the window's class and title on one line, cleaned and cut short (a title
+    is set by whoever is at the other end); the tab and the picker show the title as it is.
   - The AI can't see the window. **Screenshot → chat** captures just that window (not the
     rest of your screen), you black out anything sensitive, and it's attached to your next
     message. The tab shows a preview that stays on your machine.
@@ -1008,22 +1297,54 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
     window on another workspace; under KDE's XWayland it can still be captured. Without a
     compositor (most X11 desktops have one), the parts of the window that other windows cover
     can't be read either; under XWayland they can.
-- **Linked sessions.** Sessions to the same address are linked automatically as one machine
-  (a coloured bar on their tabs); 🔗 links sessions by hand (hostname vs IP, NAT) or unlinks
-  one for good. The AI is told which linked session takes commands and which is your
-  desktop view (an RDP or window session), so it sends commands to the shell while you
-  watch the GUI.
+- **Saved passwords** (SSH, WinRM and RDP hosts).
+  - **A password is saved once the host has accepted it.** With **Save to keyring for this
+    host** ticked in a password prompt, what you type is held in memory and goes to the
+    keyring when the login has succeeded: for SSH when the remote shell starts, for WinRM
+    when the console has authenticated, for RDP when the remote desktop is there. One the
+    host refuses, or whose session ends first, is not saved, so a mistyped password is never
+    kept. An SSH session that gets no terminal (`RequestTTY=no`) gives no such sign, and its
+    password is not saved.
+  - **A saved password that is refused is said to be that.** A WinRM or RDP host's saved
+    password is used without asking. When the server refuses it, the console (or, for RDP, a
+    notice beside guacd's error) says "The password saved for ‹host› was used, and the server
+    refused it. To replace it: Settings → Hosts → ‹host› → Forget stored password, then open
+    the session again and type the new one." An RDP security mode the server refuses is not
+    taken for a refused password. SSH asks you itself when a saved password is rejected.
+- **Linked sessions.** Sessions that reach the same machine are linked automatically as one
+  (a coloured bar on their tabs): the same address by the same jump hosts, if any. The address
+  alone doesn't say that: `192.168.1.1` behind one client's jump host and behind another's
+  are two routers, and a loopback address (`localhost:3390`) is whatever was forwarded to that
+  port, so there the port counts too, and a saved host at a loopback address is never linked
+  to your local shell. Local shells link to each other. 🔗 links sessions by hand (hostname vs
+  IP, NAT) or unlinks one for good. The AI is told which linked session takes commands and
+  which is your desktop view (an RDP or window session), so it sends commands to the shell
+  while you watch the GUI.
+- **A session's environment is your own.** Run from the AppImage, DA Toolkit leaves out of the
+  shells and programs it starts for you what the AppImage set for itself: its own variables
+  (`APPIMAGE`, `APPDIR` and the like) and the `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` it
+  points at the system's CA store for its own connections. A tool run in a DA Toolkit terminal
+  so behaves as it does in any other, and a CA bundle you set in those variables yourself is
+  kept.
+- **When a session ends.** A terminal session ends when its shell or `ssh` exits, even if a
+  background job started in it still holds the terminal (the job is left running). If a
+  session's transcript can't be written (a full disk, usually), the terminal goes on working,
+  since it may be the shell that frees the space: a line in the terminal says that the
+  transcript is switched off for that session, and output from then on is not in the case's
+  transcript, so copy what the AI should see from the terminal.
 
 ## Where things are stored
 
 | What | Where |
 |---|---|
-| Config (no secrets; providers, hosts, clients, settings) | `~/.config/datoolkit/config.toml` |
+| Config (providers, hosts, clients, settings; no secrets, but for a password in a provider's address that no keyring could take: see [Model tiers](#model-tiers-and-end-to-end-encryption)) | `~/.config/datoolkit/config.toml` |
 | Pinned RDP and WinRM certificates | `~/.config/datoolkit/rdp_pins.json` |
 | Companion certificate and key | `~/.config/datoolkit/companion-cert.pem`, `companion-key.pem` (0600) |
 | Secrets (API keys, host passwords, a password written into a provider's address) | OS keyring, service `datoolkit`; only one that keeps them safe: with none running but one that writes a plain file, nothing is stored and Settings says so |
 | Case logs, transcripts, exports | `~/.local/share/datoolkit/cases/<case-id>/` |
-| Research reports (reused for 30 days) | `~/.local/share/datoolkit/research/` |
+| Research reports (reused for 30 days, each with its case's client and sensitivity) | `~/.local/share/datoolkit/research/` |
+| Baselines, by host | `~/.local/share/datoolkit/baselines/<host>/` |
+| The tool cache | `~/.local/share/datoolkit/tools/` |
 
 Every directory DA Toolkit makes under these two is readable by you alone (0700), and ones
 made by earlier versions are tightened on the next start. The askpass socket and helper
@@ -1032,31 +1353,68 @@ it they fall back to `/tmp/datoolkit-<pid>`, where on a machine shared with othe
 someone who creates that name first stops DA Toolkit from starting, so keep
 `XDG_RUNTIME_DIR` set there.
 
+**Files are written whole.** Settings, case files, drafts and pins are each written to a
+temporary file, flushed to the disk and then renamed over the old one, so a crash or a power
+cut leaves the file as it was before or as it is after, never half of it. What can't be read
+is set aside under a name that says so, and never overwritten:
+
+- `config.toml.broken-<time>`: a settings file that couldn't be read, or one found empty on a
+  computer where DA Toolkit has been used. DA Toolkit starts with default settings and a
+  banner that names the file: fix it, quit, and put it back as `config.toml`.
+- `state.json.bak` in a case folder is the state as saved one change earlier. A case whose
+  `state.json` can't be read, or is missing, opens from it, and the unreadable file is kept as
+  `state.json.damaged-<time>`.
+- `rdp_pins.json.unreadable-<date>-<time>`: see RDP, the pin file.
+
+The lock files (`instance.lock` and `.config.toml.lock` beside the config, `.lock` in a case
+folder, `datoolkit-guacd.lock` and `datoolkit-guacd.turn.lock` in the runtime directory) are
+how two running DA Toolkits keep out of each other's way (see [First run](#first-run)). They
+hold nothing of yours and can be left where they are.
+
 What is kept only in memory, and what never reaches a file or a log, is in
 [Security and privacy](docs/security-and-privacy.md#what-is-stored-on-this-computer).
 
 Inside a case directory: `case.json` (name, sensitivity, notes, client, whether its history is
-used), `events.jsonl` (audit log),
+used, and how many messages it has, for the case list), `events.jsonl` (audit log),
 `state.json` (conversation, chat and queue, rewritten on every change so the case can be
-resumed), `requests.jsonl` (every model request: prompt, messages, reasoning, reply),
+resumed) and `state.json.bak` (the save before it), `draft.json` (what the chat box holds,
+not sent yet), `requests.jsonl` (every model request as it was sent: prompt, messages,
+reasoning, reply),
 `img-N.png/jpg` (images as sent), `term-<session>.log` (transcripts), `transcript.md` and
 `ticket-summary.md` (exports).
 
 ## Untrusted output
 
 Everything a command prints is untrusted: a log line, a banner or a web page can carry text
-meant to steer the model. Three layers deal with that:
+meant to steer the model. These layers deal with that:
 
 - the system prompt tells the model to treat output as data;
+- text that isn't DA Toolkit's can't pass for it. DA Toolkit writes its own notes to the model
+  inside the conversation, each beginning `[DAToolkit`. Wherever text from elsewhere goes to a
+  model (command output, search results, fetched pages and their titles, research reports,
+  an image's description, a baseline diff, a runbook, a session's target), that marker is
+  rewritten as `[untrusted "DAToolkit"`, however it was disguised (other brackets, fullwidth
+  letters, invisible characters inside it), and the model is told what the rewritten marker
+  means. The same holds for what the research agent reads;
 - the review dialog flags text that looks like an injection before you send it, and text you
   can't see but the model would read: invisible Unicode tag characters (the warning spells out
-  what they say) and bidi controls, which reorder what is shown;
+  what they say) and bidi controls, which reorder what is shown. The check reads text as a
+  model would: a phrase wrapped across lines, split by a colour code or written in fullwidth
+  letters is still found, in English and in German, and so is an imitation of DA Toolkit's
+  own marker;
 - web search results, research reports and fetched pages reach the model marked as untrusted,
   with the same check (a search's card says when its results held such text), and text no one
-  can see is taken out of search results before the model reads them; the research agent works
+  can see is taken out of search results, page text and reports before the model reads them;
+  the research agent works
   from the brief alone and fetches only URLs it was shown, and a page returned whole has first
-  been checked by the agent;
-- the model's reply is rendered with no remote resources at all (no images, media or
+  been checked by the agent, its title with it (a title reaches the model as one line of at
+  most 120 characters), and counts as clean only when the agent plainly said so;
+- the model's reply is text, not a page: HTML in it is shown as typed and never becomes an
+  element, so a reply (or a research report, or a message from the phone) can't put a control
+  of its own on the page, hide the page's, or stand in for a dialog, and `<your-domain>` in a
+  sentence stays visible. Only what Markdown itself stands for is drawn, and a link is made
+  only for an `http`, `https` or `mailto` address;
+- the reply is rendered with no remote resources at all (no images, media or
   embeds, and a Content-Security-Policy that only allows this origin), so a steered model
   cannot leak data by making the page fetch a URL. Links open in your browser, and only when
   you click them: a steered model could still write a link whose address carries case data,
