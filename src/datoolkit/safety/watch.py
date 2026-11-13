@@ -26,7 +26,9 @@ def _embeddable(command: str) -> str:
         m = re.search(r"(?:^|\s)#", q[0])            # a comment starts a word, outside quotes
         if m:
             text = text[:m.start()].rstrip()
-    return text.rstrip(";").rstrip()
+    while text.endswith(";") and not text.endswith("\\;"):       # (find's `-exec ... \;` ends in one that belongs to it)
+        text = text[:-1].rstrip()
+    return text
 
 
 def wrap(command: str, interval: int, count: int, shell: str) -> str:

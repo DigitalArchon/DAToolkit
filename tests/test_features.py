@@ -206,6 +206,13 @@ def test_watch_wrap_and_collapse():
     assert "seq 1 3" in w and "sleep 5" in w and "=== WATCH" in w
     pw = watch.wrap("Get-Date", 2, 4, "powershell")
     assert "1..4" in pw and "Start-Sleep 2" in pw
+    # a watched command is rated again as wrapped, and stays read-only; find's own `\;` is not a `;` to take off
+    from datoolkit.safety.risk import effective
+    found = watch.wrap("find /var/log -size +100M -exec ls -lh {} \\; ;", 5, 3, "sh")
+    assert "{} \\;; [" in found
+    for wrapped in (w, pw, found, watch.wrap("Get-Service | Where-Object Status -eq Stopped", 2, 4, "powershell"),
+                    watch.wrap("ss -tlnp | wc -l  # listening", 2, 4, "sh")):
+        assert effective("read_only", wrapped) == ("read_only", []), wrapped
     text = "\n".join(["=== WATCH 1/4 10:00:00 ===", "a", "=== WATCH 2/4 10:00:05 ===", "a",
                       "=== WATCH 3/4 10:00:10 ===", "a", "=== WATCH 4/4 10:00:15 ===", "b"])
     out, dropped = watch.collapse(text)
