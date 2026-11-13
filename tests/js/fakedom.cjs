@@ -137,6 +137,7 @@ class Node extends Target {
     for (let n = node; n; n = n.parentNode) if (n === this) return true;
     return false;
   }
+  isEqualNode(other) { return !!other && this.nodeType === other.nodeType && serialize(this) === serialize(other); }
   // a failed assertion prints this, not the whole page each node leads to
   [Symbol.for("nodejs.util.inspect.custom")]() {
     if (this instanceof Text) return `#text ${JSON.stringify(this.data.slice(0, 40))}`;
@@ -154,6 +155,7 @@ class Text extends Node {
   get nodeValue() { return this.data; }
   get textContent() { return this.data; }
   set textContent(v) { this.data = v === null || v === undefined ? "" : String(v); }
+  appendData(text) { this.data += String(text); }
 }
 
 class ClassList {

@@ -48,7 +48,7 @@ const S = {
   promptModals: {},   // prompt id -> modal
   rows: new Map(),    // queue num -> row element
   tabs: new Map(),    // session id -> its tab
-  streamEl: null,     // the bubble of the reply being written
+  stream: null,       // the bubble of the reply being written, and its parts (streamView)
   running: new Set(), // queue nums being run (runItem)
   cardEdits: {},      // "search:<id>" / "research:<id>" -> what the technician typed into the card
   chatHistory: [],    // messages typed by the technician this session (up-arrow recall)
@@ -619,6 +619,7 @@ function handleEvent(ev) {
       S.state.busy = true;
       S.streaming = { text: "", reasoning: "", model: ev.model, tier: ev.tier, phase: "waiting", tool: "",
         startAt: Date.now(), lastAt: Date.now() };
+      S.stream = null;
       S.lastTurn = null;
       renderBusy();
       renderChat(true);
@@ -944,7 +945,7 @@ function renderHypotheses() {
 
 function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
 
-function renderEntry(e, live = false) {
+function renderEntry(e, live = false, parts = null) {
   if (e.kind === "note") {
     const last = S.state.chat[S.state.chat.length - 1] === e;
     const canRetry = e.retry && last && S.state.can_retry && !S.state.busy;
@@ -998,7 +999,9 @@ function renderEntry(e, live = false) {
     box.append(h("details", { open: !e.text ? true : false },
       h("summary", {}, noMessage ? "Reasoning (the AI wrote no message this turn)" : "Reasoning"), h("div", { class: "reasoning" }, e.reasoning)));
   }
-  box.append(rendered(e.text));
+  const body = rendered(e.text);
+  box.append(body);
+  if (parts) parts.body = body;
   if (e.refusal) box.append(h("div", { class: "warnbox small" },
     `${e.model || "The model"} declined this request${e.refusal.category ? ` (Anthropic's ${e.refusal.category} safeguard)` : ""}. Nothing it began was queued. Rephrase it, add context about the system you are working on, or switch model.`,
     e.refusal.explanation ? h("div", { class: "muted" }, e.refusal.explanation) : null));
@@ -1262,8 +1265,18 @@ function renderChat(scroll) {
     if (chat[i].kind === "assistant") { live = i; break; }
   }
   keepingCardFocus(() => {
-    log.replaceChildren(...chat.map((e, i) => renderEntry(e, i === live && !S.streaming)));
-    if (S.streaming) log.append(streamingBubble());
+    const entries = chat.map((e, i) => renderEntry(e, i === live && !S.streaming));
+    // the reply being written stays the element it is: the messages before it are put in around it
+    const bubble = S.streaming ? (S.stream ||= streamView()).el : null;
+    if (!S.streaming) S.stream = null;
+    if (bubble && bubble.parentNode === log) {
+      for (const el of [...log.children]) if (el !== bubble) el.remove();
+      bubble.before(...entries);
+    } else {
+      log.replaceChildren(...entries);
+      if (bubble) log.append(bubble);
+    }
+    if (S.streaming) updateStream(S.stream);
   });
   if (S.chatDrawn) S.chatMovedAt = performance.now();        // every message is a new element now
   S.chatDrawn = true;
@@ -1288,12 +1301,71 @@ function chatToEnd(log) {
   if (log.scrollTop !== was) S.chatMovedAt = performance.now();
 }
 
-function streamingBubble() {
-  const el = renderEntry({ ...S.streaming, streaming: true });
-  S.streamEl = el;
+// The reply being written is one bubble that stays on the page for the whole turn and is brought
+// up to date in place (S.stream), so what the technician does in it meanwhile holds: the
+// Reasoning section they opened stays open, text they selected in a finished paragraph stays
+// selected, a report they are reading stays unfolded, a field they are typing in stays theirs.
+// Only what changed is touched: the reasoning grows at its end, the message's paragraphs are
+// replaced from the first that differs (the last, as a rule), and a search or research card is
+// built again only when its own record changes. (Until Nov 2026 the whole bubble was built anew
+// for every frame.)
+function streamView() {
+  const st = S.streaming, parts = {};
+  const el = renderEntry({ kind: "assistant", model: st.model, tier: st.tier, text: "", streaming: true }, false, parts);
   el.classList.add("streaming");
-  (el.querySelector(".body > :last-child") || el.querySelector(".body")).append(h("span", { class: "caret" }));
-  return el;
+  const view = { el, body: parts.body, details: null, reasoning: null, shut: false, touched: false,
+    searches: h("div", { class: "scards hidden" }), research: h("div", { class: "scards hidden" }), cards: new Map() };
+  el.append(view.searches, view.research);
+  return view;
+}
+
+// `target`'s children become `fresh`'s, the ones at its start that are the same already left as they are.
+function patchChildren(target, fresh) {
+  const have = [...target.childNodes], want = [...fresh.childNodes];
+  let same = 0;
+  while (same < have.length && same < want.length && have[same].isEqualNode(want[same])) same++;
+  for (const node of have.slice(same)) node.remove();
+  target.append(...want.slice(same));
+}
+
+function updateStream(view) {
+  const st = S.streaming;
+  if (st.reasoning) {
+    if (!view.details) {
+      view.reasoning = document.createTextNode("");
+      view.details = h("details", { open: true },
+        h("summary", { onclick: () => { view.touched = true; } }, "Reasoning"), h("div", { class: "reasoning" }, view.reasoning));
+      view.el.insertBefore(view.details, view.body);
+    }
+    const had = view.reasoning.data;
+    if (st.reasoning.startsWith(had)) view.reasoning.appendData(st.reasoning.slice(had.length));
+    else view.reasoning.data = st.reasoning;
+    // open while it is all there is, closed as the message starts: once, and not if the technician has opened or closed it
+    if (st.text && !view.shut) {
+      view.shut = true;
+      if (!view.touched) view.details.open = false;
+    }
+  }
+  const fresh = rendered(st.text);
+  (fresh.lastElementChild || fresh).append(h("span", { class: "caret" }));
+  patchChildren(view.body, fresh);
+  // each card is kept until its record changes; a card in its place already is not touched
+  const cards = (box, records, kind, build) => {
+    const wanted = (records || []).map((rec) => {
+      const key = `${kind}:${rec.id}`, json = JSON.stringify(rec), old = view.cards.get(key);
+      if (old?.json === json) return old.el;
+      const el = build(rec);
+      view.cards.set(key, { json, el });
+      return el;
+    });
+    wanted.forEach((el, i) => { if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null); });
+    for (const el of [...box.children].slice(wanted.length)) el.remove();
+    box.classList.toggle("hidden", !wanted.length);
+  };
+  keepingCardFocus(() => {
+    cards(view.searches, st.searches, "search", searchCard);
+    cards(view.research, st.research, "research", researchCard);
+  });
 }
 
 let streamPending = false;
@@ -1302,13 +1374,14 @@ function scheduleStreamRender() {
   streamPending = true;
   requestAnimationFrame(() => {
     streamPending = false;
+    if (!S.streaming) return;
     const log = $("#chat-log");
     const stick = nearBottom(log);
-    const old = S.streamEl?.isConnected ? S.streamEl : null;
-    keepingCardFocus(() => {
-      if (old && S.streaming) old.replaceWith(streamingBubble());
-      else if (S.streaming) log.append(streamingBubble());
-    });
+    if (!S.stream?.el.isConnected) {
+      S.stream = streamView();
+      log.append(S.stream.el);
+    }
+    updateStream(S.stream);
     if (stick) chatToEnd(log);
   });
 }
@@ -1593,6 +1666,7 @@ function ensureTerm(sess) {
   term.onResize(({ cols, rows }) => termSend(t, { type: "resize", cols, rows }));
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
+    if (altDigit(e)) return true;            // the program's own (isGlobalShortcut)
     if (isGlobalShortcut(e)) return false;   // let it bubble to the document handler
     if (!e.ctrlKey || !e.shiftKey) return true;
     // Returning false only stops xterm; preventDefault also stops the browser's own
@@ -3338,17 +3412,23 @@ function runNextReadOnly() {
   guarded(() => runItem(item.num, "run", { readOnly: true }));
 }
 
+// Alt+1…9 and Ctrl+Shift+1…9 switch tabs. In a terminal Alt+digit is the program's (a window in
+// tmux, irssi or weechat, a digit argument in the shell), so there it goes to the program and
+// Ctrl+Shift+digit, which no terminal program can be sent, is the one that switches. (Until Nov
+// 2026 Alt+digit was taken from terminal programs.)
+const altDigit = (e) => e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-9]$/.test(e.code);
+const inTerminal = (e) => !!e.target?.closest?.(".term-host:not(.rdp-host)");
 function isGlobalShortcut(e) {
-  if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-9]$/.test(e.code)) return true;
-  if (e.ctrlKey && e.shiftKey && (e.key === "Enter" || e.code === "KeyK")) return true;
+  if (altDigit(e)) return true;
+  if (e.ctrlKey && e.shiftKey && (e.key === "Enter" || e.code === "KeyK" || /^Digit[1-9]$/.test(e.code))) return true;
   return false;
 }
 
 function globalKeys(e) {
-  if (!isGlobalShortcut(e) || MODALS.length) return;
+  if (!isGlobalShortcut(e) || MODALS.length || (altDigit(e) && inTerminal(e))) return;
   e.preventDefault();
   if (e.repeat) return;           // a held Ctrl+Shift+Enter would run one command after another
-  if (e.altKey) {
+  if (/^Digit[1-9]$/.test(e.code)) {
     const sessions = S.state?.sessions || [];
     const idx = Number(e.code.slice(5)) - 1;
     if (sessions[idx]) activateTab(sessions[idx].id);
@@ -4546,7 +4626,7 @@ function openSettings(tab = "providers") {
         } catch (e) { testOut.textContent = `✗ ${e.message}`; }
       }) }, "Save & test search")),
       testOut,
-      h("div", { class: "muted small" }, "Shortcuts: Alt+1…9 switch terminal tabs · Ctrl+Shift+Enter runs the next pending read-only command · Ctrl+Shift+K focuses the chat · Ctrl+Shift+C/V copy/paste in the terminal."),
+      h("div", { class: "muted small" }, "Shortcuts: Alt+1…9 or Ctrl+Shift+1…9 switch session tabs (inside a terminal Alt+digit goes to the program, so use Ctrl+Shift+digit there) · Ctrl+Shift+Enter runs the next pending read-only command · Ctrl+Shift+K focuses the chat · Ctrl+Shift+C/V copy/paste in the terminal."),
       h("div", { class: "muted small" }, `Case logs are stored under ${S.state.case ? S.state.case.dir.replace(/\/[^/]+$/, "") : "~/.local/share/datoolkit/cases"}.`),
       h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => guarded(async () => {
         await api("POST", "/api/settings", { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, Number(el.value)])),

@@ -1406,6 +1406,80 @@ test("what is typed into a search card survives the chat being rebuilt, caret an
   assert.deepEqual(plain(app.run("S.cardEdits")), {});
 });
 
+test("the reply being written stays one bubble: an opened section, a finished paragraph and a card's field are left as they are", async () => {
+  const app = await page("a");
+  const delta = async (kind, text) => { await app.event({ type: "delta", kind, text }); await app.clock.tick(20); };
+  await app.event({ type: "turn_start", model: "m", tier: "standard" });
+  await delta("reasoning", "First I check ");
+  const bubble = app.$("#chat-log .msg.streaming");
+  const details = bubble.querySelector("details"), words = bubble.querySelector(".reasoning").firstChild;
+  assert.equal(details.open, true, "open while it is all there is");
+  await delta("reasoning", "the disk.");
+  assert.ok(bubble.querySelector(".reasoning").firstChild === words, "the reasoning grows in the text node it has");
+  assert.equal(words.data, "First I check the disk.");
+  await delta("text", "The disk is full.\n\nNext, ");
+  assert.equal(details.open, false, "closed as the message starts");
+  // the technician opens it to read on
+  details.querySelector("summary").click();
+  details.open = true;
+  const first = bubble.querySelector(".body p");
+  await delta("text", "look at the logs");
+  await delta("reasoning", " Then the logs.");
+  assert.ok(app.$("#chat-log .msg.streaming") === bubble, "the same bubble");
+  assert.ok(bubble.querySelector("details") === details);
+  assert.equal(details.open, true, "what they opened stays open");
+  assert.ok(bubble.querySelector(".body p") === first, "a finished paragraph is the element it was, with whatever is selected in it");
+  assert.equal(bubble.querySelector(".body").textContent.replace(/\s+/g, " ").trim(), "The disk is full. Next, look at the logs");
+  assert.equal(bubble.querySelectorAll(".caret").length, 1);
+  // a search waits for approval: its field keeps the keyboard and what was typed while the reply goes on
+  await app.event({ type: "search", search: { id: "s1", status: "awaiting", query: "nginx 502", provider: "Brave" } });
+  await app.clock.tick(20);
+  const field = bubble.querySelector(".scard input");
+  field.focus();
+  await app.type(field, "nginx 502 after upgrade");
+  await delta("text", " and the config.");
+  assert.ok(bubble.querySelector(".scard input") === field, "the card was not rebuilt");
+  assert.ok(app.document.activeElement === field);
+  // a research report being read stays unfolded when another card changes
+  await app.event({ type: "research", research: { id: "r1", task: "research", status: "done", brief: "b", searches: 1, pages: 1, steps: [], report: "# Findings\n\nThe upstream times out." } });
+  await app.clock.tick(20);
+  const report = bubble.querySelector(".rcard details");
+  report.open = true;
+  await app.event({ type: "search", search: { id: "s1", status: "running", query: "nginx 502 after upgrade", provider: "Brave" } });
+  await app.clock.tick(20);
+  assert.equal(bubble.querySelector(".scard input"), null, "the card whose record changed is drawn again");
+  assert.ok(bubble.querySelector(".rcard details") === report);
+  assert.equal(report.open, true);
+  // another entry arrives in the chat meanwhile: the bubble is still the one it was, and last
+  await app.event({ type: "chat", entry: { kind: "note", text: "Session local-2 opened." } });
+  assert.ok(app.$("#chat-log").lastElementChild === bubble);
+  assert.deepEqual([details.open, report.open, bubble.querySelector(".body p") === first], [true, true, true]);
+  assert.equal(app.$("#chat-log").querySelectorAll(".msg.streaming").length, 1);
+  await app.event({ type: "turn_end", chat: [{ kind: "assistant", text: "The disk is full." }] });
+  assert.equal(app.$("#chat-log .msg.streaming"), null);
+  // the next turn starts a bubble of its own
+  await app.event({ type: "turn_start", model: "m", tier: "standard" });
+  await delta("text", "Again.");
+  assert.ok(app.$("#chat-log .msg.streaming") !== bubble);
+  assert.equal(app.$("#chat-log .msg.streaming").querySelector("details"), null);
+});
+
+test("Alt+digit in a terminal goes to the program; Ctrl+Shift+digit switches tabs from there, and Alt+digit elsewhere", async () => {
+  const app = await page("a", (s) => { s.sessions.push({ ...s.sessions[0], id: "local-2" }); });
+  const term = app.terminals[1], active = () => app.run("S.activeSid");
+  assert.equal(active(), "local-2");
+  const key = (init) => ({ type: "keydown", preventDefault() {}, ...init });
+  assert.equal(term.keyHandler(key({ key: "1", code: "Digit1", altKey: true })), true, "xterm sends it to the program");
+  const inside = term.element.appendChild(app.document.createElement("textarea"));
+  assert.equal(app.key(inside, { key: "1", code: "Digit1", altKey: true }).defaultPrevented, false);
+  assert.equal(active(), "local-2", "and the page leaves the tabs alone");
+  assert.equal(term.keyHandler(key({ key: "!", code: "Digit1", ctrlKey: true, shiftKey: true })), false, "not a key for the program");
+  assert.equal(app.key(inside, { key: "!", code: "Digit1", ctrlKey: true, shiftKey: true }).defaultPrevented, true);
+  assert.equal(active(), "local");
+  app.key(app.$("#chat-input"), { key: "2", code: "Digit2", altKey: true });
+  assert.equal(active(), "local-2", "outside a terminal Alt+digit switches as before");
+});
+
 test("an update leaves the chat where the technician scrolled it; opening a case goes to its end", async () => {
   const app = await page("a");
   const log = app.$("#chat-log");
