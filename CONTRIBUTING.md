@@ -19,6 +19,11 @@ Two related rules:
   model paths (helpers, reviewers, summaries) must go through the same tier check.
 - **Safety rules may only add caution.** Local risk rules can raise a command's risk but
   never lower what the model said; a reviewer can add warnings but never clear a flag.
+  `read_only` is an allow-list: it stands only for a command `safety/risk.py` names as a
+  reader, in a form that reads. A reader is added in its reading forms only, by the narrowest
+  rule that fits (the comment above `_READERS` says what admits one); when in doubt it is left
+  out, which costs the technician one look and nothing more. A dry run is rated like any other
+  command and earns nothing by being one.
 
 ## Scope
 
@@ -51,7 +56,11 @@ flow without an API key.
   `dcap.py`, `nras.py`, `ethsig.py`, `private_mode.py`) or the server's token checks need
   tests that fail without the change.
 - After editing risk, sensitive-data, redaction or injection rules, run `datoolkit-replay`
-  over your own past cases to see what would now be classified differently.
+  over your own past cases to see what would now be classified differently: each proposal
+  whose risk level changes (rated as the queue rates it), each command newly said to cut its
+  session or flagged sensitive, and each message sent to the AI that would now get more
+  redactions or an injection warning. A read-only label lost there is either rightly lost or
+  a reader the allow-list doesn't know yet.
 - The venv above is not what ships: its packages are the day's newest, and the system's own
   where it was made with `--system-site-packages`. A release is tested on the AppImage itself
   with `packaging/test-locked.sh`, which runs this test suite on the AppImage's Python and

@@ -15,8 +15,10 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
 ## What it does
 
 - **The AI cannot execute anything.** Its proposals land in a queue with a risk badge (read
-  only, modifying, disruptive) and a flag for commands that may expose secrets. Only your
-  click types a command into a terminal.
+  only, modifying, disruptive) and a flag for commands that may expose secrets. Read only is
+  the local rules' word, not the AI's: a command they don't know as one that only reads is
+  shown as modifying, whatever the AI called it. Only your click types a command into a
+  terminal.
 - **You choose what goes back.** Output is captured per command, secrets are redacted, and
   you review and edit the exact text before the AI sees it.
 - **Real terminals.** Local, SSH and WinRM sessions are real PTYs (`sudo`, Ctrl-C, pagers
@@ -34,8 +36,8 @@ A gated AI diagnostic console for Linux. You describe a problem; the AI proposes
   plain http only on this machine and its local network: nothing else is sent to. See
   [security and privacy](docs/security-and-privacy.md).
 - **An explicit investigation**: a hypothesis board the AI keeps up to date, recipes for
-  common checks, baselines and diffs, dry runs, rollbacks and second opinions from a
-  reviewer model before risky changes.
+  common checks, baselines and diffs, dry runs (rated by the same rules as any other
+  command), rollbacks and second opinions from a reviewer model before risky changes.
 - **A record of the case**: an audit log, terminal transcripts, a Markdown export and
   AI-written ticket summaries, client updates and runbooks.
 - Secrets live in the OS keyring (GNOME Keyring / KWallet), never in config files.

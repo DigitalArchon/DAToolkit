@@ -24,8 +24,10 @@ Anything that breaks one of DA Toolkit's promises, which
   reaching a case of another client or of a lower sensitivity;
 - secrets surviving redaction, or reaching config files, logs or exports that shouldn't hold them;
 - a web search or research brief that names the case's client, one of its hosts or logins, an
-  address or an e-mail leaving without your approval, or a command the local rules rate lower
-  than what it does;
+  address or an e-mail leaving without your approval;
+- a command the local rules rate lower than what it does: above all one they rate read only
+  that changes something, a dry run that does, or a pending command of a reopened case that
+  keeps a rating today's rules wouldn't give it;
 - a saved host password given to any host but the one it was saved for (a jump host on the
   way, say), or saved before the host accepted it;
 - a key, a password or a case passing through a proxy from the environment on its way to a

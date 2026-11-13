@@ -386,7 +386,19 @@ A Local provider is reached directly, never through a proxy from your environmen
   AI can withdraw or reorder only what it queued itself, never a recipe's steps, a tool
   transfer, a rollback or a dry run that you queued. A tool call a model writes as text is
   taken for a call only where it ends the message, never where the model quotes one, and
-  never from a Claude model.
+  never from a Claude model. A call with an item that can't be read queues nothing.
+- **Read only is the local rules' word, not the AI's.** Read only is the label that runs on
+  the keyboard shortcut and can be watched, so it stands only for a command the local rules
+  know as one that only reads: a named reader in a form that reads, with nothing on the line
+  the rules can't see (an operand hidden in an unquoted expansion, text handed to another
+  shell or an interpreter, output sent to a file, a command too long to read in full). A
+  command the AI calls read-only that the rules don't know is shown as modifying, said to be
+  unknown to them, and can't be run by the shortcut or watched. A dry run is rated by the same
+  rules as any other command, so a rehearsal is read only only where the rules confirm it
+  changes nothing, and none is offered where part of the command would still act. A recipe's
+  step, which is its author's text and not the AI's, keeps its author's read-only label where
+  the rules have nothing against it. When a case is opened again, its pending commands are
+  rated again by the rules in force, never below the AI's label.
 - **What you see is what runs.** Control characters, bidi overrides, zero-width and tag
   characters and look-alike spaces are taken out of every command before it is queued, and the
   item says what was removed. The command box shows all of its command (it scrolls, and says
@@ -539,7 +551,11 @@ against:
   with your account can read the case files, the unlocked keyring and the address printed with
   the token.
 - **What you approve.** Risk labels, reviews and redaction are aids, not guarantees: read every
-  command before you run it, and every result before you send it. Redaction doesn't blank a
+  command before you run it, and every result before you send it. The risk rules read one
+  command line at a time, as text: they don't follow a variable, an alias or a function that
+  an earlier command left in the shell, and a modifying command runs on one click, with no
+  dialog. A rehearsal that asks a tool not to act (`-WhatIf`, `--dry-run`) depends on the tool
+  obeying. Redaction doesn't blank a
   secret that nothing names, or names and addresses at all. A steered model can still
   write a link whose address carries case data; it opens only when you click it.
 - **A proxy in your environment.** Everything that goes beyond your own network goes through
