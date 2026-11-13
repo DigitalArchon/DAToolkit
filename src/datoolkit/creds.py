@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import keyring
 import keyring.core
-from keyring.errors import PasswordDeleteError
+from keyring.errors import NoKeyringError, PasswordDeleteError
 
 SERVICE = "datoolkit"
 
@@ -67,10 +67,26 @@ def get_secret(kind: str, name: str) -> str | None:
 
 
 def delete_secret(kind: str, name: str) -> None:
+    """Remove a secret; one that isn't there is no error, and neither is having no keyring at all
+    (nothing is kept in none). Raises KeyringUnavailable when the keyring couldn't be asked: it is
+    locked, its unlock prompt was dismissed, the Secret Service didn't answer. Until Nov 2026 only
+    "no such password" was caught, and anything else went up as the keyring's own exception from
+    whatever was deleting a provider or a host, half done."""
+    user = _user(kind, name)
     try:
-        keyring.delete_password(SERVICE, _user(kind, name))
-    except PasswordDeleteError:
-        pass
+        try:
+            keyring.delete_password(SERVICE, user)
+        except PasswordDeleteError:
+            # "no such password" from the Secret Service, and from KWallet; but KWallet says the
+            # same when its unlock prompt was cancelled, so the secret is looked for: still
+            # there, or not to be read, and it wasn't deleted
+            if keyring.get_password(SERVICE, user) is not None:
+                raise
+    except NoKeyringError:
+        return
+    except Exception as e:  # noqa: BLE001 - locked, dismissed, no answer: said as it is
+        raise KeyringUnavailable(f"The keyring couldn't remove it ({e or type(e).__name__}), so nothing was "
+                                 "changed. Unlock it, then try again.") from e
 
 
 def has_secret(kind: str, name: str) -> bool:

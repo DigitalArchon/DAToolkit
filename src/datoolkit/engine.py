@@ -591,6 +591,19 @@ class Engine:
     def _secrets_changed(self) -> None:
         self._secret_cache.clear()
 
+    @staticmethod
+    def _keyring_said(e: Exception) -> str:
+        """A failed keyring call, as the technician is told it: creds' own sentence (nothing
+        stored, nothing removed), or for an error of the keyring's own (reading a secret from
+        one that is locked, a Secret Service that doesn't answer) that error in a sentence.
+        Every failure is caught where a secret is stored, moved or removed for a provider or a
+        host, not one kind of it: until Nov 2026 a locked keyring ended a delete in a traceback,
+        with the entry gone from memory, still in config.toml, and its secret still kept."""
+        if isinstance(e, creds.KeyringUnavailable):
+            return str(e)
+        return (f"The keyring couldn't be used ({e or type(e).__name__}), so nothing was changed. Unlock it, "
+                "then try again.")
+
     # Two DA Toolkits can run at once (a technician with two tickets has a reason to), and each
     # read config.toml when it started. Until Nov 2026 each wrote its own copy over the file
     # whenever it saved anything: a host saved in one was gone from the file when a pane was
@@ -690,10 +703,12 @@ class Engine:
                             f"another API key, under a name of its own (such as \"{name} PAYG\" beside \"{name} Sub Only\").")
         renamed = bool(original_name and original_name != name and old)
         self._settings_ours()
-        # The secrets first, so a keyring that refuses them (none that keeps them safe, or a locked
-        # one: creds.KeyringUnavailable) leaves everything as it was. A password written into the
-        # address is kept in the keyring, as the key is, and config.toml has the address without
-        # it (config.ADDRESS_SECRET).
+        # The keyring first, every call to it, so one that refuses (none that keeps secrets safe,
+        # a locked one, its prompt dismissed) leaves the config and what is in memory as they
+        # were. A password written into the address is kept in the keyring, as the key is, and
+        # config.toml has the address without it (config.ADDRESS_SECRET). Until Nov 2026 only a
+        # refusal to store was caught: one to read or to remove ended in a traceback, after part
+        # of the change had been made.
         with_password = netguard.without_password(base_url) != base_url
         try:
             if with_password:
@@ -701,18 +716,20 @@ class Engine:
             key = api_key or (creds.get_secret("provider", original_name) if renamed else None)
             if key and (api_key or renamed):
                 creds.set_secret("provider", name, key)
-        except creds.KeyringUnavailable as e:
-            raise UserError(f"Provider not saved. {e}") from e
-        # One taken out of the address in Settings is taken out of the keyring. An address that
-        # didn't change is left alone: one whose password couldn't be read at start (a locked
-        # keyring) would lose it.
-        if not with_password and (old is None or old.base_url != base_url or original_name != name):
-            creds.delete_secret(config_mod.ADDRESS_SECRET, name)
-        if original_name and original_name != name:
-            creds.delete_secret(config_mod.ADDRESS_SECRET, original_name)
+            # One taken out of the address in Settings is taken out of the keyring. An address that
+            # didn't change is left alone: one whose password couldn't be read at start (a locked
+            # keyring) would lose it.
+            if not with_password and (old is None or old.base_url != base_url or original_name != name):
+                creds.delete_secret(config_mod.ADDRESS_SECRET, name)
+            if original_name and original_name != name:
+                creds.delete_secret(config_mod.ADDRESS_SECRET, original_name)
+            if renamed:
+                creds.delete_secret("provider", original_name)
+        except Exception as e:  # noqa: BLE001 - whatever the keyring raises: see _keyring_said
+            self._secrets_changed()
+            raise UserError(f"Provider not saved. {self._keyring_said(e)}") from e
         if renamed:
             self._provider_renamed(original_name, name)
-            creds.delete_secret("provider", original_name)
             if self.cfg.active_provider == original_name:
                 self.cfg.active_provider = name
         if old and old.base_url != base_url:
@@ -756,12 +773,19 @@ class Engine:
             self._tee.pop(key)[0].close()
 
     def delete_provider(self, name: str) -> None:
+        """Remove a provider, its secrets first: a keyring that can't remove them (locked, its
+        prompt dismissed) leaves the provider where it was, with a message, where until Nov 2026
+        it was gone from memory, still in config.toml, and its key still in the keyring."""
         self._settings_ours()
+        try:
+            creds.delete_secret("provider", name)
+            creds.delete_secret(config_mod.ADDRESS_SECRET, name)
+        except Exception as e:  # noqa: BLE001 - whatever the keyring raises: see _keyring_said
+            self._secrets_changed()
+            raise UserError(f"Provider not deleted. {self._keyring_said(e)}") from e
+        self._secrets_changed()
         self._forget_tee(name)
         self.cfg.providers = [p for p in self.cfg.providers if p.name != name]
-        creds.delete_secret("provider", name)
-        creds.delete_secret(config_mod.ADDRESS_SECRET, name)
-        self._secrets_changed()
         if self.cfg.active_provider == name:
             self.cfg.active_provider = self.cfg.providers[0].name if self.cfg.providers else ""
             self.cfg.active_model = ""
@@ -1592,10 +1616,11 @@ class Engine:
             pw = password or (creds.get_secret("host", original_name) if renamed else None)
             if pw and (password or renamed):
                 creds.set_secret("host", name, pw)
-        except creds.KeyringUnavailable as e:
-            raise UserError(f"Host not saved. {e}") from e
-        if renamed:
-            creds.delete_secret("host", original_name)
+            if renamed:
+                creds.delete_secret("host", original_name)
+        except Exception as e:  # noqa: BLE001 - whatever the keyring raises: see _keyring_said
+            self._secrets_changed()
+            raise UserError(f"Host not saved. {self._keyring_said(e)}") from e
         if old:
             self.cfg.hosts[self.cfg.hosts.index(old)] = host
         else:
@@ -1605,15 +1630,23 @@ class Engine:
         self._changed()
 
     def delete_host(self, name: str) -> None:
+        """Remove a host, its password first: a keyring that can't remove it leaves the host
+        where it was, with a message (as for a provider: delete_provider)."""
         self._settings_ours()
+        try:
+            creds.delete_secret("host", name)
+        except Exception as e:  # noqa: BLE001 - whatever the keyring raises: see _keyring_said
+            raise UserError(f"Host not deleted. {self._keyring_said(e)}") from e
         self.cfg.hosts = [h for h in self.cfg.hosts if h.name != name]
-        creds.delete_secret("host", name)
         self._secrets_changed()
         self._save()
         self._changed()
 
     def forget_host_password(self, name: str) -> None:
-        creds.delete_secret("host", name)
+        try:
+            creds.delete_secret("host", name)
+        except Exception as e:  # noqa: BLE001 - whatever the keyring raises: see _keyring_said
+            raise UserError(f"The password for {name} wasn't forgotten. {self._keyring_said(e)}") from e
         self._secrets_changed()
         self._changed()
 
