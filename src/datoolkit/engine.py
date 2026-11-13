@@ -4974,9 +4974,16 @@ class Engine:
                     if unknown:
                         reply += (f" Note: session id(s) {', '.join(unknown)} do not exist; the technician "
                                   "must pick a target for those.")
-                    no_rb = [p.num for p in added if p.risk != "read_only" and not p.rollback.strip()]
+                    # an item the rules don't know as a reader is no change that lacks its rollback:
+                    # the model is told how the technician sees it instead
+                    unconfirmed = [p.num for p in added if p.unconfirmed]
+                    no_rb = [p.num for p in added if p.risk != "read_only" and not p.rollback.strip() and not p.unconfirmed]
                     if no_rb:
                         reply += f" Items {', '.join(f'#{n}' for n in no_rb)} change state but have no rollback; include one next time."
+                    if unconfirmed:
+                        reply += (f" Items {', '.join(f'#{n}' for n in unconfirmed)} are shown to the technician as "
+                                  "modifying: the local rules don't know them as commands that only read, so they "
+                                  "can't be run with the read-only shortcut or watched.")
                     cuts = [p for p in added if p.cuts_session]
                     if cuts:
                         reply += " WARNING: " + "; ".join(f"#{p.num} {p.cuts_session}" for p in cuts) + ". Offer a safer alternative."

@@ -2810,8 +2810,12 @@ function updateRow(row, item) {
   }
   sel.disabled = !pending;
   $(".purpose", row).textContent = item.purpose + (item.edited ? "  (edited)" : "") + (item.recipe ? `  [recipe ${item.recipe}]` : "");
-  $(".rollback", row).textContent = item.rollback ? `Rollback: ${item.rollback}` : (item.risk !== "read_only" && !item.dry_run_of ? "No rollback given" : "");
-  $(".rollback", row).classList.toggle("missing", !item.rollback && item.risk !== "read_only" && !item.dry_run_of);
+  // a command the AI called read-only that the local rules don't know as a reader (item.unconfirmed)
+  // is shown as modifying: what is said of it is that, not that a change came without its rollback
+  const noRollback = !item.rollback && item.risk !== "read_only" && !item.dry_run_of;
+  $(".rollback", row).textContent = item.rollback ? `Rollback: ${item.rollback}`
+    : !noRollback ? "" : item.unconfirmed ? "The AI calls this read-only; the local rules don't know the command, so check what it does" : "No rollback given";
+  $(".rollback", row).classList.toggle("missing", noRollback);
   $(".cuts", row).textContent = item.cuts_session ? `⚠ Cuts this session: ${item.cuts_session}` : "";
   $(".invis", row).textContent = item.hidden?.length ? invisText(item) : "";
   const sensList = item.sensitive || [];

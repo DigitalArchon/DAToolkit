@@ -52,7 +52,7 @@ async def test_the_ai_is_told_its_call_was_invalid_and_nothing_of_it_is_queued(e
     fake.responses += [tool_call_stream(bad), tool_call_stream(good), sse(({"role": "assistant", "content": "Queued."}, "stop"))]
     engine.send("check the box")
     await wait_turn(engine)
-    assert "Invalid propose_commands arguments (item 2 is not an object)" in fake.requests[1]["messages"][-1]["content"]
+    assert "Invalid propose_commands arguments (item 2 is a string, not an object)" in fake.requests[1]["messages"][-1]["content"]
     # the second call's two items, once each, and both in the chat entry and the log
     assert [(p.num, p.command) for p in engine.queue.items] == [(1, "df -h"), (2, "free -m")]
     assert engine.chat[-1]["proposals"] == [1, 2]
@@ -160,3 +160,33 @@ def test_pending_items_of_a_resumed_case_are_rated_again():
 def test_a_review_goes_when_the_command_it_was_of_had_hidden_characters():
     q = Queue.from_list([_saved(1, "uptime" + chr(0x202E), review={"status": "done", "verdict": "ok"})])
     assert q.items[0].command == "uptime" and q.items[0].review == {} and q.items[0].hidden
+
+
+def test_a_recipes_step_keeps_its_authors_read_only_label_and_the_ais_same_text_doesnt():
+    """A recipe is written by its author and only named by the AI: where the rules have nothing
+    against a step but don't know it as a reader, the recipe's label stands; the same text proposed by
+    the AI, or the step once edited, is judged like any other command."""
+    from datoolkit import recipes
+    from datoolkit.safety import risk
+
+    q = Queue()
+    flipped = 0
+    for r in recipes.load_all():
+        for st in r.steps:
+            if st.risk != "read_only":
+                continue
+            raw = {"session_id": "s", "command": st.command, "risk": st.risk}
+            as_recipe = q.add("recipe", [{**raw, "recipe": r.id, "recipe_key": getattr(st, "key", "")}])[0]
+            level, why = risk.effective("read_only", st.command)
+            if why == [risk.UNKNOWN]:
+                flipped += 1
+                assert as_recipe.risk == "read_only" and not as_recipe.unconfirmed, (r.id, st.command)
+                from_ai = q.add("call_1", [raw])[0]
+                assert from_ai.risk == "modifying" and from_ai.unconfirmed and from_ai.to_dict()["unconfirmed"]
+                edited = q.update(as_recipe.num, command=st.command + " ")          # the same text: no edit
+                assert edited.risk == "read_only"
+                edited = q.update(as_recipe.num, command=st.command + "; true")
+                assert edited.risk != "read_only"
+            else:
+                assert as_recipe.risk == level, (r.id, st.command)          # a rule that raises it still does
+    assert flipped                                                         # the built-in recipes hold such steps

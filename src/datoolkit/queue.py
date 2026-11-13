@@ -44,9 +44,17 @@ class Proposal:
     def edited(self) -> bool:
         return self.command != self.original_command
 
+    @property
+    def unconfirmed(self) -> bool:
+        """The AI called it read-only and nothing in the local rules says otherwise, but they
+        don't know it as a command that only reads (risk.UNKNOWN): it is shown as modifying, and
+        what is said of it is that, not that a change lacks its rollback."""
+        return self.model_risk == "read_only" and self.risk_reasons == [risk.UNKNOWN]
+
     def to_dict(self) -> dict:
         d = asdict(self)
         d["edited"] = self.edited
+        d["unconfirmed"] = self.unconfirmed
         return d
 
 
@@ -135,6 +143,14 @@ class Queue:
             # forced to read-only, and some ran the real command. The one kind still taken at its
             # word is new text that only reads (`crontab -l`, `sc.exe queryex`), which the rules
             # confirm anyway: never below disruptive, and only as made, not once it is edited.
+            p.risk, p.risk_reasons = "read_only", []
+        if p.recipe and p.unconfirmed and p.command == p.original_command:
+            # A recipe's step is its author's text (a built-in recipe's, or one the technician
+            # wrote), not the AI's: the AI can only name a recipe, and the engine takes the recipe
+            # fields out of anything the AI proposes itself. Where the rules have nothing against a
+            # step but don't know it as a reader (a loop over the users' crontabs, a port probe
+            # through bash), the recipe's own label stands. A rule that raises it still does, and
+            # so does an edit: then it is judged like any other command.
             p.risk, p.risk_reasons = "read_only", []
         p.sensitive = sensitive(p.command)
         p.review = {}                    # a review was of the old command or target
