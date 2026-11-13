@@ -233,20 +233,74 @@ undoing each other's work:
   phase, e.g. "Preparing commands", and a note if no text has arrived for a few seconds) or
   *✓ AI finished. Your turn*, with what is waiting for you.
 - Proposed commands appear in the queue with a risk badge (read only / modifying /
-  disruptive). Local rules can raise the AI's own risk label but never lower it. Disruptive
-  commands need a second confirmation. A `>` or `;` inside quotes (an awk or jq program, a
-  grep pattern) is not read as a redirect or a new command, unless the quoted text is handed
-  to a shell again (`sh -c`, `ssh`, `xargs`, `find -exec` and the like). An awk program that
+  disruptive). Local rules can raise the AI's own risk label but never lower it; hover the
+  badge for what the AI said and what each rule found. Disruptive commands need a second
+  confirmation.
+- **Read only means the local rules know the command as one that only reads**, not that the
+  AI called it so. Read only is the level that runs on Ctrl+Shift+Enter and can be watched,
+  so it stands only where every command on the line is one the rules name, in a form that
+  reads. They name the usual tools for looking at files, processes, disks, services, logs,
+  packages and the network (`ls`, `cat`, `grep`, `df`, `ps`, `systemctl status`, `journalctl`,
+  `ip addr`, `ping`, `dig`), PowerShell's `Get-` and `Test-` cmdlets and the ones that shape
+  their output, cmd.exe's and Windows' own listing tools (`ipconfig /all`, `net user`), the
+  `show` and `display` commands of network devices, and the reading forms of tools that can
+  also change things (`kubectl get`, `docker ps`, `git status`, `apt list`, a SQL client given
+  a `SELECT`). What a shell would run from inside the line is read the same way and must pass
+  too: `$(…)`, `bash -c '…'`, `ssh host …`, find's `-exec`, a PowerShell script block. A `>`
+  or `;` inside quotes (an awk or jq program, a grep pattern) is not read as a redirect or a
+  new command, unless the quoted text is handed to a shell again (`sh -c`, `ssh`, `xargs`,
+  `find -exec` and the like). An awk program that
   writes a file or runs a command (`print > "file"`, `system()`) still counts as modifying.
-  Commands that only list are read only: `iptables -S`, `nft list ruleset`, `mount` with no
-  target, `net user`/`net share` with no switches, `dd … of=/dev/null`, `New-Object`, `Start-Sleep`.
+  Commands that only list are read only whatever they name: `iptables -S`, `nft list ruleset`,
+  `mount` with no target, `net user`/`net share` with no switches, `dd … of=/dev/null`,
+  `fdisk -l`, `bcdedit` alone, `systemctl status nginx | grep -i restart`, `Get-Help
+  Stop-Service`, `New-Object` of a plain type, `Start-Sleep`.
+- **A command the AI calls read-only that the rules don't know is shown as modifying**, with
+  the reason "not a command the local rules know as read-only" (a tool of your own, a script,
+  a command in a form the rules don't list). Its row says "The AI calls this read-only; the
+  local rules don't know the command, so check what it does" where a change would say "No
+  rollback given". It runs with its own Run button like any modifying command, but not with
+  Ctrl+Shift+Enter, and it can't be watched; the AI is told how you see it. A reader the rules
+  do know is not confirmed either when they can't see all of what the line will do:
+  - an operand hidden in an unquoted expansion, for a command that reads in some forms and
+    changes things in others (`systemctl status $unit`, `find . -name $n`; `cat $f` stays
+    read only);
+  - text handed to another shell or an interpreter that the rules can't read as well (`bash -c
+    "$script"`, `ssh host` with a command they don't know, `python3 -c`, a script file), a
+    backtick, a here-document;
+  - output sent to a file (`>`, `>>`, `2> errors.txt`, `| tee`; `2>/dev/null` and `2>&1` are
+    fine);
+  - a command too long to read in full: over 32,000 characters, a long run of base64 or hex
+    counting as one word ("too long for the local rules to read in full").
+
+  The rules read one command line at a time. They don't follow what an earlier command left
+  in the shell (a variable, an alias, a function), so a line that runs a variable's value
+  (`$x`) is judged without knowing the value: read it together with the line that set it.
+- **A recipe's step keeps its author's label.** A recipe is its author's text, a built-in one's
+  or your own, and the AI can only name a recipe, not write its steps. So where the rules have
+  nothing against a step but don't know it as a reader (a loop over the users' crontabs, a
+  port probe through bash), the recipe's read-only label stands. A rule that raises a step
+  still raises it, and a step you edit is judged like any other command.
+- **One item of a proposal that can't be read stops all of it.** If the AI's call holds an item
+  that is no command (text where an item belongs, a command that is a list), none of the call
+  is queued, and the AI is told which item was wrong so that it sends the call again.
 - A separate **sensitive** badge marks commands that may expose secrets or private data,
   whatever their risk level: reading key files, `/etc/shadow`, `.env` and credential files
   (NetworkManager's connections, Windows paths too, and `find … -exec cat`), a computer's own
   SSH settings, keys, browser data, saved passwords, mail and messages, listing personal folders
   (`~/Documents`), dumping the environment, shell history, secret stores, databases or a device
-  configuration, and commands that carry a password in their own text (where it lands in
-  shell history, the process list and the case log). A public key (`.pub`) is no secret. Sensitive items aren't run by
+  configuration (`show running-config` and `sh run` as it is typed, `display
+  current-configuration`, a pfSense or OPNsense `config.xml`, a RouterOS `/export` without
+  `hide-sensitive`), a VPN's keys (`/etc/wireguard/*.conf`, `wg showconf`, `.ovpn`,
+  `ipsec.secrets`) and Wi-Fi keys (`nmcli -s`), a variable named like a secret printed (`echo
+  $DB_PASSWORD`, `$env:API_KEY`), BitLocker recovery keys (`manage-bde -protectors -get`),
+  Terraform's output, state and `.tfvars`, the tools that hand out their own tokens (`aws`,
+  `az`, `gcloud`, `gh`, `gpg --export-secret-keys`, password managers), the secrets files of
+  services that log in for a machine (`smbpasswd`, `sasl_passwd`, keytabs, `sssd.conf`,
+  `.npmrc`), and commands that carry a password in their own text (where it lands in
+  shell history, the process list and the case log). A public key (`.pub`) is no secret, and
+  neither are the harmless neighbours (`sh ip int br`, `/export hide-sensitive`, `echo $PWD`,
+  `manage-bde -status`, `terraform plan`). Sensitive items aren't run by
   Ctrl+Shift+Enter, and their output gets a reminder to check it before it is sent. The AI is
   told which of its commands were flagged.
 - **Run** types the command and presses Enter. **Insert** types it without Enter, so you can
@@ -307,7 +361,11 @@ undoing each other's work:
   that tries to give the AI instructions). The AI is told to ignore such text, but you see
   it first and can edit it out.
 - **Resume a case**: the case dialog lists earlier cases. Opening one restores the
-  conversation, chat and queue; open sessions carry over. A case whose saved state can't be
+  conversation, chat and queue; open sessions carry over. Commands still pending are rated
+  again by the rules of the version that opens the case, from the AI's own label up and never
+  below it, so a case saved by an earlier version doesn't keep a read-only badge today's rules
+  wouldn't give; what has run, been skipped or sent keeps the rating it had. A case whose
+  saved state can't be
   read (a crash or a full disk cut the file short) opens from the copy kept of the save before
   it, and a note in the chat says that the last change may be missing; the unreadable file
   stays in the case folder. A case whose `case.json` is lost comes back at the highest
@@ -365,7 +423,10 @@ where the disk went (the WinDirStat question), who is on the LAN (the Advanced I
 question, run it in a session on the far side of a VPN to see that side), path and latency,
 disk health, DNS and reachability, baseline snapshots and watch helpers. Each step lands in
 the queue as a normal item; "Queue with install" adds the tool's install command as a
-separate modifying item first. The AI can queue a recipe too (`run_recipe`). Your own
+separate modifying item first. The AI can queue a recipe too (`run_recipe`). A step's `risk`
+is its author's label: the local rules can raise it, as they can the AI's, and a step marked
+`read_only` keeps that label where the rules have nothing against it, also when they don't
+know the command as a reader (see Workflow). Your own
 recipes go in `~/.config/datoolkit/recipes/*.toml`:
 
 ```toml
@@ -407,7 +468,19 @@ shows.
 
 - **Blast radius.** A command that would cut the session it runs in (restarting sshd or the
   network on the SSH host, disabling the adapter that carries WinRM, a firewall default-drop,
-  `reload` on a device, …) is marked in red and the confirmation says so.
+  `reload` on a device, …) is marked in red and the confirmation says so. The rules read each
+  outage in the forms it is usually typed. Over SSH: `netplan apply`, `ip l set eth0 down`,
+  `ip a flush`, `ip r del`, `ufw --force enable`, `iptables --flush` or `--policy INPUT DROP`
+  or a deleted INPUT rule, firewall-cmd's panic mode or a removed port 22, `rfkill`, `nmcli
+  radio … off`, `systemctl isolate` or `suspend`, and `authorized_keys` or `sshd_config`
+  removed, moved or written over. Over WinRM: the WinRM service stopped or restarted however
+  it is named (`Get-Service WinRM | Restart-Service`, `spsv`, `Set-Service … Stopped`),
+  `shutdown -r -t 0`, a cmdlet's `-Restart` switch, a reboot through WMI, the WinRM firewall
+  rule or every rule disabled, inbound traffic blocked through `netsh`, the network made
+  Public, the `WSMan:` drive, a new address for the adapter. The rules about the host and its
+  network hold for RDP and window sessions too. Their look-alikes are passed over (`ip link
+  show`, `shutdown /a`, `-Restart:$false`), and a command the rules know only to read cuts
+  nothing, whatever it names (`Get-Help Restart-Computer`).
 - **Rollback ledger.** The AI must give a rollback for every modifying or disruptive command;
   missing ones are shown in amber. **Recipes ▾ → Rollback ledger** lists the changes that
   ran, newest first, and queues their rollbacks for you to run one by one.
@@ -415,10 +488,36 @@ shows.
   `terraform plan`, `kubectl --dry-run`, `ansible --check`, `ls` before `rm`, a firewall
   backup before a firewall change), the **Dry run** button queues the rehearsal before the
   real item; its tooltip shows the rehearsal. Commands with no known rehearsal have no button,
-  and each item is rehearsed once at a time. A rehearsal counts as read-only, so a line that
-  chains, pipes or redirects (`;`, `&&`, `|`, `>`) gets one only if it keeps none of the line's
-  own commands (a firewall backup, `crontab -l`, a service's dependents): the rest would run for
-  real. Edit a rehearsal and it is judged like any other command.
+  and each item is rehearsed once at a time.
+  - **A dry run is rated by the same rules as any other command.** Being a rehearsal earns it
+    nothing: it is read only only where the rules confirm that the rehearsal itself changes
+    nothing (`apt -s`, `rsync -n`, `terraform plan`, `ls -ld` of what `rm` names, `find`
+    without its `-delete`, `sed` shown as a diff, `reg query`, `crontab -l`, a service's
+    dependents). A rehearsal that asks the tool itself not to act keeps the rating of the
+    command it rehearses, since nothing here can confirm the tool obeys: `Remove-Item
+    -WhatIf` is modifying, `Restart-Service -WhatIf` and `kubectl delete --dry-run=server`
+    disruptive, with the dialog. Edit a rehearsal and it is judged as edited, like any other
+    command.
+  - **`-WhatIf` goes straight after the cmdlet's name**, where nothing can swallow it, and is
+    offered only for cmdlets known to honour it: PowerShell's own for items, content,
+    services, processes and the computer, and the networking, SMB, DNS, DHCP, scheduled-task,
+    local-account, Active Directory, Hyper-V, storage and BitLocker modules. A cmdlet outside
+    that list may ignore the switch and act, so it gets no button. Nor does a line with a
+    comment, parentheses, a subexpression (`$(…)`), a script block, a redirect or a backtick
+    on it, since what stands there runs as written; and in a pipeline only the last command
+    is rehearsed, so one is offered only when every earlier stage is a reader the rules know
+    (`Get-ChildItem *.tmp | Remove-Item`).
+  - **No dry run where part of the command would still act.** `find` gets none while an
+    `-exec`, `-fprint` or `-fls` is left on it, `pacman -S` none with `y` or `c` among its
+    flags (it would still sync the databases or empty the cache), `sed -i` none with a `w` or
+    `e` command in its script, `kubectl` none with `--raw`. A line that chains, pipes or
+    redirects (`;`, `&&`, `|`, `>`) gets one only if the rehearsal keeps none of the line's
+    own commands (`crontab -l`, a service's dependents, the firewall as it is): the rest would
+    run for real.
+  - The rehearsal of `net stop X` is `sc.exe queryex X` and `sc.exe enumdepend X`, on two
+    lines, which cmd.exe and PowerShell both read. A firewall change's rehearsal saves the
+    current rules to a new file under `/tmp` first, with `sudo` where the change has it;
+    writing that file is a small change itself, so it is rated modifying.
 - **Second opinion.** **2nd opinion** on any pending item (read-only ones too, when you want
   to know what a command does before running it), or from the disruptive confirmation, asks a
   reviewer model what it does, what could go wrong, whether it exposes sensitive data, and for
@@ -441,6 +540,8 @@ shows.
   what Run would have asked about for it.
 - **Watch.** **Watch** on a read-only item wraps it in a bounded loop (every N seconds, M
   samples). When you send the result, iterations identical to the previous one are dropped.
+  Only an item the local rules rate read only has the button, and the loop it becomes is
+  rated again like any command.
 
 ### Photos, replay, context
 
@@ -654,7 +755,7 @@ the rules. From the AppImage, run `DAToolkit-<version>-x86_64.AppImage replay`.
 |---|---|
 | Ctrl+Shift+1 … 9 | Switch session tab, from anywhere |
 | Alt+1 … Alt+9 | Switch session tab, except inside a terminal, where Alt+digit goes to the program (tmux, irssi, the shell) |
-| Ctrl+Shift+Enter | Run the next pending **read-only** command (never a modifying, disruptive or sensitive one, or one the reviewer said not to run) |
+| Ctrl+Shift+Enter | Run the next pending **read-only** command: one the local rules know only to read (never a modifying, disruptive or sensitive one, one the AI calls read-only that the rules don't know, or one the reviewer said not to run) |
 | Ctrl+Shift+K | Focus the chat box (showing the chat if it is hidden) |
 | ↑ / ↓ in the chat box | Recall earlier messages |
 | Enter / Shift+Enter | Send / newline |
@@ -1430,8 +1531,20 @@ Local risk rules raise a command to **disruptive** when it fetches and runs code
 means than `rm -r` (`find … -exec rm`, `xargs rm`, `rsync --delete`, `git reset --hard`, `git
 clean -f`, `unlink`, `dconf reset -f`, `flatpak uninstall --all`), ends sessions or every process
 (`loginctl terminate-session`, `kill -9 -1`), reboots through D-Bus (`busctl call … Reboot`),
-opens a reverse shell or sets world-writable permissions, and to **modifying** for `eval`, inline
-interpreter code (`python -c`) and switching user (`su`, `sudo -i`). A command counts wherever
+opens a reverse shell or sets world-writable permissions. So is a command that stops or removes
+what is running or kept: containers (`docker stop`, `docker restart`, `docker compose down`),
+virtual machines (`virsh destroy`, `Stop-VM`), what a cluster runs (`kubectl delete`, `drain`,
+`scale` to 0, `helm uninstall`), `terraform destroy` and a cloud CLI's deletes, every `Stop-`,
+`Restart-` and `Suspend-` cmdlet and most `Remove-` ones, SQL that deletes or rewrites rows
+through a database's client (`psql -c 'DELETE …'`), `redis-cli FLUSHALL`, a vacuumed journal
+(`journalctl --vacuum-time`), volume and array tools (`zpool destroy`, `mdadm --stop`),
+`robocopy /MIR` and `git push --force`. They raise a command to **modifying** for `eval`, inline
+interpreter code (`python -c`) and switching user (`su`, `sudo -i`), and for anything the AI
+calls read-only that they don't know as a command that only reads (see Workflow). A command
+counts wherever
 it starts: on any line, after `do`, in a `{ … }` group, behind `sudo -u root`, `pkexec`, `run0`,
 `systemd-run`, `env`, a variable set for it (`FOO=1`), `nohup`, `timeout -s KILL 5` or `xargs -a
-list`, by its path (`/bin/rm`) or escaped (`\rm`).
+list`, by its path (`/bin/rm`, `C:\Windows\System32\shutdown`), with its extension
+(`shutdown.exe`), escaped (`\rm`, `r\m`) or quoted (`'rm' -rf`). The other way round, a command
+the rules confirm as a reader is read only whatever words it holds: `grep 'DROP TABLE'`,
+`Get-Help Stop-Service` and `fdisk -l` name what they look for or list, and do none of it.
