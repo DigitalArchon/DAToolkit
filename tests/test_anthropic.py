@@ -301,21 +301,16 @@ async def test_a_call_cut_off_by_the_context_window_is_not_queued(aenv):
     assert not engine.queue.items                 # its input may be missing fields the parser let go
 
 
-async def test_a_whole_call_before_a_cut_off_block_is_asked_for_again_not_queued(aenv):
-    # Until Nov 2026 a call that was whole before the reply was cut off was queued. No call of a
-    # reply cut off at the output limit is acted on now (the calls after it never came): the model
-    # is told so and asked again, and the technician sees that the reply was cut off.
+async def test_a_whole_call_before_a_cut_off_block_is_queued(aenv):
+    # the call was whole before the reply ran into the output limit: it is queued, and the message
+    # says the reply was cut off, so the technician knows more was coming
     engine, fake = aenv
     sid = await start(engine)
     fake.replies.append(_sse([{"type": "text", "text": "Checking."}, propose(sid, "df -h"),
                               {"type": "text", "text": "And after that I would"}], stop="max_tokens"))
-    fake.replies.append(_sse([{"type": "text", "text": "Again, shorter."}, propose(sid, "df -h", tid="toolu_2")]))
     engine.send("disk full")
     await wait_turn(engine)
-    assert [p.command for p in engine.queue.items] == ["df -h"]          # once, from the reply that was whole
-    told = [b for m in fake.requests[1]["messages"] if m["role"] == "user" and isinstance(m["content"], list)
-            for b in m["content"] if b.get("type") == "tool_result" and b.get("tool_use_id") == "toolu_1"]
-    assert "cut off at the output limit" in json.dumps(told) and "Nothing of it was queued" in json.dumps(told)
+    assert [p.command for p in engine.queue.items] == ["df -h"]
     assert engine.chat[-1] == {"kind": "note", "text": "The reply was cut off at the output limit."}
     assert engine.chat[-2]["proposals"] == [1] and engine.chat[-2]["cut_off"] == ["length"]
 

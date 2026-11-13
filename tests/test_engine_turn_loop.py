@@ -273,29 +273,27 @@ async def test_a_reply_stopped_by_the_content_filter_says_so(env):  # noqa: F811
     assert engine.chat[-2]["cut_off"] == ["content_filter"]
 
 
-async def test_the_calls_of_a_reply_cut_at_the_output_limit_are_not_acted_on(env):  # noqa: F811
+async def test_a_whole_call_of_a_reply_cut_at_the_output_limit_is_queued_and_the_cut_is_said(env):  # noqa: F811
+    """A call is its arguments' JSON: whole, or it doesn't parse. The one that was whole when the reply
+    ran into the limit is carried out; the one still being written is answered as unreadable, and the
+    message says the reply was cut off."""
     engine, fake, _ = env
     sid = setup(engine)
-    half = {"items": [{"session_id": sid, "command": "systemctl restart nginx", "purpose": "restart", "risk": "disruptive",
-                       "rollback": "systemctl stop nginx"},
-                      {"session_id": sid, "command": "rm -rf /var/cache/nginx"}]}        # short of its risk and rollback
-    cut = sse(({"role": "assistant", "content": "Restarting it."}, None),
+    whole = {"items": [{"session_id": sid, "command": "systemctl status nginx", "purpose": "state", "risk": "read_only"}]}
+    cut = sse(({"role": "assistant", "content": "Looking at it."}, None),
               ({"tool_calls": [{"index": 0, "id": "c0", "type": "function",
-                                "function": {"name": "propose_commands", "arguments": json.dumps(half)}}]}, None),
+                                "function": {"name": "propose_commands", "arguments": json.dumps(whole)}}]}, None),
               ({"tool_calls": [{"index": 1, "id": "c1", "type": "function",
-                                "function": {"name": "update_hypotheses", "arguments": json.dumps(HYP[1])}}]}, None),
+                                "function": {"name": "propose_commands", "arguments": '{"items": [{"session_id": "'}}]}, None),
               ({}, "length"))
-    whole = multi_tool_stream([("propose_commands", {"items": [{"session_id": sid, "command": "systemctl status nginx",
-                                                                "purpose": "state", "risk": "read_only"}]})], text="Again.")
-    fake.responses += [cut, whole]
+    fake.responses += [cut, sse(({"role": "assistant", "content": "Run #1 first."}, "stop"))]
     engine.send("nginx is down")
     await wait_turn(engine)
-    assert [p.command for p in engine.queue.items] == ["systemctl status nginx"]      # nothing of the cut reply
-    assert engine.hypotheses == []
-    replies = [m["content"] for m in fake.requests[1]["messages"] if m["role"] == "tool"]
-    assert len(replies) == 2 and all("cut off at the output limit" in r and "Nothing of it was queued" in r for r in replies)
-    said, note = engine.chat[-2:]
-    assert said["proposals"] == [1] and note["text"] == "The reply was cut off at the output limit."
+    assert [p.command for p in engine.queue.items] == ["systemctl status nginx"]      # the whole call, once
+    replies = {m["tool_call_id"]: m["content"] for m in fake.requests[1]["messages"] if m["role"] == "tool"}
+    assert "#1" in replies["c0"] and "#" not in replies["c1"]                         # the half-written one queued nothing
+    assert {"kind": "note", "text": "The reply was cut off at the output limit."} in engine.chat
+    assert next(e for e in engine.chat if e.get("cut_off"))["proposals"] == [1]
 
 
 async def test_a_reply_cut_off_before_any_of_it_came_can_be_retried(env):  # noqa: F811

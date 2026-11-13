@@ -4186,7 +4186,7 @@ class Engine:
                 usage = result.usage
                 self._turn_extras(entry, prov, model, result)
                 if result.finish_reason in _CUT_OFF and result.finish_reason not in cut_off:
-                    cut_off.append(result.finish_reason)     # said under the message; its calls aren't acted on
+                    cut_off.append(result.finish_reason)     # said under the message
                 self._log_request("chat", model, tier, system, sent, {
                     "content": result.content, "reasoning": entry["reasoning"][round_reasoning:],
                     "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls],
@@ -4419,17 +4419,13 @@ class Engine:
             msg["content"] = ""
         self.conv.append(msg)
         retry = False
-        cut_off = _CUT_OFF.get(result.finish_reason or "")
+        # The calls of a reply that was cut off (at the output limit, by a filter) are carried out
+        # like any other's: a call is its arguments' JSON, which is whole or doesn't parse, and the
+        # clients drop the one that was still being written (llm/anthropic_api.py, llm/client.py).
+        # What the cut took is said under the message (_run_turn), so the technician knows more
+        # was coming.
         for call in result.tool_calls:
-            if cut_off:
-                # A reply that was cut off may have lost the end of a call, or the calls after it: a
-                # list of commands short of its last items, an item short of its risk and rollback.
-                # None of its calls is carried out; the model is told, and asked again.
-                reply, retry = (f"Not carried out: your reply was cut off {cut_off}, so this call may be incomplete. "
-                                "Nothing of it was queued or changed. Make the call again, with a shorter message "
-                                "and fewer items in one call."), True
-                self.log("tool_call_cut_off", tool=call.name, finish_reason=result.finish_reason)
-            elif call.name == "update_hypotheses":
+            if call.name == "update_hypotheses":
                 try:
                     items = call.parsed()["items"]
                     if not isinstance(items, list):
