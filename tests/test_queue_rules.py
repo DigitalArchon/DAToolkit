@@ -190,3 +190,19 @@ def test_a_recipes_step_keeps_its_authors_read_only_label_and_the_ais_same_text_
             else:
                 assert as_recipe.risk == level, (r.id, st.command)          # a rule that raises it still does
     assert flipped                                                         # the built-in recipes hold such steps
+
+
+def test_a_winrm_session_is_powershells_alone_and_any_other_may_be_a_posix_shell():
+    """The queue tells the rules which kind of session an item is for: a statement beginning with a
+    variable keeps the AI's read-only in a WinRM console, and nowhere else."""
+    q = Queue()
+    raw = [{"session_id": "w", "command": "$s = Get-Service W32Time; $s.Status", "risk": "read_only"},
+           {"session_id": "s", "command": "$s = Get-Service W32Time; $s.Status", "risk": "read_only"},
+           {"session_id": "s", "command": "sudo $x", "risk": "read_only"},
+           {"session_id": "w", "command": "sudo $x", "risk": "read_only"}]
+    kinds = {"w": "winrm", "s": "ssh"}
+    added = q.add("call_1", raw, session_kinds=kinds)
+    assert [p.risk for p in added] == ["read_only", "modifying", "modifying", "modifying"]
+    assert [p.unconfirmed for p in added] == [False, True, True, True]
+    moved = q.update(added[0].num, session_id="s", session_kinds=kinds)        # the same text, for a session that may be bash
+    assert moved.risk == "modifying"

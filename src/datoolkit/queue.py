@@ -135,7 +135,9 @@ class Queue:
 
     @staticmethod
     def _classify(p: Proposal, session_kinds: dict[str, str] | None) -> None:
-        p.risk, p.risk_reasons = risk.effective(p.model_risk, p.command)
+        # a WinRM console is PowerShell and nothing else: there a statement may begin with a variable
+        kind = (session_kinds or {}).get(p.session_id, "local")
+        p.risk, p.risk_reasons = risk.effective(p.model_risk, p.command, "powershell" if kind == "winrm" else "")
         if p.dry_run_of is not None and p.rehearsal_reads and p.risk != "disruptive" and p.command == p.original_command:
             # A rehearsal is rated by the rules above like any command: `Remove-Item -WhatIf` stays
             # modifying, `kubectl delete --dry-run=server` disruptive, and `apt -s` or `ls -ld` come

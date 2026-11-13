@@ -894,6 +894,13 @@ _AMBIENT = {"HOME", "USER", "LOGNAME", "HOSTNAME", "UID", "EUID", "PPID", "RANDO
 _AMBIENT_PS = {"null", "true", "false", "env:computername", "env:username", "env:userdomain", "env:userdnsdomain",
                "env:temp", "env:tmp", "env:systemroot", "env:windir", "env:systemdrive", "env:programfiles", "env:programdata",
                "env:userprofile", "env:appdata", "env:localappdata", "env:logonserver", "env:homedrive", "env:homepath"}
+# Variables PowerShell defines itself, which a statement may begin with in any session: a POSIX shell
+# holds nothing under these names unless a line set it, and no line confirmed as read-only does (assign).
+_PS_OWN_NAMES = {"env", "psversiontable", "host", "error", "pshome", "psculture", "psuiculture", "psedition", "iswindows",
+                 "islinux", "ismacos", "true", "false", "null", "myinvocation", "executioncontext", "psscriptroot",
+                 "pscommandpath", "psboundparameters", "args", "input", "matches", "foreach", "this", "_"}
+_PS_OWN_VAR = re.compile(r"(?i)^\$(?:env:[A-Za-z_(][\w()]*|\{env:[^}]+\}|(?:" + "|".join(sorted(n for n in _PS_OWN_NAMES if n not in ("env", "_")))
+                         + r")(?![\w:])|_[.\[])")
 # Variables that change what a later command runs or loads: never set by a command confirmed as read-only.
 _RISKY_VAR = re.compile(r"(?i)^(?:PATH|IFS|ENV|HOME|SHELL|TERMINFO|TMPDIR|CDPATH|GLOBIGNORE|CLASSPATH|DISPLAY|NETRC|WGETRC|INPUTRC|ZDOTDIR|FPATH|PSModulePath|PATHEXT|COMSPEC"
                         r"|PS\d|PROMPT_COMMAND|EDITOR|VISUAL|BROWSER|\w*PAGER|MAN\w*|LESS\w*|LD_\w+|DYLD_\w+|BASH_\w+|PYTHON\w*|PERL\w*|RUBY\w*|NODE_\w+|GIT_\w+"
@@ -931,8 +938,10 @@ class _Check:
     Keeps what it learns on the way about which shell the line is written for: a line that needs
     both a POSIX shell's and PowerShell's reading, or a device's and a shell's, is given up on."""
 
-    def __init__(self, lexer: _Lexer) -> None:
+    def __init__(self, lexer: _Lexer, powershell: bool = False) -> None:
         self.lexer = lexer
+        # the line is for a session that is PowerShell's and nothing else's (WinRM): see expression
+        self.powershell = powershell
         self.ps = self.posix = self.device = False
         self.safe = set(_AMBIENT)                # variables known to hold one word that is no option
         self.oneword: set[str] = set()           # a for loop's: one word each time round, though it may start with a dash
@@ -1121,6 +1130,14 @@ class _Check:
         self.ps = True
         lead = w.raw.lstrip("!")
         if lead.startswith("$") or w.lead == "var":
+            if not inblock and not self.powershell and not _PS_OWN_VAR.match(lead):
+                # `$x`, `$x.Name`, `$x = Get-Date`: a value to PowerShell, and to a POSIX shell the
+                # command that x holds, with the rest as its arguments. What x holds was set by an
+                # earlier line the rules never see together with this one (`x=reboot` in one queue
+                # item, `sudo $x` in the next), so the statement is confirmed only where the session
+                # is PowerShell's alone, or the variable is one PowerShell defines itself and a
+                # POSIX shell is not confirmed setting (assign).
+                raise _No
             m = _PS_ASSIGN.match(lead)
             if not m and _PS_MEMBER_SET.match(lead):
                 raise _No                        # $x.Prop=..., $x[0]=...: sets something on an object
@@ -1210,8 +1227,8 @@ class _Check:
         """NAME=value before a command, or alone."""
         self.posix = True
         name = m.group(1)
-        if _RISKY_VAR.match(name):
-            raise _No
+        if _RISKY_VAR.match(name) or name.lower() in _PS_OWN_NAMES:
+            raise _No                            # or one a later `$env:X`, `$PSVersionTable` would then run (expression)
         self.inert(w)
         if not w.exps and _SAFE_VALUE.fullmatch(w.s[m.end():]):
             self.safe.add(name)
@@ -1246,6 +1263,8 @@ class _Check:
             if not words:
                 return ""
             w, args = words[0], words[1:]
+            if w.lead == "var":
+                raise _No                        # `sudo $x`, `X=1 $x`: after a prefix a variable is the command to run, in any shell
             if w.lead != "lit":                  # `time (dig ...)`: what a prefix runs may be a group
                 return self.stage(words, before, inblock)
             if w.lead == "lit" and w.raw.startswith("/") and not _STD_DIR.match(w.raw):
@@ -1334,7 +1353,7 @@ class _Ctx:
         self.chk, self.words, self.inblock = chk, words, inblock
 
 
-def _read_as(text: str, bs: bool) -> tuple[bool | None, bool]:
+def _read_as(text: str, bs: bool, powershell: bool = False) -> tuple[bool | None, bool]:
     """(whether `text` only reads, with double quotes read one way: None if a quote stays open; whether the
     other reading could differ)."""
     lx = _Lexer(text, bs)
@@ -1342,7 +1361,7 @@ def _read_as(text: str, bs: bool) -> tuple[bool | None, bool]:
         if text.lstrip().startswith("^") or "\n^" in text:
             raise _No                            # ^old^new: bash runs the line before again, changed
         script, _ = lx.script(0, "")
-        chk = _Check(lx)
+        chk = _Check(lx, powershell)
         chk.script(script)
         chk.consistent()
         pieces = 0
@@ -1362,22 +1381,26 @@ def _read_as(text: str, bs: bool) -> tuple[bool | None, bool]:
 
 
 @functools.lru_cache(maxsize=256)
-def _reads(text: str) -> bool:
-    posix, ambiguous = _read_as(text, True)
+def _reads(text: str, powershell: bool = False) -> bool:
+    posix, ambiguous = _read_as(text, True, powershell)
     if not ambiguous:
         return posix is True
     # a \" inside double quotes: an escaped quote to a POSIX shell, the string's end to PowerShell and
     # cmd.exe. Read both ways; the command must pass each way it can be read at all.
-    windows = _read_as(text, False)[0]
+    windows = _read_as(text, False, powershell)[0]
     return (posix is True and windows is not False) or (windows is True and posix is None)
 
 
-def reads_only(command: str) -> bool:
+def reads_only(command: str, shell: str = "") -> bool:
     """Whether the local rules can confirm that this command changes nothing: every command in it
     is a known reader in a form that reads, nothing is written to a file, and nothing in it is
-    handed to a shell or an interpreter that the rules can't read as well."""
+    handed to a shell or an interpreter that the rules can't read as well.
+
+    `shell`: "powershell" where the session the command is for can be nothing else (a WinRM
+    console); anywhere else the line is read as every shell it could reach would read it, and a
+    statement that begins with a variable is not confirmed (_Check.expression)."""
     text, cut = bounded(command)
-    return not cut and bool(text.strip()) and _reads(text)
+    return not cut and bool(text.strip()) and _reads(text, shell == "powershell")
 
 
 # ---------------------------------------------------------------------------------------
@@ -3201,13 +3224,14 @@ def classify(command: str) -> tuple[str, list[str]]:
     return _deny(command)
 
 
-def effective(model_level: str, command: str) -> tuple[str, list[str]]:
+def effective(model_level: str, command: str, shell: str = "") -> tuple[str, list[str]]:
     """Combine the model's label with local rules; the higher level wins. `read_only` stands only
-    for a command the allow-list confirms: one the rules don't know is rated modifying."""
+    for a command the allow-list confirms: one the rules don't know is rated modifying. `shell`:
+    "powershell" for a session that is PowerShell's alone (reads_only)."""
     local, reasons = classify(command)
     model_level = model_level if model_level in LEVELS else "modifying"
     level = max(model_level, local, key=LEVELS.index)
-    if level == "read_only" and not reads_only(command):
+    if level == "read_only" and not reads_only(command, shell):
         return "modifying", [UNKNOWN]
     return level, reasons
 
@@ -3229,7 +3253,7 @@ def session_impact(command: str, session_kind: str) -> str | None:
         rules = _WINDOW_CUTS
     else:
         return None
-    if reads_only(command):
+    if reads_only(command, "powershell" if session_kind == "winrm" else ""):
         return None
     views = [plain for plain, _ in _views(bounded(command)[0])]
     for pat, why in rules:

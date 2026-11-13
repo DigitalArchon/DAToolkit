@@ -10,6 +10,7 @@ import base64
 import io
 import json
 import random
+import re
 import time
 from pathlib import Path
 
@@ -243,8 +244,13 @@ def test_changing_forms_still_raise(cmd, level):
 def test_ordinary_diagnosis_keeps_its_read_only_label():
     """POSIX, PowerShell, cmd.exe and network-device commands as technicians and models write them: each is a
     known reader in a form that reads, so the model's read_only stands (and no rule's wording rates it up)."""
-    lost = [c for c in _rows("commands_that_read.jsonl") if effective("read_only", c) != ("read_only", [])]
-    assert not lost, lost
+    rows = _rows("commands_that_read.jsonl")
+    lost = [c for c in rows if effective("read_only", c) != ("read_only", [])]
+    # A statement that begins with a variable of the technician's own (`$s = Get-Service W32Time; $s.Status`) is
+    # a value to PowerShell and a command to a POSIX shell: confirmed where the session is PowerShell's alone.
+    only_powershell = [c for c in lost if effective("read_only", c, "powershell") == ("read_only", [])]
+    assert lost == only_powershell, [c for c in lost if c not in only_powershell]
+    assert all(re.search(r"(?:^|[;{]\s*)\$\w+", c) for c in only_powershell) and len(only_powershell) < len(rows) / 20
 
 
 def test_read_only_stands_only_for_what_the_rules_can_confirm():
@@ -307,7 +313,35 @@ def test_what_a_posix_shell_would_run_inside_a_powershell_line_is_read_as_its_co
     "Get-ChildItem | ForEach-Object { $_.Name }", '$x = 5; $y = "text"; $x', "if ($env:USERDNSDOMAIN) { Resolve-DnsName $env:USERDNSDOMAIN } else { 'No domain to resolve' }",
 ])
 def test_ordinary_powershell_blocks_are_still_confirmed(command):
+    # the one that begins statements with its own variables, where the session is PowerShell's alone
+    assert reads_only(command, "powershell" if command.startswith("$x") else "")
+
+
+@pytest.mark.parametrize("command", [
+    "$x", "sudo $x", "ls; $x", "echo ok && $x", "$x.Name", "$x | Format-List", "$p = Get-Process; $p.Count", "$x=Get-Date",
+    "${x}", "$cmd status", "uptime\n$x",
+])
+def test_a_variable_that_begins_a_statement_is_confirmed_only_where_the_session_is_powershells(command):
+    """`$x` is a value to PowerShell and, to a POSIX shell, the command x holds: `x=reboot` in one queue
+    item and `sudo $x` in the next were both read only, and both ran on the read-only shortcut."""
+    assert not reads_only(command) and effective("read_only", command) == ("modifying", [UNKNOWN])
+    # after a prefix it is the command to run in any shell
+    after_prefix = command.startswith(("sudo", "$cmd"))            # `$cmd status` is an error to PowerShell too
+    assert reads_only(command, "powershell") is not after_prefix
+
+
+@pytest.mark.parametrize("command", [
+    "$PSVersionTable", "$PSVersionTable.PSVersion", "$env:COMPUTERNAME", "$env:PATH -split ';'", "$Host.Version",
+    "$null = Get-Date", "Get-Service | ForEach-Object { $_.Name }", "Get-Process | Where-Object { $_.CPU -gt 10 }",
+])
+def test_powershells_own_variables_begin_a_statement_in_any_session(command):
     assert reads_only(command)
+
+
+@pytest.mark.parametrize("command", ["PSVersionTable=reboot", 'env="reboot "', "Host=/sbin/reboot uptime", "null=x"])
+def test_a_posix_shell_isnt_confirmed_setting_a_name_powershell_owns(command):
+    """Or `$env:PATH`, confirmed as PowerShell's own, would run what such a line had left there."""
+    assert not reads_only(command)
 
 
 @pytest.mark.parametrize("command,level", [
