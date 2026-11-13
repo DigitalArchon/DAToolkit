@@ -1,7 +1,10 @@
-"""The engine's own state: a reply left at "checking", how much of a transcript a capture reads,
-and how often a snapshot reads the pin store."""
+"""The engine's own state: an emptied command box, a reply left at "checking", how much of a
+transcript a capture reads, and how often a snapshot reads the pin store."""
+
+import pytest
 
 from datoolkit.config import Host
+from datoolkit.engine import UserError
 
 from test_engine import env  # noqa: F401
 
@@ -9,6 +12,31 @@ from test_engine import env  # noqa: F401
 def _queue_one(engine, command="systemctl restart nginx"):
     engine.new_case("queue", "open")
     return engine.queue.add("c1", [{"session_id": "local", "command": command, "risk": "disruptive"}])[0]
+
+
+# ---------------------------------------------------------------- an emptied command box
+
+@pytest.mark.parametrize("emptied", ["", "   ", "\n\t ", "\u200b\u200b", " \u2060 "])
+async def test_an_emptied_command_is_refused_not_taken_as_no_change(env, emptied):  # noqa: F811
+    engine, _, events = env
+    p = _queue_one(engine)
+    events.clear()
+    with pytest.raises(UserError, match=f"#{p.num}'s command is empty. To leave it out, skip the item instead"):
+        engine.update_item(p.num, command=emptied)
+    with pytest.raises(UserError, match="command is empty"):
+        engine.update_item(p.num, command=emptied, status="ran", note="x")       # whole: no part of it applied
+    assert (p.command, p.status, p.note, p.edited) == ("systemctl restart nginx", "pending", "", False)
+    assert not [e for e in events if e["type"] == "queue"]
+    engine.update_item(p.num, status="skipped", note="not needed")               # what the message says to do
+    assert p.status == "skipped"
+
+
+async def test_an_edit_and_a_status_alone_still_go_through(env):  # noqa: F811
+    engine, _, _ = env
+    p = _queue_one(engine)
+    assert engine.update_item(p.num, command="systemctl reload nginx")["command"] == "systemctl reload nginx"
+    assert engine.update_item(p.num, status="ran")["status"] == "ran"
+    assert engine.update_item(p.num, note="done")["note"] == "done"
 
 
 # ---------------------------------------------------------------- a reply left at "checking"

@@ -2810,6 +2810,11 @@ class Engine:
     def update_item(self, num: int, **fields) -> dict:
         was = self.queue.get(num).status
         was_pending = was == "pending"
+        if fields.get("command") is not None and not visible(str(fields["command"])).strip():
+            # An emptied box is not an edit the queue can take (it keeps the command it had), and
+            # Run after it typed that one, the command the technician had just deleted. Refused
+            # whole, before anything else in the request is applied.
+            raise UserError(f"#{num}'s command is empty. To leave it out, skip the item instead; nothing was changed.")
         if "status" in fields:
             # what the technician (desktop or phone) may set, and from what: "sent" and
             # "withdrawn" are set by the engine itself. A dialog or a phone screen can be older
