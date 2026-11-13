@@ -900,12 +900,13 @@ _RISKY_VAR = re.compile(r"(?i)^(?:PATH|IFS|ENV|HOME|SHELL|TERMINFO|TMPDIR|CDPATH
                         r"|ANSIBLE_\w+|TF_\w+|HELM_\w+|CURL_\w+|OPENSSL_\w+|SSL_\w+|REQUESTS_\w+|GNUPGHOME|POSIXLY_CORRECT|\w*_proxy)$")
 _ASSIGN = re.compile(r"([A-Za-z_]\w*)\+?=")
 _SAFE_VALUE = re.compile(r"[\w./:@%+,~][\w./:@%+,~=-]*|")
-_PS_ASSIGN = re.compile(r"(?:\[[\w.\[\], ]+\])?\$((?:[A-Za-z_]\w*:)?\w+)\s*(?:[-+*/%]|\?\?)?=(?!=)")
-_STATIC_CALL = re.compile(r"(?:\[[\w.\[\], ]+\])*\[([\w.]+)\]::\w+\(\)")
+_TYPE = r"\[[\w.]+(?:\[[\w., ]*\])?\]"              # [type], [type[]], [type[a,b]]
+_PS_ASSIGN = re.compile(r"(?:" + _TYPE + r")?\$((?:[A-Za-z_]\w*:)?\w+)\s*(?:[-+*/%]|\?\?)?=(?!=)")
+_STATIC_CALL = re.compile(r"(?:" + _TYPE + r")*+\[([\w.]+)\]::\w+\(\)")
 _PS_MEMBER_SET = re.compile(r"\$[\w:]+(?:\.\w+|\[[^\]]*\]|::\w+)+(?:[-+*/%]|\?\?)?=(?!=)")
-_PS_TARGET = re.compile(r"(?:\[[\w.\[\], ]+\])?\$((?:[A-Za-z_]\w*:)?\w+)")
+_PS_TARGET = re.compile(r"(?:" + _TYPE + r")?\$((?:[A-Za-z_]\w*:)?\w+)")
 _ASSIGN_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "??="}
-_TYPE_LED = re.compile(r"(?:\[[A-Za-z_][\w.,\[\] ]*\])+(?:::[A-Za-z_]|[$(@'\"]|$)")
+_TYPE_LED = re.compile(r"(?:" + _TYPE + r")++(?:::[A-Za-z_]|[$(@'\"]|$)")
 _PS_OPS = {p + op for op in ("eq", "ne", "gt", "ge", "lt", "le", "like", "notlike", "match", "notmatch", "contains", "notcontains", "in", "notin",
                              "replace", "split") for p in ("-", "-c", "-i")} | {"-and", "-or", "-xor", "-not", "-band", "-bor", "-bxor", "-shl", "-shr",
                                                                                  "-is", "-isnot", "-as", "-join", "-f", "+", "-", "*", "/", "%", "..", ","}
@@ -929,6 +930,7 @@ class _Check:
         self.ps = self.posix = self.device = False
         self.safe = set(_AMBIENT)                # variables known to hold one word that is no option
         self.oneword: set[str] = set()           # a for loop's: one word each time round, though it may start with a dash
+        self.pings: set[str] = set()             # PowerShell variables this command set to a new Ping object
         self.joined = False
         self.depth = 0
 
@@ -995,7 +997,7 @@ class _Check:
             elif kind == "hash":
                 self.hash(g[1])
             else:                                # a method called on a value: only the ones that change nothing
-                if g[1].lower() not in _PURE_METHODS:
+                if g[1].lower() not in _PURE_METHODS and not (g[1].lower() == "send" and self.ping(w)):
                     raise _No
                 self.ps = True
                 for pipe in g[2]:
@@ -1024,8 +1026,22 @@ class _Check:
                     raise _No
                 self.value(rhs, True)
 
-    def value(self, rhs: list, inblock: bool) -> None:
+    def ping(self, w: _W) -> bool:
+        """Whether .Send( is called on a Ping: `(New-Object Net.NetworkInformation.Ping).Send(...)`, or a variable
+        this command set to one. Send is no method to allow on whatever it is called on (a mail client has one)."""
+        held = re.match(r"\$(\w+)\.Send\(\)", w.raw, _I)
+        if held:
+            return held.group(1).lower() in self.pings
+        first = w.groups[0]
+        return (w.raw.startswith("().Send()") and first[0] == "paren" and len(first[1]) == 1 and len(first[1][0]) == 1
+                and _new_ping(first[1][0][0][0]))
+
+    def value(self, rhs: list, inblock: bool, name: str = "") -> None:
         """What stands right of an assignment's `=`: a command (which runs) or an expression."""
+        if name and _new_ping(rhs):
+            self.pings.add(name.lower())
+        else:
+            self.pings.discard(name.lower())
         if not rhs:
             return
         if rhs[0].plain and rhs[0].s[:1].isalpha():
@@ -1080,7 +1096,7 @@ class _Check:
                 self.target(m.group(1))
                 rest = lead[m.end():]
                 self.inert(w, inblock)
-                self.value(([_W(rest)] if rest and re.fullmatch(r"[\w.-]+", rest) else []) + words[1:], inblock)
+                self.value(([_W(rest)] if rest and re.fullmatch(r"[\w.-]+", rest) else []) + words[1:], inblock, m.group(1))
                 return ""
             name = next((e[0] for e in w.exps if e[0]), None)
             if not inblock and (not name or name == "_" or not re.search(r"[a-z]", name)):
@@ -1090,7 +1106,7 @@ class _Check:
             if not m:
                 raise _No                        # only a variable is assigned to; a property or an element is an object's
             self.target(m.group(1))
-            self.value(words[2:], inblock)
+            self.value(words[2:], inblock, m.group(1))
             return ""
         if (lead.startswith("$") or w.lead == "var") and len(words) > 1:
             op = words[1]
@@ -1269,6 +1285,11 @@ class _Check:
         return "device"
 
 
+def _new_ping(words: list) -> bool:
+    return (len(words) == 2 and all(w.plain for w in words) and words[0].s.lower() == "new-object"
+            and words[1].s.lower().removeprefix("system.") == "net.networkinformation.ping")
+
+
 class _Ctx:
     """What a rule may need beyond its arguments' text: the words themselves and the checker."""
     __slots__ = ("chk", "words", "inblock")
@@ -1288,8 +1309,12 @@ def _read_as(text: str, bs: bool) -> tuple[bool | None, bool]:
         chk = _Check(lx)
         chk.script(script)
         chk.consistent()
+        pieces = 0
         for q in lx.quoted:
             for m in _CMD_SPLIT.finditer(q):     # up to the next & or |; a `;` separates nothing there
+                pieces += 1
+                if pieces > 20:
+                    raise _No                    # too many to rate each: not confirmed
                 if _deny(re.split(r"[&|]", q[m.end():], maxsplit=1)[0].replace(";", " "))[0] != "read_only":
                     raise _No
         return True, lx.ambiguous
@@ -2008,7 +2033,7 @@ _SQL_CHANGES = re.compile(r"\b(?:insert|update|delete|drop|truncate|alter|create
                           r"|reindex|cluster|refresh|comment|execute|exec|prepare|handler|kill|shutdown|reset|purge|flush|install|uninstall|rename|backup"
                           r"|restore|attach|detach|begin|commit|rollback|savepoint|set|declare|open|fetch|notify|listen|unlisten|checkpoint|discard|reassign"
                           r"|into|outfile|dumpfile|start|stop|change|optimize|repair|for\s+(?:update|share))\b", _I)
-_SQL_CALLS = re.compile(r"([A-Za-z_][\w.]*)\s*\(")
+_SQL_CALLS = re.compile(r"(?<![\w.])([A-Za-z_][\w.]*+)\s*+\(")
 _SQL_PURE = set("""count sum avg min max now version current_database current_user coalesce nullif length char_length lower upper trim substring
     substr concat round floor ceil ceiling abs cast convert extract date_trunc date_part age to_char date datetime strftime date_format datediff
     timestampdiff unix_timestamp from_unixtime format string_agg array_agg group_concat db_name object_name schema_name getdate sysdatetime
@@ -2025,7 +2050,7 @@ _SQL_PROCS = {"sp_who", "sp_who2", "sp_helpdb", "sp_help", "sp_helptext", "sp_he
 def _sql_reads(sql: str) -> bool:
     """Whether every statement only reads: SELECT and its like with no function but known pure ones,
     SHOW, DESCRIBE, a listing meta-command of psql. Whatever it can't place, it refuses."""
-    if "/*" in sql or "\0" in sql:
+    if "/*" in sql or "\0" in sql or len(sql) > 4000:
         return False
     stripped = _SQL_STRING.sub("''", re.sub(r"\\[Gg]\s*$", "", sql.strip()))
     statements = [s.strip() for s in stripped.split(";") if s.strip()]
@@ -2986,6 +3011,11 @@ _WRAPPERS_NOCASE = {"powershell", "pwsh", "cmd", "wsl"}
 _SHELL_SYNTAX = {r[0] for r in DISRUPTIVE + MODIFYING if r[0].pattern.startswith(CMD)} | {
     r[0] for r in MODIFYING if r[1] in ("output redirect to file", "package change")}
 
+# Finding where a command starts is the costly part of those rules, and most commands hold none of the
+# words a rule is about: each such rule is first asked for by its words alone, wherever they stand.
+_WORDS_OF = {r[0]: re.compile(r"(?<!\w)(?:" + r[0].pattern[len(CMD):] + r")", r[0].flags & (re.I | re.M))
+             for r in DISRUPTIVE + MODIFYING if r[0].pattern.startswith(CMD)}
+
 # Commands that hand quoted text to a shell again, or to an interpreter as code: their quotes hide nothing.
 _REPARSES = re.compile(
     r"\b((ba|z|k|da|a|fi|)sh|su|runuser|script|env)\s+(\S+\s+){0,8}?-[a-zA-Z]*c\b|\b(ssh|eval|xargs|parallel|watch|nohup|timeout|chroot|wsl|psexec|schtasks|at)\b"
@@ -3066,7 +3096,10 @@ def _deny(command: str) -> tuple[str, list[str]]:
     def hits(rules):
         out = []
         for pat, why in rules:
-            if why not in out and any(pat.search(shell if pat in _SHELL_SYNTAX else plain) for plain, shell in views):
+            words = _WORDS_OF.get(pat)
+            if why in out or (words is not None and not any(words.search(shell) for _, shell in views)):
+                continue
+            if any(pat.search(shell if pat in _SHELL_SYNTAX else plain) for plain, shell in views):
                 out.append(why)
         return out
 

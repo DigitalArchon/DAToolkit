@@ -395,3 +395,6 @@
 "[IO.Path]::GetTempFileName()"
 "[Environment]::Exit(1)"
 "cd \"/tmp/a -delete\" && find $PWD"
+"$smtp.Send($msg)"
+"(New-Object Net.Mail.SmtpClient 'mail').Send($m)"
+"$p = New-Object Net.NetworkInformation.Ping; $p = $smtp; $p.Send($msg)"

@@ -278,3 +278,6 @@
 "foreach ($c in Get-ADComputer -Filter *) { $c.Name }"
 "printf '%s\\n' \"$x\""
 "while read -r a b; do echo \"$b\"; done < f"
+"(New-Object Net.NetworkInformation.Ping).Send('10.0.0.1', 300).Status"
+"$p = New-Object Net.NetworkInformation.Ping; $p.Send('10.0.0.1', 300)"
+"1..254 | ForEach-Object { $ip=\"10.0.0.$_\"; if ((New-Object Net.NetworkInformation.Ping).Send($ip, 300).Status -eq 'Success') { $ip } }"

@@ -222,7 +222,7 @@ _RULES: list[tuple[re.Pattern, object, str, bool]] = [
      "check the tree first", True),
     (re.compile(r"^(\s*(?:sudo\s+)?(write\s+mem|copy\s+run))", _I), lambda m, c: "show archive config differences", "show pending config differences", True),
     # PowerShell: the cmdlets known to support -WhatIf
-    (re.compile(r"^(?=[^\n]*[A-Za-z]+-[A-Za-z])"), lambda m, c: _whatif(c), "PowerShell -WhatIf", False),
+    (re.compile(r"^(?=[^\n]*?[A-Za-z]-[A-Za-z])"), lambda m, c: _whatif(c), "PowerShell -WhatIf", False),
     (re.compile(r"^(\s*reg(?:\.exe)?\s+(?:delete|add)\s+)(\"[^\"]+\"|\S+)", _I), _reg_query, "query the key first", False),
     (re.compile(r"^\s*net1?(?:\.exe)?\s+stop\s+(\"[^\"]+\"|\S+)", _I), lambda m, c: _sc_deps(m.group(1)), "service state and dependents", True),
 ]

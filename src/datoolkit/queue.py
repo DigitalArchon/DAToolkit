@@ -65,6 +65,7 @@ class Queue:
     def __init__(self) -> None:
         self.items: list[Proposal] = []
         self._next = 1
+        self._rehearsals: dict[int, tuple] = {}      # item number -> (its command, dry_run() of that command)
 
     def add(self, call_id: str, raw_items: list[dict], known_sessions: set[str] | None = None,
             fallback_session: str = "", session_kinds: dict[str, str] | None = None,
@@ -211,7 +212,12 @@ class Queue:
             raise ValueError("This command is read-only already.")
         if any(q.dry_run_of == p.num and q.status == "pending" for q in self.items):
             raise ValueError(f"A dry run of #{p.num} is already queued.")
-        dr = dry_run(p.command)
+        # worked out once for each command an item has had: to_list() asks for every item's on every
+        # queue event, and until Nov 2026 that ran the dry-run rules over the whole queue each time
+        known = self._rehearsals.get(p.num)
+        if known is None or known[0] != p.command:
+            known = self._rehearsals[p.num] = (p.command, dry_run(p.command))
+        dr = known[1]
         if not dr:
             raise ValueError("No dry-run form is known for this command.")
         return dr
