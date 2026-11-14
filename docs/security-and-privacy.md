@@ -160,6 +160,9 @@ container image itself; you pull it once, and it runs exactly the pinned image.
 - **A reply that was cut off is not a reply.** When a provider's connection closes before it
   has said the reply is complete, the turn fails with an error and nothing in what arrived is
   queued.
+- **No line of a reply past 32 MB is held.** A stream's event is a few kilobytes: a provider that
+  sends more than 32 MB without a line's end (counted as decoded, whatever its compression), in a
+  stream or a reply read whole, gets an error, and nothing more is read from it.
 - **Proxies.** DA Toolkit has no proxy or Tor setting of its own. Its connections go through
   the proxy your environment sets (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`), if any, with
   one exception: **what is on this computer or its local network is reached directly**, so the

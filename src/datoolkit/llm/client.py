@@ -40,6 +40,12 @@ SENSITIVITY_TIERS = {
 # minutes (two attempts) before the turn failed.
 CONNECT_TIMEOUT = 10
 
+# Read from a provider no further than this without a line's end. A stream's line (one event) is a
+# few kilobytes, an image sent inline a few megabytes: a longer one is no reply, and reading on would
+# hold memory for as long as the provider sent (SealedLore's providers/streaming.MAX_LINE_CHARS).
+MAX_LINE_CHARS = 32 * 1024 * 1024
+_NEWLINE = re.compile(r"\r\n|\r|\n")
+
 
 def is_private_mode(model_id: str) -> bool:
     """NanoGPT Private Mode: only ever sent sealed (llm/private_mode.py). However it's written
@@ -304,7 +310,8 @@ class LLMClient:
         self._client = _OpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1,
                                timeout=Timeout(300, connect=CONNECT_TIMEOUT),
                                http_client=http_client or DefaultAsyncHttpxClient(
-                                   follow_redirects=False, **local_http_options(base_url)))
+                                   follow_redirects=False, event_hooks={"response": [capped_lines]},
+                                   **local_http_options(base_url)))
 
     async def list_models(self) -> list[str]:
         page = await self._client.models.list()
@@ -375,7 +382,7 @@ class LLMClient:
                                              or response.headers.get("x-tee-signature-id"))
                     acc.result.tee_route = response.headers.get("x-tee-verification-route")
                 done = saw_data = unread = False
-                async for line in _lines(response, body):
+                async for line in read_lines(response.iter_bytes(), body, response.http_response.request.url):
                     if done or not line.startswith("data:"):
                         continue
                     data = line[len("data:"):].strip()
@@ -439,20 +446,74 @@ class LLMClient:
         return choices[0].message.content or ""
 
 
-async def _lines(response, body) -> AsyncIterator[str]:
-    """The stream's lines, each byte also fed to `body` (a hash) as it arrives, decoded of any
-    transfer encoding (SealedLore's providers/openai_compat._lines)."""
+def too_long(url) -> ProviderError:
+    """A provider sent a line of more than MAX_LINE_CHARS with no end."""
+    return ProviderError(f"{netguard.shown(str(url))} sent a line of more than {MAX_LINE_CHARS // (1024 * 1024)} MB "
+                         "with no end, which isn't a reply; it was not read further.")
+
+
+async def read_lines(chunks, body=None, url="the provider") -> AsyncIterator[str]:
+    """The stream's lines (ended by CRLF, CR or LF, as an event stream's are, and nothing else),
+    each byte also fed to `body` (a hash) as it arrives, decoded of any transfer encoding
+    (SealedLore's providers/openai_compat._lines). Each piece is split once, so a long line costs
+    its length and no more: the line so far was joined to each piece that came and split again,
+    whole, which took time growing with the square of its length; and a line past MAX_LINE_CHARS
+    is a ProviderError, nothing more read (SealedLore's streaming.read_lines). `chunks`: the
+    response's bytes as they arrive; `url`: where they came from, for the error."""
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    pending = ""
-    async for chunk in response.iter_bytes():
-        body.update(chunk)
-        pending += decoder.decode(chunk)
-        *complete, pending = re.split(r"\r\n|\r|\n", pending)
-        for line in complete:
-            yield line
-    pending += decoder.decode(b"", final=True)
-    if pending:
-        yield pending
+    line: list[str] = []            # the line not yet ended, in the pieces it came in
+    length = 0
+    held_cr = False                 # a CR at a piece's end may be the first half of a CRLF
+
+    def ended(text: str, final: bool) -> list[str]:
+        nonlocal length, held_cr
+        if held_cr:
+            text = "\r" + text
+        held_cr = not final and text.endswith("\r")
+        if held_cr:
+            text = text[:-1]
+        out = []
+        parts = _NEWLINE.split(text)
+        for index, part in enumerate(parts):
+            length += len(part)
+            if length > MAX_LINE_CHARS:
+                raise too_long(url)
+            line.append(part)
+            if index < len(parts) - 1:
+                out.append("".join(line))
+                line.clear()
+                length = 0
+        return out
+
+    async for chunk in chunks:
+        if body is not None:
+            body.update(chunk)
+        for done in ended(decoder.decode(chunk), final=False):
+            yield done
+    for done in ended(decoder.decode(b"", final=True), final=True):
+        yield done
+    if line and length:
+        yield "".join(line)
+
+
+async def capped_lines(response: httpx.Response) -> None:
+    """A response hook for the SDKs' HTTP clients (OpenAI's, Anthropic's): whatever the SDK reads
+    itself (the Messages API's event stream, a reply not streamed, a model list) is read no further
+    than MAX_LINE_CHARS without a line's end, as the streams this app reads are (`read_lines`). Counted
+    in the bytes as decoded of any content encoding, which is what the SDK holds: a few compressed
+    megabytes can be a line of gigabytes. The SDK's own readers keep a line until it ends, joining
+    each piece to what came before. A refusal raises out of the SDK's reading as it is."""
+    read = response.aiter_bytes
+
+    async def aiter_bytes(chunk_size: int | None = None) -> AsyncIterator[bytes]:
+        run = 0
+        async for chunk in read(chunk_size):
+            end = max(chunk.rfind(b"\n"), chunk.rfind(b"\r"))
+            run = len(chunk) - end - 1 if end >= 0 else run + len(chunk)
+            if run > MAX_LINE_CHARS:
+                raise too_long(response.request.url)
+            yield chunk
+    response.aiter_bytes = aiter_bytes     # read (aread, aiter_lines, the SDKs' streams) through it
 
 
 # provider extensions sent in the request body, whatever the SDK version knows about:

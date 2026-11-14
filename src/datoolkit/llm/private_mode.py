@@ -66,7 +66,7 @@ from openai.types.chat import ChatCompletionChunk
 from ..safety.hidden import visible
 from . import netguard, sdk_guard
 from .capabilities import norm_id
-from .client import StreamAccumulator, is_private_mode, openai_messages
+from .client import StreamAccumulator, capped_lines, is_private_mode, openai_messages, read_lines
 from .dcap import since_boot
 
 RELAY_PATH = "/api/v1/private/tinfoil"
@@ -382,7 +382,8 @@ class PrivateModeClient:
     async def _read_private_ids(self) -> list[str]:
         """NanoGPT's list of Private Mode models: public, so no key is sent. [] when it can't
         be read."""
-        client = self._plain or httpx.AsyncClient(timeout=PREFLIGHT_TIMEOUT_SECONDS)
+        client = self._plain or httpx.AsyncClient(timeout=PREFLIGHT_TIMEOUT_SECONDS,
+                                                  event_hooks={"response": [capped_lines]})
         try:
             resp = await client.get(self.enclave.relay + "/models", headers={"Accept": "application/json"})
             return private_ids_in(resp.json()) if resp.status_code < 400 else []
@@ -402,7 +403,8 @@ class PrivateModeClient:
             raise ModelRetired(model, ids, status_code, body)
 
     async def _preflight(self, model: str, body_bytes: int) -> tuple[str, str]:
-        client = self._plain or httpx.AsyncClient(timeout=PREFLIGHT_TIMEOUT_SECONDS)
+        client = self._plain or httpx.AsyncClient(timeout=PREFLIGHT_TIMEOUT_SECONDS,
+                                                  event_hooks={"response": [capped_lines]})
         try:
             resp = await client.post(self.enclave.relay + "/preflight",
                                      json={"model": model, "requestBodyBytes": body_bytes},
@@ -478,7 +480,8 @@ class PrivateModeClient:
         # request as httpx reads it for the others
         route = environment_proxy(self.enclave.relay)
         async with httpx.AsyncClient(transport=self._transport_factory(verified.hpke_public_key, route),
-                                     timeout=TIMEOUT_SECONDS, follow_redirects=False) as client:
+                                     timeout=TIMEOUT_SECONDS, follow_redirects=False,
+                                     event_hooks={"response": [capped_lines]}) as client:
             async with client.stream("POST", self.enclave.relay + "/v1/chat/completions",
                                      json=body, headers=headers) as resp:
                 from ehbp.protocol import RESPONSE_NONCE_HEADER
@@ -498,7 +501,10 @@ class PrivateModeClient:
                                            resp.status_code)
                 if resp.headers.get("x-nanogpt-private-mode") != "tinfoil":
                     raise PrivateModeError("the reply didn't come back through Private Mode; refused")
-                async for line in resp.aiter_lines():
+                # split at an event stream's line ends alone, and no further than MAX_LINE_CHARS without
+                # one (llm/client.py read_lines): httpx's aiter_lines also splits at U+2028 and U+0085,
+                # which JSON leaves unescaped in a string, and holds a line however long it grows
+                async for line in read_lines(resp.aiter_bytes(), url=resp.request.url):
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].strip()
