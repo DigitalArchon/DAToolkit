@@ -1137,8 +1137,10 @@ app of the author's that attests TEE models, and tested against a real attestati
    evidence either: its own enclave is then the gateway's word, in each reply's receipt. A
    model Chutes answers first that the gateway answers now and then (GLM 5.1 and 5.2, Kimi
    K2.6) is partial the same way, its instances attested and the gateway too; where NanoGPT
-   couldn't give the gateway's report just then (a rate limit, an outage), it falls short of
-   **RedPill's gateway unchecked** instead. The
+   couldn't give the gateway's report just then (a rate limit, an outage, an answer that can't
+   be read), it falls short of **RedPill's gateway unchecked** instead. Receipt keys that say
+   no time they expire, or one that isn't a whole number, are left unused, falling short of
+   **receipt keys expired**; only keys past the time they say are refused. The
    top bar shows **🛡 TEE gateway attested (partial)** where RedPill's gateway is what was
    attested, else **🛡 TEE attested (partial)**; the tooltip leads with what was attested and
    what that leaves to someone's word, then names each shortfall and the keys its replies are
