@@ -2027,6 +2027,115 @@ test("a provider's address changed without a new key asks first whether the save
   assert.equal(same.posts("/api/providers").at(-1).body.use_saved_key, undefined);
 });
 
+test("a No for an address is kept and not asked again at the next save; Ask again and Save & test ask", async () => {
+  const elsewhere = "https://api.example.org/v1";
+  // as the engine sends it after a No: the key held to its old address, the No kept for the new one
+  const declined = (s) => {
+    const p = s.config.providers.find((x) => x.name === "Fake");
+    p.key_origin = "https://fake.example:443";
+    p.base_url = elsewhere;
+    p.key_declined = "https://api.example.org:443";
+  };
+  const open = async () => {
+    const app = await page("a", declined, { "POST /api/providers": () => ({ ok: true }), "GET /api/models": () => ({ models: [] }) });
+    app.call("openSettings");
+    await app.clock.tick(0);
+    const item = app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("Fake"));
+    button(item, "Edit").click();
+    await app.clock.tick(0);
+    return app;
+  };
+  const app = await open();
+  const form = app.$(".modal");
+  assert.match(form.textContent, /The saved API key is for https:\/\/fake\.example, not sent to api\.example\.org/);
+  button(form, "Save").click();
+  await app.clock.tick(0);
+  assert.equal(app.document.querySelectorAll(".modal").length, 1, "nothing asked: the No is kept");
+  assert.equal(app.posts("/api/providers").at(-1).body.use_saved_key, undefined);
+
+  const again = await open();
+  button(again.$(".modal"), "Ask again").click();
+  await again.clock.tick(0);
+  const asked = again.document.querySelectorAll(".modal").at(-1);
+  assert.equal(asked.querySelector("h2").textContent, "Use the saved API key with api.example.org?");
+  button(asked, "Use it with api.example.org").click();
+  await again.clock.tick(0);
+  assert.equal(again.posts("/api/providers").at(-1).body.use_saved_key, true);
+
+  // it sends the key at once: asked, whatever No was kept, and No sends nothing new
+  const test_ = await open();
+  button(test_.$(".modal"), "Save & test").click();
+  await test_.clock.tick(0);
+  const testAsked = test_.document.querySelectorAll(".modal").at(-1);
+  assert.equal(testAsked.querySelector("h2").textContent, "Use the saved API key with api.example.org?");
+  button(testAsked, "No").click();
+  await test_.clock.tick(0);
+  assert.equal(test_.posts("/api/providers").at(-1).body.use_saved_key, false);
+});
+
+test("a key about to go over plain http to another machine is asked about first, No saving nothing", async () => {
+  const edit = async (address, key = "sk-new") => {
+    const app = await page("a", null, { "POST /api/providers": () => ({ ok: true }) });
+    app.call("openSettings");
+    await app.clock.tick(0);
+    const item = app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("Fake"));
+    button(item, "Edit").click();
+    await app.clock.tick(0);
+    const inputs = app.$(".modal").querySelectorAll("input");
+    inputs.find((i) => i.placeholder === "https://…").value = address;
+    inputs.find((i) => i.type === "password").value = key;
+    button(app.$(".modal"), "Save").click();
+    await app.clock.tick(0);
+    return app;
+  };
+  const app = await edit("http://192.168.1.5:8080/v1");
+  const asked = app.document.querySelectorAll(".modal").at(-1);
+  assert.equal(asked.querySelector("h2").textContent, "Send the API key unencrypted to 192.168.1.5?");
+  await app.clock.tick(50);
+  assert.ok(app.document.activeElement === button(asked, "No"), "No has the focus");
+  button(asked, "No").click();
+  await app.clock.tick(0);
+  assert.equal(app.posts("/api/providers").length, 0, "No saves nothing");
+
+  const yes = await edit("http://192.168.1.5:8080/v1");
+  button(yes.document.querySelectorAll(".modal").at(-1), "Send it unencrypted").click();
+  await yes.clock.tick(0);
+  assert.equal(yes.posts("/api/providers").at(-1).body.send_in_clear, true);
+
+  for (const here of ["http://127.0.0.1:11434/v1", "http://localhost:11434/v1", "https://192.168.1.5/v1"]) {
+    const quiet = await edit(here);
+    assert.equal(quiet.posts("/api/providers").length, 1, `${here}: nothing asked`);
+    assert.equal(quiet.posts("/api/providers").at(-1).body.send_in_clear, undefined);
+  }
+});
+
+test("a host's No for an address is kept too, and Ask again asks", async () => {
+  const declined = (s) => {
+    const x = s.config.hosts.find((y) => y.name === "web01");
+    x.has_password = true;
+    x.password_for = "ssh://web00.lan:22";
+    x.password_declined = `ssh://${x.host}:22`;
+  };
+  const app = await page("a", declined, { "POST /api/hosts": () => ({ ok: true }) });
+  app.call("openSettings", "hosts");
+  await app.clock.tick(0);
+  const item = app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("web01"));
+  button(item, "Edit").click();
+  await app.clock.tick(0);
+  assert.match(app.$(".modal").textContent, /The saved password is for ssh:\/\/web00\.lan:22/);
+  button(app.$(".modal"), "Save").click();
+  await app.clock.tick(0);
+  assert.equal(app.posts("/api/hosts").at(-1).body.use_saved_password, undefined, "not asked again");
+  const again = await page("a", declined, { "POST /api/hosts": () => ({ ok: true }) });
+  again.call("openSettings", "hosts");
+  await again.clock.tick(0);
+  button(again.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("web01")), "Edit").click();
+  await again.clock.tick(0);
+  button(again.$(".modal"), "Ask again").click();
+  await again.clock.tick(0);
+  assert.match(again.document.querySelectorAll(".modal").at(-1).querySelector("h2").textContent, /^Use the saved password with/);
+});
+
 test("a host's address changed without a new password asks first whether the saved one goes there", async () => {
   const withPassword = (s) => { s.config.hosts.find((x) => x.name === "web01").has_password = true; };
   const edit = async (address) => {

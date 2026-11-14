@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, urlparse
 
 from . import config as config_mod
 from . import creds, recipes, search, tools_cache
@@ -669,11 +669,15 @@ class Engine:
     # ---------------------------------------------------------------- providers & models
 
     def save_provider(self, data: dict, api_key: str | None = None, original_name: str | None = None,
-                      use_saved_key: bool = False) -> None:
+                      use_saved_key: bool | None = None, send_in_clear: bool = False) -> None:
         """Save a provider. Its API key is held to the address it is entered for (Provider.key_origin,
         _key_problem): a new key is for the address as saved; a saved one stays for its own, so an
         address changed without a new key doesn't take it along, unless `use_saved_key` says the
-        technician chose to use it there (Settings asks: "Use the saved key with …?")."""
+        technician chose to use it there (Settings asks: "Use the saved key with …?"). Their No
+        (`use_saved_key` False) is kept for that address (Provider.key_declined): Settings doesn't
+        ask again at the next save, None. A key that would go over plain http to another machine
+        (netguard.in_the_clear) is saved for it only with `send_in_clear`, the technician's Yes
+        (Settings asks, No the default), or where it already went (the cross-app standard, Nov 2026)."""
         name = str(data.get("name", "")).strip()
         base_url = str(data.get("base_url", "")).strip().rstrip("/")
         if not name or not base_url:
@@ -727,12 +731,30 @@ class Engine:
         # The key goes only where it was entered for: a new one is for this address; a saved one
         # stays for its own (a changed address doesn't take it along: _key_problem) unless the
         # technician chose to use it here; a provider new here has none until one is given.
+        here = netguard.origin(base_url)
         if api_key or (old and use_saved_key):
-            prov.key_origin = netguard.origin(base_url)
+            prov.key_origin = here
         elif old:
             prov.key_origin = old.key_origin if old.key_origin is not None else netguard.origin(old.base_url)
         else:
             prov.key_origin = ""
+        # a No for this address is kept, and Settings asks no more at each save; asked again, or a key
+        # given, it goes
+        if old and not api_key and prov.key_origin != here:
+            prov.key_declined = here if use_saved_key is False else old.key_declined if use_saved_key is None else ""
+        # over plain http to another machine: only with the technician's Yes, kept for that address
+        sends = prov.key_origin == here and bool(api_key or (old and self._has_secret("provider", old.name)))
+        if sends and netguard.in_the_clear(base_url):
+            if send_in_clear or (old is not None and old.key_in_clear == here and not api_key):
+                prov.key_in_clear = here
+            else:
+                raise UserError(
+                    f"Provider not saved. The API key for {name} would go over plain http to "
+                    f"{urlparse(base_url).hostname}, another machine on your network: anyone on that network can "
+                    "read it (a café's or a hotel's Wi-Fi too). Use the server's https:// address, leave the key out "
+                    "if it needs none, or save again and answer Yes to sending it unencrypted.")
+        else:
+            prov.key_in_clear = ""
         clash = self.cfg.provider(name)
         if clash and clash is not old:
             raise UserError(f"There is already a provider called {name}. The same address can be added again with "
@@ -1674,7 +1696,7 @@ class Engine:
     # ---------------------------------------------------------------- hosts
 
     def save_host(self, data: dict, password: str | None = None, original_name: str | None = None,
-                  use_saved_password: bool = False) -> None:
+                  use_saved_password: bool | None = None) -> None:
         """Save a host. Its saved password is held to the address it was entered for
         (Host.password_for, _host_password), as a provider's key is: a host whose kind, address or
         port changed without a new password keeps it for the old one, unless `use_saved_password`
@@ -1718,12 +1740,16 @@ class Engine:
             if found:
                 raise UserError(f"Host not saved. {found}")
         old = self.cfg.host(original_name) if original_name else None    # as for providers
+        here = config_mod.host_origin(host)
         if password or (old and use_saved_password):
-            host.password_for = config_mod.host_origin(host)
+            host.password_for = here
         elif old:
             host.password_for = old.password_for if old.password_for is not None else config_mod.host_origin(old)
         else:
             host.password_for = ""
+        if old and not password and host.password_for != here:      # a No kept, as a provider's (save_provider)
+            host.password_declined = (here if use_saved_password is False
+                                      else old.password_declined if use_saved_password is None else "")
         clash = self.cfg.host(name)
         if clash and clash is not old:
             raise UserError(f"There is already a host called {name}. The same address can be added again (another "
@@ -2828,7 +2854,14 @@ class Engine:
             return None
         here = netguard.origin(prov.base_url)
         if here == prov.key_origin:
-            return None
+            if prov.key_in_clear is None or prov.key_in_clear == here or not netguard.in_the_clear(prov.base_url):
+                return None
+            # held to this address, but it is plain http to another machine, and nobody said to send it so
+            return (f"The API key saved for {prov.name} would go over plain http to "
+                    f"{urlparse(prov.base_url).hostname}, another machine on your network, where anyone on it can "
+                    f"read it, and that wasn't agreed to for this address: it wasn't sent. Use the server's https:// "
+                    f"address, or save {prov.name} in Settings → AI providers and answer Yes to sending it "
+                    f"unencrypted.")
         was = netguard.shown_origin(prov.key_origin) or "no address"
         now = netguard.shown_origin(here) or netguard.shown(prov.base_url)
         return (f"The API key saved for {prov.name} was entered for {was}, and {prov.name}'s address is now {now}, so "

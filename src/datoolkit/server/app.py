@@ -214,6 +214,11 @@ def window_limit(path: str) -> int:
     return MAX_SAVED_FILE if path == "/api/desktop/save" else MAX_WINDOW_BODY
 
 
+def _answer(value) -> bool | None:
+    """A question's answer as a request carries it: a JSON true or false, else None (not asked)."""
+    return value if isinstance(value, bool) else None
+
+
 class BoundedRequest(Request):
     """A request whose JSON body is read as JSON from outside is, everywhere (llm/secure_http.loads):
     nested more than MAX_NESTING levels deep it is refused, a 400, before any of it is used. Python's
@@ -534,10 +539,11 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/providers")
     async def save_provider(body: dict, e: Engine = Depends(auth)):
-        # "use_saved_key": the technician chose to send the saved key to an address changed here
-        # (Settings asks); only a JSON true counts
+        # "use_saved_key": the technician's answer to sending the saved key to an address changed here
+        # (Settings asks): a JSON true or false, else not asked (a No kept from before); "send_in_clear":
+        # their Yes to a key over plain http to another machine. Only a JSON true counts as a Yes
         e.save_provider(obj(body, "provider"), body.get("api_key") or None, body.get("original_name"),
-                        use_saved_key=body.get("use_saved_key") is True)
+                        use_saved_key=_answer(body.get("use_saved_key")), send_in_clear=body.get("send_in_clear") is True)
         return {"ok": True}
 
     @app.delete("/api/providers/{name:path}")
@@ -576,7 +582,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
     @app.post("/api/hosts")
     async def save_host(body: dict, e: Engine = Depends(auth)):
         e.save_host(obj(body, "host"), body.get("password") or None, body.get("original_name"),
-                    use_saved_password=body.get("use_saved_password") is True)
+                    use_saved_password=_answer(body.get("use_saved_password")))
         return {"ok": True}
 
     @app.delete("/api/hosts/{name:path}")

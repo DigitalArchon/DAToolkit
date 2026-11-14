@@ -257,6 +257,29 @@ function isLocalHost(host) {
   return (w.slice(0, 7).every((x) => x === 0) && w[7] === 1) || (w[0] & 0xffc0) === 0xfe80 || (w[0] & 0xfe00) === 0xfc00;
 }
 
+// This computer itself (127.0.0.0/8, ::1, localhost names): what goes there over plain http never
+// leaves it, where any other local address is another machine (netguard.is_loopback).
+function isLoopbackHost(host) {
+  host = String(host || "").toLowerCase();
+  if (/\.$/.test(host) && /^[\d.]+$|^\[/.test(host.slice(0, -1))) return false;
+  host = host.replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (/^127\.\d+\.\d+\.\d+$/.test(host)) return true;
+  if (!host.startsWith("[") || !host.endsWith("]")) return false;
+  const w = ipv6Words(host.slice(1, -1));
+  if (!w) return false;
+  if (w.slice(0, 5).every((x) => x === 0) && w[5] === 0xffff) return (w[6] >> 8) === 127;
+  return w.slice(0, 7).every((x) => x === 0) && w[7] === 1;
+}
+// Plain http to another machine on the local network (netguard.in_the_clear): a key sent there can
+// be read by anyone on that network, so it is asked about first, No the default.
+function inTheClear(u) {
+  try {
+    const x = new URL(String(u ?? "").trim());
+    return x.protocol === "http:" && isLocalHost(x.hostname) && !isLoopbackHost(x.hostname);
+  } catch { return false; }
+}
+
 function insecureLink(url) {
   // what a browser takes off both ends of an address, and out of it anywhere (WHATWG URL parsing)
   const text = String(url ?? "").replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
@@ -878,8 +901,13 @@ function hostOrigin(kind, host, port, ssl) {
   const dflt = { ssh: 22, rdp: 3389 }[kind] || (ssl ? 5986 : 5985);
   return `${k}://${String(host ?? "").trim().toLowerCase()}:${port || dflt}`;
 }
+// An origin as said to the technician, without its scheme's own port (netguard.shown_origin).
+function shownOrigin(o) { return String(o || "").replace(/^(https:\/\/.*):443$|^(http:\/\/.*):80$/, "$1$2"); }
 // A saved key or password goes only where it was entered for (engine._key_problem): an address
-// changed without a new one asks first whether to use it there, No being the default.
+// changed without a new one asks first whether to use it there, No being the default. A No is kept
+// for that address (key_declined, password_declined) and not asked again at each save, only by an
+// action that sends the key at once (Save & test) or by Ask again: a question asked at every save
+// is soon answered Yes without reading (the cross-app standard, Nov 2026).
 function askUseSaved(what, where) {
   return new Promise((resolve) => {
     let yes = false;
@@ -888,6 +916,21 @@ function askUseSaved(what, where) {
       body: h("div", {}, h("p", {}, `The ${what} saved here was entered for another address. Sent to ${where}, it goes, with everything sent with it, to whoever answers there.`),
         h("p", {}, `No keeps it for the address it was entered for, and it isn't sent to ${where}: enter the ${what} again for it there, or put the address back.`)),
       buttons: [{ label: "No" }, { label: `Use it with ${where}`, kind: "danger", onClick: () => { yes = true; } }],
+      onClose: () => resolve(yes),
+    });
+    setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
+  });
+}
+// A key about to go over plain http to another machine is asked about first (engine.save_provider
+// holds to the answer): No, the default, saves nothing.
+function askInTheClear(where) {
+  return new Promise((resolve) => {
+    let yes = false;
+    const { box } = modal({
+      title: `Send the API key unencrypted to ${where}?`,
+      body: h("div", {}, h("p", {}, `${where} is reached over plain http, so the API key, and everything sent with it, would cross your network unencrypted: anyone on that network can read it (a café's or a hotel's Wi-Fi too).`),
+        h("p", {}, "No saves nothing: use the server's https:// address, or leave the key blank if it needs none.")),
+      buttons: [{ label: "No" }, { label: "Send it unencrypted", kind: "danger", onClick: () => { yes = true; } }],
       onClose: () => resolve(yes),
     });
     setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
@@ -4177,7 +4220,19 @@ function openSettings(tab = "providers") {
     const models = [];                              // from the provider's model list, once loaded
     const datalist = h("datalist", { id: `models-${Math.random().toString(36).slice(2)}` });
     const def = h("input", { type: "text", value: p.default_model || "", list: datalist.id, placeholder: "Filled automatically on Test (Claude Opus 5.5 if available)" });
-    const status = h("div", { class: "muted small" }, p.key_held || "");
+    const status = h("div", { class: "muted small" });
+    // the saved key held to the address it was entered for: said, with the way to be asked again
+    const held = h("div", { class: "muted small" });
+    const showHeld = () => {
+      const was = p.key_origin ?? originOf(p.base_url), now = originOf(p.base_url);
+      held.replaceChildren(...(!p._new && p.has_key && was && was !== now
+        ? [`The saved API key is for ${shownOrigin(was)}, not sent to ${hostOf(p.base_url) || p.base_url}. Type the key again above for this address, or `,
+          h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
+            await save(true);
+            toast("Provider saved.", "ok");
+          }) }, "Ask again"), "."]
+        : p.key_held ? [p.key_held] : []));
+    };
     const apiNote = h("div", { class: "muted small" });
     const showApi = () => {
       const anth = apiSel.value === "anthropic" || (!apiSel.value && /(^|\.)anthropic\.com$/.test(hostOf(url.value)));
@@ -4281,21 +4336,39 @@ function openSettings(tab = "providers") {
         tier_overrides, vision_overrides, context_overrides, routes: keptRoutes },
         api_key: key.value.trim() || null, original_name: p._new ? null : p.name };
     };
-    const save = async () => {
+    // `ask`: an action that sends the key at once (Save & test) or Ask again: asked even where a No was kept
+    const save = async (ask = false) => {
       const body = payload();
-      // the saved key goes only to the address it was entered for: changed without a new key, asked
+      // the saved key goes only to the address it was entered for: changed without a new key, asked,
+      // once for an address (a No kept: p.key_declined)
       const here = originOf(body.provider.base_url);
-      if (!p._new && p.has_key && !body.api_key && here !== (p.key_origin ?? originOf(p.base_url))) {
+      const was = p.key_origin ?? originOf(p.base_url);
+      if (!p._new && p.has_key && !body.api_key && here !== was && (ask || here !== p.key_declined)) {
         body.use_saved_key = await askUseSaved("API key", hostOf(body.provider.base_url) || body.provider.base_url);
       }
+      const keyOrigin = body.api_key || body.use_saved_key ? here : p.key_origin ?? was;
+      // a key going over plain http to another machine: asked first, No the default, saving nothing;
+      // asked again for another key, or once the address isn't the one agreed to
+      const sends = !!(body.api_key || (p.has_key && keyOrigin === here));
+      if (sends && inTheClear(body.provider.base_url) && (body.api_key || p.key_in_clear !== here)) {
+        const where = hostOf(body.provider.base_url);
+        if (!(await askInTheClear(where))) {
+          status.textContent = `Not saved: the key would go unencrypted to ${where}.`;
+          throw new Error(`Not saved: the API key would cross the network unencrypted to ${where}. Use its https:// address, leave the key blank if it needs none, or save again and choose to send it.`);
+        }
+        body.send_in_clear = true;
+      }
       await api("POST", "/api/providers", body);
-      const keyOrigin = body.api_key || body.use_saved_key ? here : p.key_origin;
       p = { ...p, ...body.provider, has_key: p.has_key || !!body.api_key, key_origin: keyOrigin, _new: false,
-        key_held: p.has_key && !body.api_key && keyOrigin !== here ? "The saved API key isn't sent to this address." : "" };
+        key_declined: body.use_saved_key === false ? here : body.use_saved_key || body.api_key ? "" : p.key_declined,
+        key_in_clear: body.send_in_clear ? here : sends && inTheClear(body.provider.base_url) ? p.key_in_clear : "",
+        key_held: "" };
       key.value = "";
+      showHeld();
       m.saved();
       return body.provider.name;
     };
+    showHeld();
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" }, datalist, sizes,
       h("div", { class: "row" }, h("label", { class: "field" }, h("span", {}, "Name"), name),
         h("label", { class: "field", style: "flex:2" }, h("span", {}, "Base URL (https://, or http:// only on this machine and its local network)"), url)),
@@ -4307,12 +4380,12 @@ function openSettings(tab = "providers") {
       table,
       h("div", { class: "row" }, h("button", { type: "button", class: "small", onclick: () => addRow().focus() }, "Add a model"), loadBtn),
       h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict; for most TEE models what is attested is RedPill's gateway, which passes each request on to the machine that runs the model) and each reply's signed record checked where its provider signs one (Chutes signs none), but the prompt passes NanoGPT's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models only, attested with Tinfoil's verifier; never set by hand); LOCAL = your own hardware (localhost/private IP URLs). Marking a cloud model Local lets Confidential and Sovereign cases use it: only do so for a model that really runs on your own hardware."),
-      status,
+      held, status,
       h("div", { class: "row" },
         h("button", { onclick: () => guarded(() => reshow("providers")) }, "Back"),
         h("span", { class: "spacer" }),
         h("button", { onclick: () => guarded(async () => {
-          const n = await save();
+          const n = await save(true);         // it sends the key at once: asked, whatever No was kept
           status.textContent = "Testing…";
           try {
             const got = (await api("GET", `/api/models?provider=${encodeURIComponent(n)}&refresh=true`)).models;
@@ -4388,11 +4461,42 @@ function openSettings(tab = "providers") {
       os_hint: h("input", { type: "text", value: x.os_hint || "", placeholder: ssh ? "e.g. Ubuntu 24.04 / Cisco IOS-XE / RouterOS 7" : "e.g. Windows Server 2022" }),
     };
     const field = (label, el, style) => h("label", { class: "field", style }, h("span", {}, label), el);
+    // `ask`: Ask again, asked even where a No was kept for the address
+    const saveHost = async (ask = false) => {
+      // the saved password goes only to the host it was entered for: one whose address changed,
+      // without a new password typed, is asked about
+      const port = f.port.value ? Number(f.port.value) : null;
+      const here = hostOrigin(x.kind, f.host.value, port, f.winrm_ssl.checked);
+      const was = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl);
+      // asked once for an address: a No is kept (password_declined), as a provider's key's
+      const useSaved = !x._new && x.has_password && !f.password.value && here !== was && (ask || here !== x.password_declined)
+        ? await askUseSaved("password", f.host.value.trim() || here) : undefined;
+      await api("POST", "/api/hosts", {
+        use_saved_password: useSaved,
+        host: {
+          name: f.name.value.trim(), kind: x.kind, host: f.host.value.trim(), port,
+          user: f.user.value.trim(), auth: rdp ? "password" : f.auth.value, key_file: f.key_file.value.trim(), jump: f.jump.value.trim(),
+          rdp_security: f.rdp_security.value, rdp_layout: f.rdp_layout.value,
+          ssh_options: f.ssh_options.value.split("\n"), winrm_ssl: f.winrm_ssl.checked,
+          winrm_cert_validation: f.winrm_cert_validation.checked, winrm_plain_basic: f.winrm_plain_basic.checked,
+          os_hint: f.os_hint.value.trim(),
+        },
+        password: f.password.value || null, original_name: x._new ? null : x.name,
+      });
+      toast("Host saved.", "ok");
+      await reshow("hosts");
+    };
+    // the saved password held to the address it was entered for: said, with the way to be asked again
+    const savedFor = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl);
+    const held = !x._new && x.has_password && savedFor !== hostOrigin(x.kind, x.host, x.port, x.winrm_ssl)
+      ? h("div", { class: "muted small" }, `The saved password is for ${savedFor}, not given to ${x.host}: you are asked for it when you connect. Type it again above for this address, or `,
+        h("button", { type: "button", class: "small", onclick: () => guarded(() => saveHost(true)) }, "Ask again"), ".")
+      : null;
     return h("div", { style: "display:flex;flex-direction:column;gap:10px" },
       h("div", { class: "row" }, field("Name", f.name), field("Host", f.host, "flex:2"), field("Port", f.port)),
       h("div", { class: "row" }, field("User", f.user), rdp ? field("Security", f.rdp_security) : field(ssh ? "Authentication" : "Auth method", f.auth)),
       rdp ? field("Keyboard layout on the remote machine", f.rdp_layout) : null,
-      field("Password", f.password),
+      field("Password", f.password), held,
       ssh ? h("div", { class: "row" }, field("Key file", f.key_file), field("Jump host", f.jump)) : null,
       ssh ? field("Extra SSH options", f.ssh_options) : null,
       ssh || rdp ? null : h("div", { class: "row" },
@@ -4422,29 +4526,7 @@ function openSettings(tab = "providers") {
       }) }, "Forget stored password") : null,
       h("div", { class: "row" },
         h("button", { onclick: () => guarded(() => reshow("hosts")) }, "Back"), h("span", { class: "spacer" }),
-        h("button", { class: "primary", onclick: () => guarded(async () => {
-          // the saved password goes only to the host it was entered for: one whose address changed,
-          // without a new password typed, is asked about
-          const port = f.port.value ? Number(f.port.value) : null;
-          const here = hostOrigin(x.kind, f.host.value, port, f.winrm_ssl.checked);
-          const was = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl);
-          const useSaved = !x._new && x.has_password && !f.password.value && here !== was
-            ? await askUseSaved("password", f.host.value.trim() || here) : undefined;
-          await api("POST", "/api/hosts", {
-            use_saved_password: useSaved,
-            host: {
-              name: f.name.value.trim(), kind: x.kind, host: f.host.value.trim(), port,
-              user: f.user.value.trim(), auth: rdp ? "password" : f.auth.value, key_file: f.key_file.value.trim(), jump: f.jump.value.trim(),
-              rdp_security: f.rdp_security.value, rdp_layout: f.rdp_layout.value,
-              ssh_options: f.ssh_options.value.split("\n"), winrm_ssl: f.winrm_ssl.checked,
-              winrm_cert_validation: f.winrm_cert_validation.checked, winrm_plain_basic: f.winrm_plain_basic.checked,
-              os_hint: f.os_hint.value.trim(),
-            },
-            password: f.password.value || null, original_name: x._new ? null : x.name,
-          });
-          toast("Host saved.", "ok");
-          await reshow("hosts");
-        }) }, "Save")));
+        h("button", { class: "primary", onclick: () => guarded(() => saveHost()) }, "Save")));
   }
 
   function toolsPane() {

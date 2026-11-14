@@ -208,3 +208,82 @@ def test_a_hosts_password_saved_before_takes_its_address_once(tmp_path):
     creds.set_secret("host", "dc", "hunter2")
     engine = Engine(cfg, lambda e: None, tmp_path / "rt", save_config=lambda c: None)
     assert engine._host_password(cfg.host("dc")) is None
+
+
+# --- a No kept, and a key over plain http to another machine (the cross-app standard, Nov 14 2026) ----
+
+async def test_a_no_is_kept_for_that_address_and_asked_again_only_on_purpose(env):  # noqa: F811
+    """Settings asks once an address is changed without a new key; a No is kept for that address
+    (key_declined), so the next save asks nothing (None) and the key stays where it was; Yes later,
+    or a key entered for it, and the No goes."""
+    engine, _, _ = env
+    engine.save_provider(provider_data(engine, base_url=ELSEWHERE), None, "Fake", use_saved_key=False)
+    prov = engine.cfg.provider("Fake")
+    assert prov.key_declined == netguard.origin(ELSEWHERE) and prov.key_origin == netguard.origin(BASE)
+    engine.save_provider(provider_data(engine, default_model="m2"), None, "Fake")          # not asked again
+    prov = engine.cfg.provider("Fake")
+    assert prov.key_declined == netguard.origin(ELSEWHERE) and prov.key_origin == netguard.origin(BASE)
+    view = next(p for p in engine.snapshot()["config"]["providers"] if p["name"] == "Fake")
+    assert view["key_declined"] == netguard.origin(ELSEWHERE)
+    engine.save_provider(provider_data(engine), None, "Fake", use_saved_key=True)          # asked again: Yes
+    prov = engine.cfg.provider("Fake")
+    assert prov.key_declined == "" and prov.key_origin == netguard.origin(ELSEWHERE)
+
+
+def test_a_key_crosses_the_network_unencrypted_only_to_this_computer_unasked():
+    assert netguard.in_the_clear("http://192.168.1.5:8080/v1") and netguard.in_the_clear("http://printer.local/v1")
+    assert netguard.in_the_clear("http://[fd00::5]/v1")
+    for not_so in ("http://127.0.0.1:11434/v1", "http://localhost/v1", "http://[::1]/v1", "http://a.localhost/v1",
+                   "https://192.168.1.5/v1", "http://192.168.1.5./v1", ""):
+        assert not netguard.in_the_clear(not_so), not_so
+
+
+async def test_a_key_for_another_machine_over_plain_http_is_saved_only_with_a_yes(env):  # noqa: F811
+    engine, _, _ = env
+    lan = "http://192.168.1.5:8080/v1"
+    with pytest.raises(UserError, match="plain http to 192.168.1.5, another machine on your network"):
+        engine.save_provider({"name": "Box", "base_url": lan}, "sk-box")
+    assert engine.cfg.provider("Box") is None and creds.get_secret("provider", "Box") is None, "nothing saved"
+    engine.save_provider({"name": "Box", "base_url": lan}, "sk-box", send_in_clear=True)
+    prov = engine.cfg.provider("Box")
+    assert prov.key_in_clear == netguard.origin(lan) and Engine._client(engine, prov) is not None
+    engine.save_provider(provider_data(engine, "Box", default_model="m"), None, "Box")    # already agreed: as it is
+    assert engine.cfg.provider("Box").key_in_clear == netguard.origin(lan)
+    with pytest.raises(UserError, match="answer Yes to sending it unencrypted"):
+        engine.save_provider(provider_data(engine, "Box"), "sk-other", "Box")             # another key: asked again
+    # none at all: nothing to send, nothing asked; this computer: never asked
+    engine.save_provider({"name": "Keyless", "base_url": lan})
+    engine.save_provider({"name": "Here", "base_url": "http://127.0.0.1:11434/v1"}, "sk-here")
+
+
+async def test_a_key_edited_in_by_hand_to_another_machine_over_plain_http_isnt_sent(env):  # noqa: F811
+    """config.toml edited by hand: the key, held to the address it was entered for, goes nowhere new,
+    and one agreed to for nothing over plain http is refused in words before anything is sent."""
+    engine, _, _ = env
+    engine.save_provider({"name": "Box", "base_url": "http://192.168.1.5:8080/v1"}, "sk-box", send_in_clear=True)
+    engine.cfg.provider("Box").key_in_clear = ""             # as a hand edit that took the Yes out
+    with pytest.raises(UserError, match="wasn't agreed to for this address: it wasn't sent"):
+        Engine._client(engine, engine.cfg.provider("Box"))
+
+
+def test_a_key_already_going_over_plain_http_before_this_was_asked_goes_on(tmp_path):
+    """Settled once, with no question, as the origins were: a working setup isn't broken by the upgrade."""
+    path = tmp_path / "config.toml"
+    path.write_text('[[providers]]\nname = "Box"\nbase_url = "http://192.168.1.5:8080/v1"\n'
+                    '[[providers]]\nname = "Moved"\nbase_url = "http://192.168.1.6/v1"\nkey_origin = "https://x.example:443"\n')
+    cfg = config_mod.load(path)
+    box, moved = cfg.provider("Box"), cfg.provider("Moved")
+    assert box.key_in_clear == "http://192.168.1.5:8080" and moved.key_in_clear == ""
+    assert 'key_in_clear = "http://192.168.1.5:8080"' in path.read_text(), "written once"
+
+
+async def test_a_host_password_no_is_kept_too(env):  # noqa: F811
+    engine, _, _ = env
+    host = engine.cfg.hosts[0]
+    creds.set_secret("host", host.name, "pw")
+    data = {k: v for k, v in host.__dict__.items() if k not in ("password_for", "password_declined")}
+    engine.save_host({**data, "host": "web02.lan"}, None, host.name, use_saved_password=False)
+    saved = engine.cfg.host(host.name)
+    assert saved.password_declined == config_mod.host_origin(saved) and saved.password_for != config_mod.host_origin(saved)
+    engine.save_host({**data, "host": "web02.lan", "user": "root"}, None, host.name)          # not asked again
+    assert engine.cfg.host(host.name).password_declined == config_mod.host_origin(engine.cfg.host(host.name))

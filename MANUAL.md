@@ -982,18 +982,30 @@ provider's address in Settings without typing the key again, and DA Toolkit asks
 the saved API key with ‹host›?**, No being the default. With No, or with the address changed in
 `config.toml` by hand, the key stays in the keyring but isn't sent to the new address: requests
 there fail, saying which address the key was entered for, and the provider list shows "key held
-to its old address". Type the key again for the new address, save the provider and answer Yes,
-or put the address back. A key saved by an earlier version is held to the address saved beside
-it from the first start of this one. A host's saved password is held the same way to the host's
-kind, address and port: changed, Settings asks whether to use it there, and with No you are
-asked for the password when you connect, as though none were saved.
+to its old address". Your No is kept for that address: saving the provider again doesn't ask
+again, and its form says "The saved API key is for ‹old address›, not sent to ‹host›", with
+**Ask again**. Type the key again for the new address, answer Yes (Ask again), or put the address
+back. **Save & test** sends the key at once, so it asks every time, a No kept or not. A key saved
+by an earlier version is held to the address saved beside it from the first start of this one.
+A host's saved password is held the same way to the host's kind, address and port: changed,
+Settings asks whether to use it there, and with No you are asked for the password when you
+connect, as though none were saved; the No is kept for that address too, with Ask again in the
+host's form.
+
+**A key over plain http to another machine is asked about first.** Saving a provider whose key
+would go over `http://` to another machine on your network (a private IP or a `.local` name, not
+this computer) asks **Send the API key unencrypted to ‹host›?**, No being the default: anyone on
+that network can read it, a café's or a hotel's Wi-Fi too. No saves nothing; Yes is kept for that
+address, and typing another key for it asks again. A key for such an address that nobody agreed
+to (`config.toml` edited by hand) isn't sent, saying why. One that already went there before this
+version is kept going, with no question, from its first start.
 
 **Local trusts your network.** A base URL counts as Local when its host is `localhost`, an
 IP address plain http is accepted for (this machine's, a private, link-local or unique local
 one: the list above), or a name ending `.local` or `.lan`, so Confidential and Sovereign
 cases may use it. With `http://` to a private IP or a `.local` name, prompts (client data
-included) and the API key cross the LAN unencrypted, and such a name is only as trustworthy
-as your DNS. Use Local over the network only on a LAN you trust, or put the model server
+included) and the API key cross the LAN unencrypted (the key only once you have said so: see
+above), and such a name is only as trustworthy as your DNS. Use Local over the network only on a LAN you trust, or put the model server
 behind HTTPS (a `.lan` name is reached over https only). A Local provider is never reached
 through a proxy from your environment (see [AI providers](#ai-providers)).
 

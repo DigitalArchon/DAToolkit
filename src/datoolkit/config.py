@@ -134,6 +134,14 @@ class Provider:
     # from a file written before keys were held to an address (settle_key_origins gives it the
     # address beside it)
     key_origin: str | None = None
+    # the origin the technician said No to sending the saved key to (Settings asks once an address
+    # is changed without a new key): not asked again at the next save, only by Save & test or Ask
+    # again (the cross-app standard, Nov 2026: a question asked at every save is soon answered Yes)
+    key_declined: str = ""
+    # the origin the technician agreed to send the key to over plain http, to another machine on the
+    # local network (netguard.in_the_clear: Settings asks, No the default); "" for none; None in a
+    # file written before this was asked (settle_key_origins: a key already sent there goes on)
+    key_in_clear: str | None = None
 
 
 @dataclass
@@ -164,6 +172,8 @@ class Host:
     # hand, doesn't take the password with it. "" while none was saved; None when read from a file
     # written before passwords were held to an address (settle_key_origins)
     password_for: str | None = None
+    # where the technician said No to using the saved password (Provider.key_declined)
+    password_declined: str = ""
 
 
 def host_origin(host: Host) -> str:
@@ -374,6 +384,12 @@ def settle_key_origins(cfg: Config) -> bool:
     for prov in cfg.providers:
         if prov.key_origin is None:
             prov.key_origin, settled = netguard.origin(prov.base_url), True
+        if prov.key_in_clear is None:
+            # a key that went over plain http to another machine before this was asked goes on, with no
+            # question, written once (as its origin): from then on a new address there is asked about
+            here = netguard.origin(prov.base_url)
+            prov.key_in_clear = here if netguard.in_the_clear(prov.base_url) and prov.key_origin == here else ""
+            settled = True
     for host in cfg.hosts:
         if host.password_for is None:
             host.password_for, settled = host_origin(host), True

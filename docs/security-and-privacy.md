@@ -205,10 +205,13 @@ container image itself; you pull it once, and it runs exactly the pinned image.
 - **A key goes only to the address it was entered for**, its scheme, host and port. A
   provider's address changed in Settings without the key typed again asks first ("Use the saved
   API key with …?", No the default); with No, or with the address changed in `config.toml` by
-  hand, the key isn't sent there, and requests say which address it was entered for. Nothing is
-  deleted. A key saved by an earlier version takes the address saved beside it at the first
-  start. A host's saved password is held to the host's kind, address and port the same way:
-  changed without it, you are asked for the password when you connect.
+  hand, the key isn't sent there, and requests say which address it was entered for. The No is
+  kept for that address, so saving again doesn't ask again (a question at every save is soon
+  answered Yes unread): the form says the key is for its old address, with Ask again; Save &
+  test, which sends the key at once, asks every time. Nothing is deleted. A key saved by an
+  earlier version takes the address saved beside it at the first start. A host's saved password
+  is held to the host's kind, address and port the same way: changed without it, you are asked
+  for the password when you connect.
 - **A key goes only to the service it is for.** The NanoGPT key goes to NanoGPT (chat, search,
   the scraper, attestation); no key goes to RedPill, Intel, NVIDIA or Tinfoil's mirrors. A key
   with a space, a line break or another character no key has is refused, saying so without
@@ -245,9 +248,14 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   A password you type into a command (`sshpass -p …`) is part of that command: it is blanked
   where the command goes to a model, and stays as typed in the queue, the audit trail and the
   transcript.
-- **Plain http on your own network carries the key in the clear.** A Local model server on
-  `http://192.168.x.x` gets your key and the case unencrypted across the LAN. DA Toolkit allows
-  it for your own network only, and doesn't ask first (see [Limits](#limits)).
+- **Plain http on your own network carries the key in the clear, so it is asked about first.** A
+  Local model server on `http://192.168.x.x` gets your key and the case unencrypted across the
+  LAN. DA Toolkit allows it for your own network only, and asks before a key goes there ("Send
+  the API key unencrypted to …?", No the default, saving nothing); the Yes is kept for that
+  address, a new key asks again, and a key for such an address nobody agreed to (a hand edit of
+  `config.toml`) isn't sent. A key already going there before this was asked goes on, with no
+  question, from the first start. To this computer itself (`localhost`, `127.0.0.1`) nothing is
+  asked: it never leaves it.
 
 ## AI models
 
@@ -606,8 +614,8 @@ against:
 - **Searches in the clear.** Approved queries and research briefs reach the search provider,
   and the research model, as written.
 - **Your local network.** Plain http to a Local model server or a WinRM host on it crosses the
-  LAN unencrypted, a `.local` name is as trustworthy as your network's name resolution, and DA
-  Toolkit doesn't ask before a key goes over plain http there.
+  LAN unencrypted (an API key only once you have said so), and a `.local` name is as trustworthy
+  as your network's name resolution.
 - **Pairing depends on you comparing the fingerprint.** Anyone holding a paired phone's token
   can read what the phone page shows and give the AI text (a skip's note, a photo's
   description) and photos, though the AI can't act without your click.

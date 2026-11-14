@@ -93,6 +93,36 @@ def is_local(host: str | None) -> bool:
     return any(address.version == network.version and address in network for network in LOCAL_NETWORKS)
 
 
+def is_loopback(host: str | None) -> bool:
+    """Whether `host`, as written, is this computer itself (127.0.0.0/8, ::1, localhost and its
+    names): what goes there over plain http never leaves it. Any other local address is another
+    machine, and plain http to it can be read on the network between. Nothing is looked up."""
+    host = (host or "").strip().lower()
+    if host.endswith(".") and _address(host.rstrip(".")) is not None:
+        return False
+    host = host.rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return is_dns_name(host)
+    address = _address(host)
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    return address is not None and address.is_loopback
+
+
+def in_the_clear(url) -> bool:
+    """Whether `url` is plain http to another machine (local, but not this computer): allowed, and
+    the key sent there crosses the network unencrypted, for anyone on it to read (a café's or a
+    hotel's Wi-Fi too). Asked about first, No the default (the cross-app standard, Nov 2026;
+    SealedLore's keys_in_the_clear)."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+        host = parsed.hostname
+    except ValueError:
+        return False
+    return parsed.scheme.lower() == "http" and is_local(host) and not is_loopback(host)
+
+
 def problem(url: str | None) -> str | None:
     """Why `url` may not be used, or None when it may. The address is named as shown() has it,
     without a password written into it: these are shown in Settings and the chat, and logged."""
