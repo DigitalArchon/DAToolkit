@@ -18,6 +18,7 @@ from typing import Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 
@@ -25,6 +26,7 @@ from .. import config
 from ..companion import CompanionServer, PairingRefused
 from ..hostenv import host_env
 from ..llm import providers as providers_mod
+from ..llm.secure_http import loads
 from ..engine import Engine, UserError
 from ..sessions import guac
 
@@ -212,6 +214,29 @@ def window_limit(path: str) -> int:
     return MAX_SAVED_FILE if path == "/api/desktop/save" else MAX_WINDOW_BODY
 
 
+class BoundedRequest(Request):
+    """A request whose JSON body is read as JSON from outside is, everywhere (llm/secure_http.loads):
+    nested more than MAX_NESTING levels deep it is refused, a 400, before any of it is used. Python's
+    parser alone went to about a thousand levels, and a body past that raised a RecursionError."""
+
+    async def json(self):
+        if not hasattr(self, "_json"):
+            self._json = loads(await self.body())
+        return self._json
+
+
+class BoundedRoute(APIRoute):
+    """Every route's request as a BoundedRequest, FastAPI's own reading of a body included (it reads
+    one through `Request.json`, and answers 400 to what that refuses)."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def bounded(request: Request):
+            return await handler(BoundedRequest(request.scope, request.receive))
+        return bounded
+
+
 def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engine],
                desktop=None, companion_dir: Path | None = None,
                on_quit: Callable[[], None] | None = None, launches: Launches | None = None) -> FastAPI:
@@ -242,6 +267,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     comp = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    for a in (app, comp):
+        a.router.route_class = BoundedRoute         # every body read as JSON from outside is (`BoundedRequest`)
     companion = CompanionServer(comp, companion_dir or config.config_dir())
     comp.add_middleware(CompanionGate, companion=companion)
     comp.add_middleware(SecurityHeaders, headers=COMPANION_HEADERS)       # outermost: on the gate's refusals too
@@ -346,7 +373,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         """A phone claims the pairing code its connect QR carried (no token yet): the desktop is
         asked to allow it, showing the four digits this answers with."""
         try:
-            body = json.loads(await request.body() or b"{}")
+            body = loads(await request.body() or b"{}")
         except ValueError:
             raise HTTPException(400, "the body isn't JSON") from None
         body = body if isinstance(body, dict) else {}
@@ -1066,7 +1093,7 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
                 if sid not in engine.sessions.sessions:
                     break
                 try:
-                    msg = json.loads(text)
+                    msg = loads(text)
                 except (ValueError, RecursionError):
                     continue
                 if not isinstance(msg, dict):

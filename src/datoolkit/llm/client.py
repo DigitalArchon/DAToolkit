@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import contextvars
 import hashlib
 import ipaddress
 import json
@@ -19,7 +20,7 @@ from openai import APIError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClien
 from openai.types.chat import ChatCompletionChunk
 
 from . import netguard
-from .secure_http import ProviderError
+from .secure_http import ACCEPT_ENCODING, MAX_BODY_BYTES, MAX_ERROR_BYTES, ProviderError, encoded, loads, too_much
 
 # standard: plaintext to a cloud provider. tee: runs in an enclave, but the prompt passes the
 # provider's gateway in the clear. e2ee: sealed on this machine to an attested enclave's key
@@ -101,6 +102,15 @@ def local_http_options(base_url: str) -> dict:
         return {}
     return {"trust_env": False, "verify": httpx.create_ssl_context(),
             "mounts": {"all://": None, "http://": None, "https://": None}}
+
+
+def reading_options(base_url: str) -> dict:
+    """`local_http_options`, and what every client reading a provider's answers takes (httpx's, or
+    an SDK's, which is httpx2's): only gzip and deflate asked for (secure_http.ACCEPT_ENCODING; httpx
+    asks for br too whenever brotli is installed, whose output per piece has no bound), and its
+    bodies read only so far (`capped_lines`)."""
+    return {"headers": {"Accept-Encoding": ACCEPT_ENCODING}, "event_hooks": {"response": [capped_lines]},
+            **local_http_options(base_url)}
 
 
 def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None = None) -> str:
@@ -211,7 +221,7 @@ class ToolCall:
     def parsed(self) -> dict:
         """The arguments, a JSON object. ValueError for anything else (a string or a list is
         valid JSON too): each caller answers the model that its call was malformed."""
-        value = json.loads(self.arguments or "{}")
+        value = loads(self.arguments or "{}")
         if not isinstance(value, dict):
             raise ValueError("the arguments must be a JSON object")
         return value
@@ -310,8 +320,7 @@ class LLMClient:
         self._client = _OpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1,
                                timeout=Timeout(300, connect=CONNECT_TIMEOUT),
                                http_client=http_client or DefaultAsyncHttpxClient(
-                                   follow_redirects=False, event_hooks={"response": [capped_lines]},
-                                   **local_http_options(base_url)))
+                                   follow_redirects=False, **reading_options(base_url)))
 
     async def list_models(self) -> list[str]:
         page = await self._client.models.list()
@@ -395,7 +404,7 @@ class LLMClient:
                         done = True      # read on (nothing after it is taken), so the hash covers every byte
                         continue
                     try:
-                        chunk = json.loads(data)
+                        chunk = loads(data)
                     except ValueError:
                         # if nothing follows it, the stream ended in the middle of this line (cut_off
                         # below); if more does, a line of the reply is lost (not_json above)
@@ -429,6 +438,7 @@ class LLMClient:
     async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
+        whole = WHOLE_BODY.set(True)        # a reply not streamed: read no further than MAX_BODY_BYTES
         try:
             raw = await self._client.chat.completions.with_raw_response.create(
                 model=model, messages=openai_messages(messages), **_split_params(params))
@@ -437,6 +447,8 @@ class LLMClient:
             if redirect is None:
                 raise
             raise redirect from e
+        finally:
+            WHOLE_BODY.reset(whole)
         resp = raw.parse()
         # a body that isn't a chat completion (a web page, which the SDK hands back as text) said
         # "'str' object has no attribute 'choices'"
@@ -496,23 +508,54 @@ async def read_lines(chunks, body=None, url="the provider") -> AsyncIterator[str
         yield "".join(line)
 
 
+# Set while a reply that isn't streamed is asked for (LLMClient.complete, and the like): its body
+# is read no further than MAX_BODY_BYTES whatever its content type says (`capped_lines`).
+WHOLE_BODY: contextvars.ContextVar[bool] = contextvars.ContextVar("whole_body", default=False)
+
+
 async def capped_lines(response: httpx.Response) -> None:
-    """A response hook for the SDKs' HTTP clients (OpenAI's, Anthropic's): whatever the SDK reads
-    itself (the Messages API's event stream, a reply not streamed, a model list) is read no further
-    than MAX_LINE_CHARS without a line's end, as the streams this app reads are (`read_lines`). Counted
-    in the bytes as decoded of any content encoding, which is what the SDK holds: a few compressed
-    megabytes can be a line of gigabytes. The SDK's own readers keep a line until it ends, joining
-    each piece to what came before. A refusal raises out of the SDK's reading as it is."""
+    """A response hook for every client reading a provider's answers (OpenAI's and Anthropic's SDKs',
+    and the app's own: `reading_options`): whatever is read of it (the Messages API's event stream, a
+    reply not streamed, a model list) is read no further than MAX_LINE_CHARS without a line's end, as
+    the streams this app reads are (`read_lines`). Counted in the bytes as decoded of any content
+    encoding, which is what the SDK holds: a few compressed megabytes can be a line of gigabytes. The
+    SDK's own readers keep a line until it ends, joining each piece to what came before.
+
+    And as every DA app reads an answer (Nov 2026): one compressed in a way that wasn't asked for
+    (br, zstd: secure_http.ACCEPT_ENCODING) is refused unread; an error's body is read to
+    MAX_ERROR_BYTES and no further, the rest left unread; and a body that isn't an event stream (or
+    one asked for whole: WHOLE_BODY) to MAX_BODY_BYTES in all. A refusal raises out of the SDK's
+    reading as it is."""
+    coding = encoded(response)
+    if coding:
+        raise ProviderError(f"{netguard.shown(str(response.request.url))} sent its answer compressed as "
+                            f"{coding[:20]!r}, which wasn't asked for; it was not read.",
+                            status_code=response.status_code)
     read = response.aiter_bytes
+    error = response.status_code >= 400
+    stream = (not WHOLE_BODY.get()
+              and str(response.headers.get("content-type", "")).lower().startswith("text/event-stream"))
+    limit = MAX_ERROR_BYTES if error else None if stream else MAX_BODY_BYTES
 
     async def aiter_bytes(chunk_size: int | None = None) -> AsyncIterator[bytes]:
-        run = 0
-        async for chunk in read(chunk_size):
-            end = max(chunk.rfind(b"\n"), chunk.rfind(b"\r"))
-            run = len(chunk) - end - 1 if end >= 0 else run + len(chunk)
-            if run > MAX_LINE_CHARS:
-                raise too_long(response.request.url)
-            yield chunk
+        run = total = 0
+        pieces = read(chunk_size)
+        try:
+            async for chunk in pieces:
+                if limit is not None and total + len(chunk) > limit:
+                    if error:
+                        yield chunk[:limit - total]     # an error's first words, the rest left unread
+                        await response.aclose()
+                        return
+                    raise too_much(response, limit)
+                total += len(chunk)
+                end = max(chunk.rfind(b"\n"), chunk.rfind(b"\r"))
+                run = len(chunk) - end - 1 if end >= 0 else run + len(chunk)
+                if run > MAX_LINE_CHARS:
+                    raise too_long(response.request.url)
+                yield chunk
+        finally:
+            await pieces.aclose()
     response.aiter_bytes = aiter_bytes     # read (aread, aiter_lines, the SDKs' streams) through it
 
 
@@ -547,7 +590,7 @@ def _text_of(content) -> str:
 
 def _whole_json(text: str) -> bool:
     try:
-        json.loads(text)
+        loads(text)
     except ValueError:
         return False
     return True

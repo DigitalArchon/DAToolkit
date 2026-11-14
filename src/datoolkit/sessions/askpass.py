@@ -97,7 +97,8 @@ class AskpassBridge:
         self._clients.add(task)
         try:
             line = await asyncio.wait_for(reader.readline(), 10)
-            req = json.loads(line)
+            from ..llm.secure_http import loads   # the app's side alone: the helper imports no httpx
+            req = loads(line)
             # as bytes: compare_digest raises on a str with anything but ASCII in it, and a token that
             # can't be ours got no answer at all, the bridge's handling of it a crash
             sent = str(req.get("token", "")).encode("utf-8", "surrogatepass")

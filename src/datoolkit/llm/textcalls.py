@@ -34,6 +34,7 @@ import re
 import uuid
 
 from .client import ToolCall
+from .secure_http import loads
 
 _OPEN, _CLOSE = "<tool_call>", "</tool_call>"
 # DeepSeek's: a block of invokes under either name, closed by either
@@ -49,7 +50,7 @@ def _value(raw: str, as_string: bool = False):
     if as_string:
         return raw
     try:
-        return json.loads(raw)
+        return loads(raw)
     except ValueError:
         return raw
 
@@ -92,7 +93,7 @@ def _wrapped(body: str) -> tuple[str, dict] | None:
         return name, {key: _value(value.strip()) for key, value in _elements(inner, "<parameter=", "</parameter>")
                       if _NAME.fullmatch(key)}
     try:
-        obj = json.loads(body)
+        obj = loads(body)
     except ValueError:
         return None
     if not isinstance(obj, dict) or not isinstance(obj.get("name"), str):

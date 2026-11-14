@@ -113,3 +113,19 @@ async def test_the_companion_isnt_reachable_on_another_of_this_computers_address
             socket.create_connection(("127.0.0.2", port), timeout=2).close()
     finally:
         await app.state.companion.stop()
+
+
+async def test_a_body_nested_past_two_hundred_levels_is_refused_unused(env, tmp_path):  # noqa: F811
+    """JSON from outside is read nested no deeper than 200 levels (llm/secure_http.loads), a local
+    API's bodies too, FastAPI's own reading of them included: before, one 300 levels deep was taken."""
+    engine, _, _ = env
+    engine.new_case("c", "open")
+    sid = engine.open_session("local")["id"]
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    m = {"x-token": "main", "content-type": "application/json"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        for depth, status in ((150, 200), (300, 400), (5000, 400)):
+            body = '{"os_hint": "Windows", "more": ' + "[" * depth + "]" * depth + "}"
+            r = await c.post(f"/api/sessions/{sid}/hint", content=body, headers=m)
+            assert r.status_code == status, (depth, r.status_code, r.text[:200])

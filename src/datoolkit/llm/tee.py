@@ -86,7 +86,7 @@ import httpx
 from . import dcap, netguard, nras
 from .ethsig import keccak256, recover_personal
 from .private_mode import relay_said
-from .secure_http import ProviderError, make_client
+from .secure_http import ProviderError, loads, make_client
 
 NRAS_URL = "https://nras.attestation.nvidia.com/v3/attest/gpu"
 TIMEOUT_SECONDS = 30.0
@@ -359,10 +359,11 @@ def _session_record(client: httpx.Client, session_id: str) -> _Record:
     except httpx.HTTPError as exc:
         raise ProviderError(f"api.redpill.ai couldn't be reached ({type(exc).__name__})") from exc
     try:
-        record = json.loads(bytes(body))
-    except ValueError as exc:
+        record = loads(bytes(body))      # nested past MAX_NESTING is refused as unreadable (secure_http.loads)
+        named = isinstance(record, dict) and hashlib.sha256(_canonical(record)).hexdigest() == session_id
+    except (ValueError, RecursionError) as exc:      # never the mark's concern (DA Vibe Manager's copy)
         raise ProviderError("RedPill's record couldn't be read") from exc
-    if not isinstance(record, dict) or hashlib.sha256(_canonical(record)).hexdigest() != session_id:
+    if not named:
         raise ProviderError("the record api.redpill.ai sent isn't the one the receipt names")
     claims = record.get("claims") if isinstance(record.get("claims"), dict) else {}
     extra = claims.get("extra") if isinstance(claims.get("extra"), dict) else {}
@@ -441,7 +442,7 @@ def _address_of_public(value: Any) -> str | None:
 def _json(value: Any) -> Any:
     if isinstance(value, str):
         try:
-            return json.loads(value)
+            return loads(value)
         except ValueError:
             return None
     return value
@@ -477,7 +478,7 @@ def _error_text(response: httpx.Response) -> str:
     fails, handed to the chat model as its tool's result. Until Nov 2026 only this was cut short,
     and a refusal could carry pages of the relay's text, line breaks and hidden characters."""
     try:
-        body = response.json()
+        body = loads(response.content)
     except (ValueError, RecursionError):
         return relay_said(response.text or "")
     if isinstance(body, dict):
@@ -718,7 +719,7 @@ class TeeClient:
                     body=reason,
                 )
             try:
-                body = response.json()
+                body = loads(response.content)
             except (ValueError, RecursionError) as exc:    # or JSON nested past reading
                 raise ProviderError(f"{netguard.shown(base + path)} returned a non-JSON body") from exc
             if not isinstance(body, dict):
@@ -1182,7 +1183,7 @@ class TeeClient:
                 f"{self.model}'s instance {name} signed with a key its TDX quote doesn't bind"
             )
         try:
-            attested = json.loads(signed)
+            attested = loads(signed)
             evidence = attested["evidence"]
         except (ValueError, KeyError, TypeError) as exc:
             raise TeeRefused(f"{self.model}'s instance {name} signed unreadable evidence") from exc
@@ -1285,7 +1286,7 @@ class TeeClient:
                 f"NVIDIA rejected {self.model}'s GPU evidence (HTTP {response.status_code})"
             )
         try:
-            return response.json()
+            return loads(response.content)
         except ValueError:
             return None
 

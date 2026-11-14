@@ -57,10 +57,11 @@ from typing import AsyncIterator
 import anthropic
 
 from .capabilities import EFFORTS
-from .client import (CONNECT_TIMEOUT, NO_RESULT, ToolCall, TurnResult, capped_lines, cut_off, is_private_mode,
-                     local_http_options, no_reply, only_what_it_was_given, redirected)
+from .client import (CONNECT_TIMEOUT, NO_RESULT, ToolCall, TurnResult, cut_off, is_private_mode, no_reply,
+                     only_what_it_was_given, reading_options, redirected)
 from .params import nearest_effort
 from .providers import is_official_anthropic
+from .secure_http import loads
 
 THINKING_BETA = "thinking-binding-controls-2026-08-01"
 # What the API does with a thinking block whose history changed anyway: drop it and carry on.
@@ -215,7 +216,7 @@ def _plain_assistant(m: dict) -> list[dict]:
     for c in m.get("tool_calls") or []:
         fn = c.get("function") or {}
         try:
-            args = json.loads(fn.get("arguments") or "{}")
+            args = loads(fn.get("arguments") or "{}")
         except ValueError:
             args = {}
         blocks.append({"type": "tool_use", "id": _tool_id(c.get("id", "")), "name": fn.get("name", ""),
@@ -490,13 +491,14 @@ class AnthropicClient:
         # never the SDK's own HTTP client, which follows redirects: a reply pointing elsewhere
         # would get the request again, x-api-key header included (llm/client.py LLMClient). An
         # Anthropic-compatible server on this machine or its network is reached directly, not
-        # through a proxy the environment names (llm/client.py local_http_options). And it sends
-        # no header the environment holds for Anthropic's SDK (only_what_it_was_given).
+        # through a proxy the environment names, and its answers are read only so far (llm/client.py
+        # reading_options). And it sends no header the environment holds for Anthropic's SDK
+        # (only_what_it_was_given).
         self._client = _Anthropic(
             api_key=api_key or "not-needed", base_url=base, max_retries=1,
             timeout=anthropic.Timeout(600, connect=CONNECT_TIMEOUT),
             http_client=http_client or anthropic.DefaultAsyncHttpxClient(
-                follow_redirects=False, event_hooks={"response": [capped_lines]}, **local_http_options(base_url)))
+                follow_redirects=False, **reading_options(base_url)))
         self._caps = caps or {}
 
     async def list_models(self) -> list[str]:

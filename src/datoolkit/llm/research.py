@@ -27,8 +27,9 @@ import httpx
 from ..config import private_dir
 from ..safety.hidden import visible
 from ..safety.inject import defang, label, suspicious
-from .client import local_http_options
+from .client import reading_options
 from .netguard import key_problem, shown
+from .secure_http import loads
 from .websearch import clean_date, clean_sites, format_for_model
 
 SCRAPE_TIMEOUT = 120
@@ -74,7 +75,7 @@ async def scrape(base_url: str, api_key: str, urls: list[str], stealth: bool = F
     if problem:
         raise ScrapeError(problem)
     body = {"urls": urls[:MAX_URLS_PER_SCRAPE], "stealthMode": stealth}
-    client = http or httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, **local_http_options(base_url))
+    client = http or httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, **reading_options(base_url))
     try:
         r = await client.post(scrape_url(base_url), json=body, headers={"Authorization": f"Bearer {api_key}"},
                               timeout=SCRAPE_TIMEOUT)
@@ -86,7 +87,7 @@ async def scrape(base_url: str, api_key: str, urls: list[str], stealth: bool = F
     if r.status_code != 200:
         detail = _ERRORS.get(r.status_code, r.reason_phrase)
         try:
-            err = r.json().get("error")
+            err = loads(r.content).get("error")
             msg = err.get("message") if isinstance(err, dict) else err
             if msg:
                 detail += f": {msg}"
@@ -94,7 +95,7 @@ async def scrape(base_url: str, api_key: str, urls: list[str], stealth: bool = F
             pass
         raise ScrapeError(f"page fetch failed ({r.status_code} {detail})")
     try:
-        payload = r.json()
+        payload = loads(r.content)
     except ValueError as e:
         raise ScrapeError("the scraper returned something that is not JSON") from e
     pages = []
@@ -486,7 +487,7 @@ def parse_check(text: str) -> dict:
     and passages given as anything else but a list leave the page not clean."""
     m = re.search(r"\{.*\}", text or "", re.S)
     try:
-        data = json.loads(m.group(0)) if m else None
+        data = loads(m.group(0)) if m else None
     except ValueError:
         data = None
     if not isinstance(data, dict):

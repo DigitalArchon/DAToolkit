@@ -164,6 +164,12 @@ container image itself; you pull it once, and it runs exactly the pinned image.
 - **No line of a reply past 32 MB is held.** A stream's event is a few kilobytes: a provider that
   sends more than 32 MB without a line's end (counted as decoded, whatever its compression), in a
   stream or a reply read whole, gets an error, and nothing more is read from it.
+- **An answer is read only so far.** Every client that reads what a provider, NanoGPT's relay or
+  an attestation service sends asks for gzip or deflate compression alone (never br or zstd, which
+  can unpack without bound) and refuses an answer sent any other way, unread; a reply read whole,
+  a model list or an attestation is read to 32 MB at most, and an error's text to 64 KB, the rest
+  left unread (both counted as unpacked). JSON from any of them nested more than 200 levels deep
+  is refused as unreadable, never left to crash what reads it.
 - **Proxies.** DA Toolkit has no proxy or Tor setting of its own. Its connections go through
   the proxy your environment sets (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`), if any, with
   one exception: **what is on this computer or its local network is reached directly**, so the

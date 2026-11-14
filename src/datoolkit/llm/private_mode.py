@@ -30,7 +30,10 @@ pinned exactly in pyproject.toml. The design follows SealedLore's providers/priv
    unsealed and nothing falls back to the plain endpoint (`LLMClient` refuses `private/*`).
    The last two from DA Vibe Manager's copy of this module (Nov 2026). Anything else of the
    relay's an error quotes (a preflight refusal, an attestation bundle, the title of a key
-   mismatch) goes the same way, through `relay_said`, without what can't be seen.
+   mismatch) goes the same way, through `relay_said`, without what can't be seen. Every answer
+   is read only so far (llm/client.py capped_lines: gzip and deflate alone asked for, an error's
+   body to 64 KB, a whole one to 32 MB, a line to 32 MB) and its JSON nested no deeper than
+   secure_http.MAX_NESTING.
 
 The attestation is redone once it is five minutes old, once more if the enclave says the key
 has changed, and whenever the technician asks (the top bar's "Click to re-check":
@@ -68,6 +71,7 @@ from . import netguard, sdk_guard
 from .capabilities import norm_id
 from .client import StreamAccumulator, capped_lines, is_private_mode, openai_messages, read_lines
 from .dcap import since_boot
+from .secure_http import ACCEPT_ENCODING, ProviderError, loads
 
 RELAY_PATH = "/api/v1/private/tinfoil"
 ROUTER_REPO = "tinfoilsh/confidential-model-router"
@@ -134,6 +138,12 @@ def offered(model_id: str, ids: list[str]) -> bool | None:
         return None
     key = norm_id(model_id)
     return any(norm_id(i) == key for i in ids)
+
+
+def _reading(**options) -> dict:
+    """What every client of the relay is made with: only gzip and deflate asked for, its answers read
+    only so far (llm/client.py capped_lines)."""
+    return {"headers": {"Accept-Encoding": ACCEPT_ENCODING}, "event_hooks": {"response": [capped_lines]}, **options}
 
 
 def offers_private_mode(base_url: str) -> bool:
@@ -382,12 +392,11 @@ class PrivateModeClient:
     async def _read_private_ids(self) -> list[str]:
         """NanoGPT's list of Private Mode models: public, so no key is sent. [] when it can't
         be read."""
-        client = self._plain or httpx.AsyncClient(timeout=PREFLIGHT_TIMEOUT_SECONDS,
-                                                  event_hooks={"response": [capped_lines]})
+        client = self._plain or httpx.AsyncClient(**_reading(timeout=PREFLIGHT_TIMEOUT_SECONDS))
         try:
             resp = await client.get(self.enclave.relay + "/models", headers={"Accept": "application/json"})
-            return private_ids_in(resp.json()) if resp.status_code < 400 else []
-        except (httpx.HTTPError, ValueError):
+            return private_ids_in(loads(resp.content)) if resp.status_code < 400 else []
+        except (httpx.HTTPError, ValueError, ProviderError):
             return []
         finally:
             if self._plain is None:
@@ -403,14 +412,13 @@ class PrivateModeClient:
             raise ModelRetired(model, ids, status_code, body)
 
     async def _preflight(self, model: str, body_bytes: int) -> tuple[str, str]:
-        client = self._plain or httpx.AsyncClient(timeout=PREFLIGHT_TIMEOUT_SECONDS,
-                                                  event_hooks={"response": [capped_lines]})
+        client = self._plain or httpx.AsyncClient(**_reading(timeout=PREFLIGHT_TIMEOUT_SECONDS))
         try:
             resp = await client.post(self.enclave.relay + "/preflight",
                                      json={"model": model, "requestBodyBytes": body_bytes},
                                      headers=self._headers())
-        except httpx.HTTPError as e:
-            raise PrivateModeError(f"NanoGPT's Private Mode check failed: {e}") from e
+        except (httpx.HTTPError, ProviderError) as e:
+            raise PrivateModeError(f"NanoGPT's Private Mode check failed: {relay_said(str(e), 300)}") from e
         finally:
             if self._plain is None:
                 await client.aclose()
@@ -421,9 +429,11 @@ class PrivateModeClient:
             raise PrivateModeError(f"NanoGPT refused the Private Mode request (HTTP {resp.status_code}): "
                                    f"{relay_said(resp.text, 300)}", resp.status_code, resp.text)
         try:
-            data = resp.json()
+            data = loads(resp.content)
         except ValueError as e:
             raise PrivateModeError("NanoGPT's Private Mode check wasn't JSON") from e
+        if not isinstance(data, dict):
+            raise PrivateModeError("NanoGPT's Private Mode check didn't say where to send the request")
         scope = str(data.get("cacheScope") or "").strip()
         upstream = str(data.get("upstreamModel") or "").strip()
         if len(scope) != 64 or not upstream:
@@ -480,8 +490,7 @@ class PrivateModeClient:
         # request as httpx reads it for the others
         route = environment_proxy(self.enclave.relay)
         async with httpx.AsyncClient(transport=self._transport_factory(verified.hpke_public_key, route),
-                                     timeout=TIMEOUT_SECONDS, follow_redirects=False,
-                                     event_hooks={"response": [capped_lines]}) as client:
+                                     **_reading(timeout=TIMEOUT_SECONDS, follow_redirects=False)) as client:
             async with client.stream("POST", self.enclave.relay + "/v1/chat/completions",
                                      json=body, headers=headers) as resp:
                 from ehbp.protocol import RESPONSE_NONCE_HEADER
@@ -512,7 +521,7 @@ class PrivateModeClient:
                         saw_done = True
                         break
                     try:
-                        parsed = json.loads(data)
+                        parsed = loads(data)
                     except ValueError:
                         continue
                     if isinstance(parsed, dict) and parsed.get("error") and not parsed.get("choices"):
@@ -543,11 +552,11 @@ class PrivateModeClient:
 
 async def list_private_models(base_url: str, http: httpx.AsyncClient | None = None) -> list[str]:
     """The relay's public list of Private Mode model ids (no key needed)."""
-    client = http or httpx.AsyncClient(timeout=30)
+    client = http or httpx.AsyncClient(**_reading(timeout=30))
     try:
         resp = await client.get(relay_url(base_url) + "/models", headers={"Accept": "application/json"})
         resp.raise_for_status()
-        return private_ids_in(resp.json())
+        return private_ids_in(loads(resp.content))
     finally:
         if http is None:
             await client.aclose()

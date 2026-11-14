@@ -12,9 +12,16 @@ import re
 
 import httpx
 
-from .client import local_http_options
+from .client import reading_options
+from .secure_http import loads
 
 EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+def _listed(response: httpx.Response) -> list:
+    """A model listing's entries, its JSON read as JSON from outside is (secure_http.loads)."""
+    data = loads(response.content)
+    return (data.get("data") if isinstance(data, dict) else None) or []
 
 
 def norm_id(model_id: str) -> str:
@@ -41,12 +48,12 @@ def parse(items: list[dict]) -> dict[str, dict]:
 
 async def fetch_nanogpt(base_url: str, api_key: str | None, http: httpx.AsyncClient | None = None) -> dict[str, dict]:
     # as every client built for a provider's address: a local one is reached directly (local_http_options)
-    client = http or httpx.AsyncClient(timeout=30, **local_http_options(base_url))
+    client = http or httpx.AsyncClient(timeout=30, **reading_options(base_url))
     try:
         r = await client.get(base_url.rstrip("/") + "/models", params={"detailed": "true"},
                              headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
         r.raise_for_status()
-        return parse(r.json().get("data", []))
+        return parse(_listed(r))
     finally:
         if http is None:
             await client.aclose()
@@ -73,12 +80,12 @@ def parse_openrouter(items: list[dict]) -> dict[str, dict]:
 
 
 async def fetch_openrouter(base_url: str, api_key: str | None, http: httpx.AsyncClient | None = None) -> dict[str, dict]:
-    client = http or httpx.AsyncClient(timeout=30, **local_http_options(base_url))
+    client = http or httpx.AsyncClient(timeout=30, **reading_options(base_url))
     try:
         r = await client.get(base_url.rstrip("/") + "/models",
                              headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
         r.raise_for_status()
-        return parse_openrouter(r.json().get("data", []))
+        return parse_openrouter(_listed(r))
     finally:
         if http is None:
             await client.aclose()
