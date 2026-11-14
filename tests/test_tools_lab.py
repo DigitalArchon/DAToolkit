@@ -5,9 +5,12 @@ stand-in for the lab's credentials file, and starts nothing."""
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from datoolkit.config import Host
 from datoolkit.sessions import winrm
@@ -20,7 +23,10 @@ def test_no_tool_names_the_folder_it_was_written_in():
     """lab.py started the instance from /home/<its author>/Documents/DAToolkit, and the model
     evaluation's brief sent the host agent there."""
     # the files the repository holds: a run's own notes and results beside them (git-ignored) may
-    # name where they were made
+    # name where they were made. Without git, skipped as the other tests that ask git are (a stock
+    # Ubuntu 26.04 has none: this crashed there)
+    if not shutil.which("git"):
+        pytest.skip("no git")
     listed = subprocess.run(["git", "ls-files", "tools", "packaging"], cwd=ROOT, capture_output=True, text=True)
     paths = ([ROOT / line for line in listed.stdout.splitlines()] if listed.returncode == 0 and listed.stdout.strip()
              else [p for folder in ("tools", "packaging") for p in (ROOT / folder).rglob("*")])
@@ -29,6 +35,12 @@ def test_no_tool_names_the_folder_it_was_written_in():
             found = re.search(r"/home/\w+|/Users/\w+", path.read_text(errors="replace"))
             assert not found, f"{path.relative_to(ROOT)}: {found.group(0)}"
     assert "repository root" in (ROOT / "tools" / "model-eval" / "HOST_BRIEF.md").read_text()
+
+
+def test_without_git_the_listing_is_skipped_as_every_test_that_asks_git_is(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))                 # nothing on it: no git
+    with pytest.raises(pytest.skip.Exception, match="no git"):
+        test_no_tool_names_the_folder_it_was_written_in()
 
 
 def test_the_lab_harness_runs_the_checkout_it_is_in(tmp_path):
