@@ -37,6 +37,17 @@ def memory_keyring(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def dumpable_test_run(monkeypatch):
+    """An entry point a test calls (app.main, replay.main) turns core dumps off for its process
+    (coredumps.py): here that would be the test run's own, for every test after it, and an
+    undumpable process can't read its own /proc/self/environ, nor may the desktop portal answer it.
+    tests/test_coredumps.py checks the real thing in processes of its own."""
+    from datoolkit import coredumps
+
+    monkeypatch.setattr(coredumps, "no_core_dumps", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def no_real_containers(monkeypatch):
     """Never find the real podman or docker: the guacd container code would start or remove
     containers on this machine. Tests that pass their own `which` still see their fakes."""

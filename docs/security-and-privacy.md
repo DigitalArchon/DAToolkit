@@ -210,6 +210,13 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   keyring for this host", it is held in memory until the login has succeeded, and dropped if
   the host refuses it or the session ends first. When a WinRM or RDP server refuses a password
   the keyring supplied, DA Toolkit says that a saved one was used and how to replace it.
+- **A crash writes none of the app's memory to disk.** The app, the askpass helper that carries
+  a password to ssh and the WinRM console turn core dumps off as they start, so neither a core
+  file nor the system's crash collector keeps a copy of the keys, passwords and cases they hold,
+  and other programs of yours can't read their memory or environment while they run. The
+  desktop portal (xdg-desktop-portal) refuses such a process, so where your desktop asks GTK for
+  the portal's file dialogs (`GTK_USE_PORTAL=1`), the app window uses GTK's own: the programs it
+  starts still get your setting.
 - **What never reaches a file or a log**: keys and saved passwords. What does: `requests.jsonl`
   keeps every model request as it was sent (the output you reviewed and sent, not raw terminal
   output), `events.jsonl` the case's audit trail, and `term-<session>.log` each terminal's raw

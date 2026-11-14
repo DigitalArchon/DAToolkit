@@ -236,6 +236,9 @@ def connection(cfg: dict, password: str):
 
 
 def main() -> int:
+    from datoolkit import coredumps
+
+    coredumps.no_core_dumps()          # it holds the password: never to a core file
     from pypsrp.powershell import RunspacePool
 
     from datoolkit.sessions.askpass import AUTHENTICATED, FAILED, REFUSED

@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+from . import coredumps
 from .config import data_dir
 from .queue import Proposal, Queue
 from .safety import risk
@@ -63,6 +64,7 @@ def replay_case(case_dir: Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    coredumps.no_core_dumps()          # it reads every case: none of it to a core file
     ap = argparse.ArgumentParser(prog="datoolkit-replay",
                                  description="Re-run current safety rules over past cases and report differences")
     ap.add_argument("cases", nargs="*", type=Path, help="case directories (default: all)")

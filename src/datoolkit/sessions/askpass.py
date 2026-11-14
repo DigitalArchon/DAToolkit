@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from .. import coredumps
+
 # (session_id, prompt, kind) -> answer or None to refuse
 Handler = Callable[[str, str, str], Awaitable[str | None]]
 # kind "status": not a question but the WinRM console saying how its login went, the prompt being
@@ -155,6 +157,7 @@ def request(prompt: str, kind: str = "askpass") -> str | None:
 
 
 def main() -> None:
+    coredumps.no_core_dumps()          # the process that carries the password: never to a core file
     if os.environ.get("SSH_ASKPASS_PROMPT") == "none":
         # a notice, not a question ("Confirm user presence for key ...": touch the security key):
         # shown, and nothing waited for; ssh ends this helper once the key has been touched

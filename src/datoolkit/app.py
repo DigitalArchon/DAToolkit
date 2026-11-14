@@ -16,9 +16,9 @@ from pathlib import Path
 
 import uvicorn
 
-from . import config
+from . import config, coredumps
 from .engine import Engine
-from .hostenv import set_for_self
+from .hostenv import put_back, set_for_self
 from .server.app import Launches, create_app, runtime_dir
 
 
@@ -231,6 +231,18 @@ def harden_window(webview) -> None:
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
 
 
+def own_dialogs() -> None:
+    """GTK's own file dialogs in the app window, never the desktop portal's, where the environment
+    asks GTK for the portal's (GTK_USE_PORTAL=1, which some KDE desktops set). The app isn't
+    dumpable (coredumps.py), and xdg-desktop-portal refuses every request of a process that isn't
+    ("Portal operation not allowed: Unable to open /proc/PID/root", measured with 1.20.0), so the
+    window's Attach photo dialog would never open. GTK and GLib read the variable once, as GTK
+    starts: set before it does, for this process only (programs it starts get the value it was:
+    hostenv). DA Toolkit uses the portal for nothing else."""
+    if os.environ.get("GTK_USE_PORTAL", "").startswith("1"):
+        set_for_self("GTK_USE_PORTAL", "0")
+
+
 def window_problem() -> str | None:
     """Why the app window can't open here (no WebKitGTK, no display), or None if it can."""
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
@@ -248,6 +260,7 @@ def window_problem() -> str | None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    coredumps.no_core_dumps()          # it will hold keys and passwords: none of it to a core file
     ap = argparse.ArgumentParser(prog="datoolkit", description="Gated AI diagnostic console")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--browser", action="store_true",
@@ -273,8 +286,10 @@ def main(argv: list[str] | None = None) -> None:
         print(second, file=sys.stderr)
     use_browser = args.browser or args.no_open or (cfg.settings.ui_mode == "browser" and not args.window)
     if not use_browser:
+        own_dialogs()                  # before GTK starts
         problem = window_problem()
         if problem:
+            put_back("GTK_USE_PORTAL")     # the browser that opens instead uses what the desktop asks
             use_browser, why = True, f"{problem}. Running in your web browser until then."
             notice = f"{notice} {why}".strip()
             print(why, file=sys.stderr)
