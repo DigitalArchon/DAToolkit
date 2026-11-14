@@ -997,8 +997,9 @@ would go over `http://` to another machine on your network (a private IP or a `.
 this computer) asks **Send the API key unencrypted to ‹host›?**, No being the default: anyone on
 that network can read it, a café's or a hotel's Wi-Fi too. No saves nothing; Yes is kept for that
 address, and typing another key for it asks again. A key for such an address that nobody agreed
-to (`config.toml` edited by hand) isn't sent, saying why. One that already went there before this
-version is kept going, with no question, from its first start.
+to (`config.toml` edited by hand) isn't sent, saying why, and neither is one that already went there
+before this version: it is held back until you agree to it once, with **Send it unencrypted…**
+beside it in the provider's form (No the default).
 
 **Local trusts your network.** A base URL counts as Local when its host is `localhost`, an
 IP address plain http is accepted for (this machine's, a private, link-local or unique local

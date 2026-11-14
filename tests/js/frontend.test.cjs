@@ -2082,6 +2082,44 @@ test("a No for an address is kept and not asked again at the next save; Ask agai
   assert.equal(test_.posts("/api/providers").at(-1).body.use_saved_key, false);
 });
 
+test("a key held back from plain http to another machine is shown with a button that asks, No the default", async () => {
+  // as the engine sends one never agreed to (a file from before this was asked: nothing is grandfathered)
+  const held = (s) => {
+    const p = s.config.providers.find((x) => x.name === "Fake");
+    p.base_url = "http://192.168.1.5:8080/v1";
+    p.key_origin = "http://192.168.1.5:8080";
+    p.key_in_clear = "";
+    p.key_held = "The API key saved for Fake would go over plain http to 192.168.1.5, another machine on your network.";
+  };
+  const open = async () => {
+    const app = await page("a", held, { "POST /api/providers": () => ({ ok: true }), "GET /api/models": () => ({ models: [] }) });
+    app.call("openSettings");
+    await app.clock.tick(0);
+    const item = app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("Fake"));
+    button(item, "Edit").click();
+    await app.clock.tick(0);
+    return app;
+  };
+  const app = await open();
+  assert.match(app.$(".modal").textContent, /would go over plain http to 192\.168\.1\.5/);
+  button(app.$(".modal"), "Send it unencrypted…").click();
+  await app.clock.tick(0);
+  const asked = app.document.querySelectorAll(".modal").at(-1);
+  assert.equal(asked.querySelector("h2").textContent, "Send the API key unencrypted to 192.168.1.5?");
+  await app.clock.tick(50);
+  assert.ok(app.document.activeElement === button(asked, "No"), "No has the focus");
+  button(asked, "No").click();
+  await app.clock.tick(0);
+  assert.equal(app.posts("/api/providers").length, 0, "No saves nothing");
+
+  const yes = await open();
+  button(yes.$(".modal"), "Send it unencrypted…").click();
+  await yes.clock.tick(0);
+  button(yes.document.querySelectorAll(".modal").at(-1), "Send it unencrypted").click();
+  await yes.clock.tick(0);
+  assert.equal(yes.posts("/api/providers").at(-1).body.send_in_clear, true);
+});
+
 test("a key about to go over plain http to another machine is asked about first, No saving nothing", async () => {
   const edit = async (address, key = "sk-new") => {
     const app = await page("a", null, { "POST /api/providers": () => ({ ok: true }) });

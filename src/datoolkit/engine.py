@@ -2854,14 +2854,15 @@ class Engine:
             return None
         here = netguard.origin(prov.base_url)
         if here == prov.key_origin:
-            if prov.key_in_clear is None or prov.key_in_clear == here or not netguard.in_the_clear(prov.base_url):
+            if prov.key_in_clear == here or not netguard.in_the_clear(prov.base_url):
                 return None
-            # held to this address, but it is plain http to another machine, and nobody said to send it so
+            # held to this address, but it is plain http to another machine, and nobody said to send it so,
+            # a key that went there before this was asked included (nothing is grandfathered, Nov 14 2026)
             return (f"The API key saved for {prov.name} would go over plain http to "
                     f"{urlparse(prov.base_url).hostname}, another machine on your network, where anyone on it can "
                     f"read it, and that wasn't agreed to for this address: it wasn't sent. Use the server's https:// "
-                    f"address, or save {prov.name} in Settings → AI providers and answer Yes to sending it "
-                    f"unencrypted.")
+                    f"address, or agree to it once in Settings → AI providers → {prov.name} (Send it "
+                    f"unencrypted…, No the default).")
         was = netguard.shown_origin(prov.key_origin) or "no address"
         now = netguard.shown_origin(here) or netguard.shown(prov.base_url)
         return (f"The API key saved for {prov.name} was entered for {was}, and {prov.name}'s address is now {now}, so "

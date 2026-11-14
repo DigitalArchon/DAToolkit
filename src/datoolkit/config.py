@@ -140,7 +140,7 @@ class Provider:
     key_declined: str = ""
     # the origin the technician agreed to send the key to over plain http, to another machine on the
     # local network (netguard.in_the_clear: Settings asks, No the default); "" for none; None in a
-    # file written before this was asked (settle_key_origins: a key already sent there goes on)
+    # file written before this was asked, read as none (settle_key_origins: nothing is grandfathered)
     key_in_clear: str | None = None
 
 
@@ -385,11 +385,10 @@ def settle_key_origins(cfg: Config) -> bool:
         if prov.key_origin is None:
             prov.key_origin, settled = netguard.origin(prov.base_url), True
         if prov.key_in_clear is None:
-            # a key that went over plain http to another machine before this was asked goes on, with no
-            # question, written once (as its origin): from then on a new address there is asked about
-            here = netguard.origin(prov.base_url)
-            prov.key_in_clear = here if netguard.in_the_clear(prov.base_url) and prov.key_origin == here else ""
-            settled = True
+            # a key that went over plain http to another machine before this was asked is held back until
+            # the technician agrees to it once (the author, Nov 14 2026: nothing is grandfathered); written
+            # once, as its origin is
+            prov.key_in_clear, settled = "", True
     for host in cfg.hosts:
         if host.password_for is None:
             host.password_for, settled = host_origin(host), True

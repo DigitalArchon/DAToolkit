@@ -266,15 +266,40 @@ async def test_a_key_edited_in_by_hand_to_another_machine_over_plain_http_isnt_s
         Engine._client(engine, engine.cfg.provider("Box"))
 
 
-def test_a_key_already_going_over_plain_http_before_this_was_asked_goes_on(tmp_path):
-    """Settled once, with no question, as the origins were: a working setup isn't broken by the upgrade."""
+def test_a_key_already_going_over_plain_http_before_this_was_asked_is_held_back(tmp_path):
+    """Settled once, with no question, as the origins were, and taken as agreed to for nothing (the author,
+    Nov 14 2026: nothing is grandfathered): held back until the technician agrees once."""
     path = tmp_path / "config.toml"
     path.write_text('[[providers]]\nname = "Box"\nbase_url = "http://192.168.1.5:8080/v1"\n'
                     '[[providers]]\nname = "Moved"\nbase_url = "http://192.168.1.6/v1"\nkey_origin = "https://x.example:443"\n')
     cfg = config_mod.load(path)
     box, moved = cfg.provider("Box"), cfg.provider("Moved")
-    assert box.key_in_clear == "http://192.168.1.5:8080" and moved.key_in_clear == ""
-    assert 'key_in_clear = "http://192.168.1.5:8080"' in path.read_text(), "written once"
+    assert box.key_in_clear == "" and moved.key_in_clear == ""
+    assert 'key_in_clear = ""' in path.read_text(), "written once"
+
+
+async def test_a_key_held_back_from_plain_http_is_refused_in_words_until_agreed_to(env):  # noqa: F811
+    """A request that would send it is refused naming the machine and where to agree; the provider's
+    view says so (Settings shows it with a button that asks); one Yes sends it from then on."""
+    engine, _, _ = env
+    lan = "http://192.168.1.5:8080/v1"
+    engine.save_provider({"name": "Box", "base_url": lan}, "sk-box", send_in_clear=True)
+    engine.cfg.provider("Box").key_in_clear = None           # as a file written before this was asked
+    config_mod.settle_key_origins(engine.cfg)
+    with pytest.raises(UserError, match="plain http to 192.168.1.5.*Settings → AI providers → Box") as refused:
+        Engine._client(engine, engine.cfg.provider("Box"))
+    assert "sk-box" not in str(refused.value)
+    view = next(p for p in engine.snapshot()["config"]["providers"] if p["name"] == "Box")
+    assert "wasn't agreed to for this address" in view["key_held"]
+    with pytest.raises(UserError, match="answer Yes to sending it unencrypted"):
+        engine.save_provider(provider_data(engine, "Box"), None, "Box")              # saved again: asked
+    engine.save_provider(provider_data(engine, "Box"), None, "Box", send_in_clear=True)
+    assert Engine._client(engine, engine.cfg.provider("Box")) is not None
+    engine.save_provider({"name": "Here", "base_url": "http://127.0.0.1:11434/v1"}, "sk-here")
+    here = engine.cfg.provider("Here")
+    here.key_in_clear = None
+    config_mod.settle_key_origins(engine.cfg)
+    assert Engine._client(engine, here) is not None, "this computer: never held back"
 
 
 async def test_a_host_password_no_is_kept_too(env):  # noqa: F811

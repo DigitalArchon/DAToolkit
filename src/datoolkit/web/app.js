@@ -4233,7 +4233,13 @@ function openSettings(tab = "providers") {
             await save(true);
             toast("Provider saved.", "ok");
           }) }, "Ask again"), "."]
-        : p.key_held ? [p.key_held] : []));
+        : p.key_held && !p._new && p.has_key && inTheClear(p.base_url) && p.key_in_clear !== originOf(p.base_url)
+          // held back from plain http to another machine until agreed to once (nothing is grandfathered)
+          ? [p.key_held, " ", h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
+              await save(true);
+              toast("Provider saved.", "ok");
+            }) }, "Send it unencrypted…")]
+          : p.key_held ? [p.key_held] : []));
     };
     const apiNote = h("div", { class: "muted small" });
     const showApi = () => {
