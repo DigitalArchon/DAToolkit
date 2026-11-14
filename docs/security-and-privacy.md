@@ -155,7 +155,9 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   conversation and the key again to wherever it points; the error says where it pointed. The
   attestation clients, a private model's (Tinfoil's and Sigstore's) included, follow no redirect
   off https, nor one from the internet into this computer or its network (an attestation
-  endpoint must not reach your router's admin page).
+  endpoint must not reach your router's admin page), nor one to an address DA Toolkit wouldn't
+  use itself; a refused one is named in the error. What Tinfoil's verifier fetches asks for gzip
+  or deflate only and is read to 32 MB at most (an error's or a redirect's text to 64 KB).
 - **An answer that isn't the API** (a web page, a network's sign-in page, an address without its
   `/v1`) is an error naming what came back, never taken for an empty reply.
 - **A reply that was cut off is not a reply.** When a provider's connection closes before it
