@@ -287,7 +287,7 @@ class Case:
             if data is None:
                 path.unlink(missing_ok=True)
             else:
-                write_atomic(path, data, sync_dir=False)
+                write_atomic(path, data)
             order.landed = seq
 
     def load_draft(self) -> dict:
@@ -399,7 +399,7 @@ class Case:
             out.append(f"| {q['num']} | {_cell(md_inert(str(q['session_id'])))} | {inline_code(_cell(q['command']))} | {q['risk']} "
                        f"| {q['status']} | {_code_cell(q.get('rollback'))} | {_code_cell(q.get('note'))} |")
         path = self.dir / "transcript.md"
-        path.write_bytes(utf8("\n".join(out) + "\n"))
+        write_atomic(path, utf8("\n".join(out) + "\n"))
         return path
 
 
@@ -417,7 +417,7 @@ def _write_state(path: Path, data: dict) -> None:
     can't be read made its case unopenable, and the conversation in it was lost."""
     raw = _json_bytes(data)
     _keep_previous(path)
-    write_atomic(path, raw, sync_dir=False)
+    write_atomic(path, raw)
 
 
 def _keep_previous(path: Path) -> None:

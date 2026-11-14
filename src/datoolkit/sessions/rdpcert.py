@@ -22,7 +22,6 @@ import json
 import os
 import ssl
 import struct
-import tempfile
 import unicodedata
 import warnings
 from datetime import datetime
@@ -30,7 +29,7 @@ from pathlib import Path
 
 from cryptography import x509
 
-from ..config import config_dir, private_dir
+from ..config import config_dir, private_dir, write_atomic
 
 TIMEOUT = 10
 # seconds the whole of a certificate may take to read again before a reconnect: guacd, which is
@@ -218,24 +217,7 @@ class PinStore:
 
     def _save(self, data: dict) -> None:
         private_dir(self.path.parent)
-        fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)   # 0600
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, indent=1))
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
-        try:                                     # the rename itself, kept across a power cut
-            dir_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+        write_atomic(self.path, json.dumps(data, indent=1).encode("utf-8"))   # whole or not at all (config.py)
 
     def get(self, host: str, port: int) -> dict | None:
         """The pin as Settings shows it. Never raises, and never decides trust: a file that

@@ -57,12 +57,14 @@ class AskpassBridge:
         # -P: the directory ssh was started in (the technician's home) is not on the helper's
         # import path. With plain `-m` it came first, and a stray ~/secrets.py or ~/json.py was
         # imported, by the process that carries the password, in place of Python's own.
-        self.script_path.write_text(
+        from ..config import write_atomic
+
+        # whole or not at all, and executable by this user alone from the start
+        write_atomic(self.script_path, (
             "#!/bin/sh\n"
             f"PYTHONPATH={shlex.quote(str(src_root))}${{PYTHONPATH:+:$PYTHONPATH}} "
             f"exec {shlex.quote(sys.executable)} -P -m datoolkit.sessions.askpass \"$@\"\n"
-        )
-        os.chmod(self.script_path, 0o700)
+        ).encode(), mode=0o700)
         if self.sock_path.exists():
             self.sock_path.unlink()
         self._server = await asyncio.start_unix_server(self._serve, path=str(self.sock_path))

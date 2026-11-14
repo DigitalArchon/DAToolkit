@@ -562,7 +562,12 @@ with no such address has it listen on every interface.
 | The tool cache | `~/.local/share/datoolkit/tools/` |
 | Sigstore's trust root (Tinfoil's verifier) | `~/.local/share/sigstore-python`, `~/.cache/sigstore-python` |
 
-Every folder DA Toolkit makes under its two is readable by you alone. **Kept in memory only**,
+Every folder DA Toolkit makes under its two is readable by you alone, and every file it keeps
+there (settings, a case's state, draft, transcript and files, research reports, baselines, pins,
+the phone's key and certificate) is written whole or not at all: to a temporary file of its own,
+readable by you alone from the start, flushed to the disk, then renamed into place, its folder
+flushed after, so a crash or a power cut leaves the file before or the file after, never half of
+one. An export you save is written the same way, readable by you alone. **Kept in memory only**,
 and gone when DA Toolkit quits: the launch token and codes, phone pairing codes and the paired
 phones' token hashes, attestations and their keys, RedPill's session records, the model
 lists read from providers, and a password you ticked to save, until its host has accepted it.

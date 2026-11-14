@@ -24,7 +24,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 import httpx
 
-from ..config import private_dir
+from ..config import private_dir, write_atomic
 from ..safety.hidden import visible
 from ..safety.inject import defang, label, suspicious
 from .client import reading_options
@@ -584,6 +584,5 @@ class ReportCache:
                "client": client, "sensitivity": sensitivity}
         key = "\n".join([" ".join(sorted(terms(brief))), client, sensitivity])
         name = sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:24] + ".json"
-        tmp = self.root / (name + ".tmp")
-        tmp.write_text(json.dumps(rec, indent=1), encoding="ascii")      # any text at all, surrogates included
-        tmp.replace(self.root / name)
+        # whole or not at all, under a temporary name of its own: two runs saving one brief shared one name
+        write_atomic(self.root / name, json.dumps(rec, indent=1).encode("ascii"))     # any text, surrogates included

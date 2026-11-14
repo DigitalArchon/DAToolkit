@@ -93,7 +93,7 @@ class Desktop:
         if not chosen:
             return None
         path = chosen if isinstance(chosen, str) else chosen[0]
-        Path(path).write_bytes(data)
+        config.write_atomic(Path(path), data)      # whole or not at all, this user's alone: it holds the case
         return path
 
     @staticmethod

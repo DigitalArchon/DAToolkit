@@ -245,3 +245,53 @@ def test_a_file_is_on_the_disk_before_it_takes_its_name(tmp_path, monkeypatch):
         config.write_atomic(path, b"never")
     monkeypatch.setattr(os, "replace", real_replace)
     assert path.read_bytes() == b"new" and [p.name for p in tmp_path.iterdir()] == ["state.json"]   # no temp file left
+
+
+def test_every_write_of_a_file_that_matters_is_whole_or_not_at_all(tmp_path, monkeypatch):
+    """One writer (config.write_atomic: a unique 0600 temporary file, flushed, renamed, its folder
+    flushed: the cross-app standard, Nov 2026) for what DA Toolkit keeps: a case's state and draft
+    (which went without the folder's flush), the research cache (one fixed .tmp name for every
+    run), the companion's key and certificate (the key written in place), the certificate pins, and
+    the askpass script (executable, written in place)."""
+    import asyncio
+    import re
+    from pathlib import Path
+
+    from datoolkit import case as case_mod, companion
+    from datoolkit.llm import research
+    from datoolkit.sessions import askpass, rdpcert
+
+    written: list[tuple[str, int]] = []
+    real = config.write_atomic
+
+    def watched(path, data, mode=0o600):
+        written.append((Path(path).name, mode))
+        real(path, data, mode)
+    monkeypatch.setattr(config, "write_atomic", watched)
+    for module in (case_mod, companion, research, rdpcert):
+        monkeypatch.setattr(module, "write_atomic", watched)
+
+    flushed = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (flushed.append(stat.S_ISDIR(os.fstat(fd).st_mode)), real_fsync(fd)))
+
+    case_mod._write_state(tmp_path / "state.json", {"chat": []})
+    assert flushed[-2:] == [False, True], "the folder is flushed after a state save too"
+    research.ReportCache(tmp_path / "research").save("why is the disk full", "report", [], "m",
+                                                     client="", sensitivity="open")
+    assert not list((tmp_path / "research").glob("*.tmp"))
+    companion._make_cert(tmp_path / "cert.pem", tmp_path / "key.pem", "127.0.0.1")
+    rdpcert.PinStore(tmp_path / "pins.json")._save({"h:1": {}})
+    bridge = askpass.AskpassBridge(tmp_path / "run", lambda *a: None)
+
+    async def started():
+        await bridge.start()
+        try:
+            return stat.S_IMODE((tmp_path / "run" / "askpass").stat().st_mode)
+        finally:
+            await bridge.stop()
+    assert asyncio.run(started()) == 0o700 and ("askpass", 0o700) in written
+    names = [name for name, _ in written]
+    assert {"state.json", "key.pem", "cert.pem", "pins.json"} <= set(names)
+    assert any(re.fullmatch(r"[0-9a-f]{24}\.json", n) for n in names), "the research cache"
+    assert stat.S_IMODE((tmp_path / "key.pem").stat().st_mode) == 0o600

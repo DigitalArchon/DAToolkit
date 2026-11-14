@@ -3208,7 +3208,7 @@ class Engine:
         data = {"host": key, "taken": datetime.now().isoformat(timespec="seconds"), "case": self.case.id,
                 "sensitivity": self.case.sensitivity, "client": self.case.client,
                 "sections": {k: {"command": c, "text": t} for k, (c, t) in items.items()}}
-        path.write_bytes(utf8(json.dumps(data, ensure_ascii=False, indent=1)))
+        config_mod.write_atomic(path, utf8(json.dumps(data, ensure_ascii=False, indent=1)))
         self.log("baseline_saved", host=key, path=str(path), sections=sorted(items))
         return {"host": key, "path": str(path), "sections": sorted(items)}
 
@@ -3654,7 +3654,7 @@ class Engine:
         n = 1 + max((int(m.group(1)) for f in self.case.dir.glob("context-before-compact-*.json")
                      if (m := re.search(r"-(\d+)\.json$", f.name))), default=0)
         backup = f"context-before-compact-{n}.json"
-        (self.case.dir / backup).write_bytes(utf8(json.dumps(
+        config_mod.write_atomic(self.case.dir / backup, utf8(json.dumps(
             {"ts": time.time(), "model": pending["model"], "replaced_messages": end + 1, "conv": self.conv},
             ensure_ascii=False)))
         head = prompts.COMPACT_HEADER.format(model=pending["model"], when=f"{datetime.now():%Y-%m-%d %H:%M}")
@@ -4498,7 +4498,7 @@ class Engine:
         for image in cleaned:
             n = 1 + sum(1 for _ in self.case.dir.glob("img-*"))
             name = f"img-{n}.{image.ext}"
-            (self.case.dir / name).write_bytes(image.data)
+            config_mod.write_atomic(self.case.dir / name, image.data)
             self.log("image_attached", file=name, bytes=len(image.data), metadata="stripped (re-encoded from pixels)")
             mime = "image/jpeg" if image.ext == "jpg" else "image/png"
             out.append((name, f"data:{mime};base64,{base64.b64encode(image.data).decode()}"))
@@ -5305,7 +5305,8 @@ class Engine:
             if e.get("kind") == "user" and name in (e.get("images") or []):
                 e.setdefault("image_notes", {})[name] = desc
         try:
-            (self.case.dir / "image-descriptions.json").write_text(json.dumps(self._img_desc, indent=1), encoding="utf-8")
+            config_mod.write_atomic(self.case.dir / "image-descriptions.json",
+                                    json.dumps(self._img_desc, indent=1).encode("utf-8"))
         except OSError:
             pass
         self.log("image_described", file=name, model=hmodel, chars=len(desc["text"]))
@@ -5425,7 +5426,7 @@ class Engine:
                                       purpose.replace("_", " "), case)
         path = case.dir / filename
         try:
-            path.write_bytes(utf8(text + "\n"))
+            config_mod.write_atomic(path, utf8(text + "\n"))
             case.log(purpose, path=str(path), text=text, **marks)
         except OSError as e:          # the case was deleted while the AI wrote
             raise UserError(f"Could not save {filename} in {case.name}: {e}") from e

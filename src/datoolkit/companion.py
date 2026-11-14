@@ -29,7 +29,6 @@ import errno
 import hashlib
 import hmac
 import ipaddress
-import os
 import secrets
 import socket
 import ssl
@@ -46,7 +45,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from .config import private_dir
+from .config import private_dir, write_atomic
 from .engine import UserError
 
 CERT_FILE = "companion-cert.pem"
@@ -266,11 +265,9 @@ def _make_cert(cert_path: Path, key_path: Path, ip: str) -> None:
     private_dir(cert_path.parent)
     key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                 serialization.NoEncryption())
-    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(key_pem)
-    os.chmod(key_path, 0o600)
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    # whole or not at all, the key this user's alone: a key half written left the phone's page unservable
+    write_atomic(key_path, key_pem)
+    write_atomic(cert_path, cert.public_bytes(serialization.Encoding.PEM))
 
 
 def ensure_cert(directory: Path, ip: str, renew: bool = False) -> tuple[Path, Path]:

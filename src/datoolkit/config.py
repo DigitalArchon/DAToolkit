@@ -75,17 +75,20 @@ def tighten_dirs() -> None:
                     private_dir(child)
 
 
-def write_atomic(path: Path, data: bytes, sync_dir: bool = True) -> None:
-    """`data` as the file `path`, whole or not at all. It is written to a temporary file of its
-    own in the same directory (two writers never share one, and it is 0600 from the start),
-    flushed to the disk, and only then renamed over `path`. Until Nov 2026 nothing was flushed:
-    a crash soon after a save could leave the new name on an empty file. With `sync_dir` the
-    directory is flushed after, so the rename outlasts a power cut too; a file saved many times
-    a minute goes without (a case's state.json): if its rename is lost, the file before it is
-    there, whole."""
+def write_atomic(path: Path, data: bytes, mode: int = 0o600) -> None:
+    """`data` as the file `path`, whole or not at all: the one way DA Toolkit writes a file that
+    matters. It is written to a temporary file of its own in the same directory (two writers
+    never share one, and it is 0600 from the start), flushed to the disk, given `mode` (an
+    executable script's 0700), and only then renamed over `path`; the directory is flushed after,
+    so the rename outlasts a power cut too. Until Nov 2026 nothing was flushed: a crash soon after
+    a save could leave the new name on an empty file; and a file saved many times a minute (a
+    case's state.json, its draft) went without the directory's flush, which every DA app now
+    gives every such write (the cross-app standard, Nov 2026)."""
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
+            if mode != 0o600:
+                os.fchmod(f.fileno(), mode)
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
@@ -96,8 +99,6 @@ def write_atomic(path: Path, data: bytes, sync_dir: bool = True) -> None:
         except OSError:
             pass
         raise
-    if not sync_dir:
-        return
     try:
         dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
