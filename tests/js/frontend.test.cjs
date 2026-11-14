@@ -1982,3 +1982,78 @@ test("whatever else a TEE model wrote carries the reply's mark: a description, a
   assert.deepEqual(marks(app.$(".modal")), [failed]);
   assert.match(app.$(".modal").textContent, /This summary isn't what the attested enclave signed/);
 });
+
+test("a provider's address changed without a new key asks first whether the saved key goes there, No the default", async () => {
+  const modals = (app) => app.document.querySelectorAll(".modal");
+  const closeAll = async (app) => {
+    for (const m of modals(app).reverse()) button(m, "Close")?.click();
+    await app.clock.tick(0);
+  };
+  const edit = async (app, address) => {
+    app.call("openSettings");
+    await app.clock.tick(0);
+    const item = app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("Fake"));
+    assert.match(item.textContent, /🔑 key in keyring/);
+    button(item, "Edit").click();
+    await app.clock.tick(0);
+    const url = app.$(".modal").querySelectorAll("input").find((i) => i.placeholder === "https://…");
+    url.value = address;
+    button(app.$(".modal"), "Save").click();
+    await app.clock.tick(0);
+  };
+  const app = await page("a", null, { "POST /api/providers": () => ({ ok: true }) });
+  await edit(app, "https://api.example.org/v1");
+  const asked = modals(app).at(-1);
+  assert.equal(asked.querySelector("h2").textContent, "Use the saved API key with api.example.org?");
+  await app.clock.tick(50);
+  assert.ok(app.document.activeElement === button(asked, "No"), "No has the focus");
+  assert.equal(app.posts("/api/providers").length, 0, "nothing saved before the answer");
+  button(asked, "No").click();
+  await app.clock.tick(0);
+  assert.equal(app.posts("/api/providers").at(-1).body.use_saved_key, false);
+  await closeAll(app);
+
+  const yes = await page("a", null, { "POST /api/providers": () => ({ ok: true }) });
+  await edit(yes, "https://api.example.org/v1");
+  button(modals(yes).at(-1), "Use it with api.example.org").click();
+  await yes.clock.tick(0);
+  assert.equal(yes.posts("/api/providers").at(-1).body.use_saved_key, true);
+  await closeAll(yes);
+
+  // the same address: nothing is asked
+  const same = await page("a", null, { "POST /api/providers": () => ({ ok: true }) });
+  await edit(same, STATES.a.config.providers.find((p) => p.name === "Fake").base_url);
+  assert.equal(same.posts("/api/providers").length, 1);
+  assert.equal(same.posts("/api/providers").at(-1).body.use_saved_key, undefined);
+});
+
+test("a host's address changed without a new password asks first whether the saved one goes there", async () => {
+  const withPassword = (s) => { s.config.hosts.find((x) => x.name === "web01").has_password = true; };
+  const edit = async (address) => {
+    const app = await page("a", withPassword, { "POST /api/hosts": () => ({ ok: true }) });
+    app.call("openSettings", "hosts");
+    await app.clock.tick(0);
+    const item = app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("web01"));
+    button(item, "Edit").click();
+    await app.clock.tick(0);
+    app.$(".modal").querySelectorAll("input").find((i) => i.placeholder === "hostname or IP").value = address;
+    button(app.$(".modal"), "Save").click();
+    await app.clock.tick(0);
+    return app;
+  };
+  const app = await edit("web02.lan");
+  const asked = app.document.querySelectorAll(".modal").at(-1);
+  assert.equal(asked.querySelector("h2").textContent, "Use the saved password with web02.lan?");
+  await app.clock.tick(50);
+  assert.ok(app.document.activeElement === button(asked, "No"), "No has the focus");
+  button(asked, "No").click();
+  await app.clock.tick(0);
+  assert.equal(app.posts("/api/hosts").at(-1).body.use_saved_password, false);
+  const yes = await edit("web02.lan");
+  button(yes.document.querySelectorAll(".modal").at(-1), "Use it with web02.lan").click();
+  await yes.clock.tick(0);
+  assert.equal(yes.posts("/api/hosts").at(-1).body.use_saved_password, true);
+  const same = await edit("web01.lan");
+  assert.equal(same.posts("/api/hosts").length, 1, "the same address: nothing asked");
+  assert.equal(same.posts("/api/hosts").at(-1).body.use_saved_password, undefined);
+});

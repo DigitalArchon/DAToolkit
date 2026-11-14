@@ -137,6 +137,32 @@ def shown(url) -> str:
     return parsed._replace(netloc="…@" + parsed.netloc.rsplit("@", 1)[1]).geturl()
 
 
+def origin(url) -> str:
+    """Where an address sends what is sent to it: its scheme, host and port
+    ("https://nano-gpt.com:443"), the port said when the address leaves it to its scheme, in lower
+    case; "" for text that isn't an http(s) address. What a saved API key is held to
+    (Engine._key_problem): a key goes to the origin it was entered for, and nowhere else. (DA Vibe
+    Manager's netpolicy.origin, the design every DA app keeps, Nov 2026.)"""
+    try:
+        parsed = urlparse(str(url or "").strip())
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return ""
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not host:
+        return ""
+    port = port or (443 if scheme == "https" else 80)
+    return f"{scheme}://{f'[{host}]' if ':' in host else host}:{port}"
+
+
+def shown_origin(kept: str) -> str:
+    """An origin as said to the technician: without its scheme's own port."""
+    for scheme, port in (("https", 443), ("http", 80)):
+        if kept.startswith(f"{scheme}://") and kept.endswith(f":{port}"):
+            return kept[: -len(f":{port}")]
+    return kept
+
+
 def without_password(url) -> str:
     """`url` with the user name and password written into it taken out, as shown() does, but
     leaving an address where they were: what config.toml keeps of an address whose password is

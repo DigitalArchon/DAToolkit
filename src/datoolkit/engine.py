@@ -368,6 +368,10 @@ class Engine:
     def __init__(self, cfg: Config, emit: Callable[[dict], None], runtime_dir: Path,
                  save_config: Callable[[Config], None] = config_mod.save):
         self.cfg = cfg
+        # a Config made in code, not read from a file (config.load settles it there, and keeps it):
+        # each key is for the address its provider has now
+        config_mod.settle_key_origins(cfg)
+        self._held_said: set[str] = set()       # hosts whose held password the technician has been told of
         self._emit = emit
         self._save_config = save_config
         self.ui_notice = ""  # shown as a banner, e.g. why the app opened in the browser
@@ -512,14 +516,17 @@ class Engine:
 
     def _config_view(self) -> dict:
         c = self.cfg.to_dict()
-        for p in c["providers"]:
+        for p, prov in zip(c["providers"], self.cfg.providers):
             p["has_key"] = self._has_secret("provider", p["name"])
+            # the key entered for another address than the provider has now: why it isn't sent
+            p["key_held"] = (self._key_problem(prov) or "") if p["has_key"] else ""
             p["shown_url"] = netguard.shown(p["base_url"])      # for lists: the form's field has it whole
             info = providers_mod.describe(p["base_url"], p.get("api", ""))
             p.update(kind=info["kind"], kind_label=info["kind_label"], api_effective=info["api"])
         pins = None      # the pin store, read once for the snapshot and not once for each host
         for h, host in zip(c["hosts"], self.cfg.hosts):
             h["has_password"] = self._has_secret("host", h["name"])
+            h["password_held"] = (self._password_problem(host) or "") if h["has_password"] else ""
             port = self._pin_port(host)
             if port is not None:
                 if pins is None:
@@ -661,7 +668,12 @@ class Engine:
 
     # ---------------------------------------------------------------- providers & models
 
-    def save_provider(self, data: dict, api_key: str | None = None, original_name: str | None = None) -> None:
+    def save_provider(self, data: dict, api_key: str | None = None, original_name: str | None = None,
+                      use_saved_key: bool = False) -> None:
+        """Save a provider. Its API key is held to the address it is entered for (Provider.key_origin,
+        _key_problem): a new key is for the address as saved; a saved one stays for its own, so an
+        address changed without a new key doesn't take it along, unless `use_saved_key` says the
+        technician chose to use it there (Settings asks: "Use the saved key with …?")."""
         name = str(data.get("name", "")).strip()
         base_url = str(data.get("base_url", "")).strip().rstrip("/")
         if not name or not base_url:
@@ -712,6 +724,15 @@ class Engine:
         # Secrets are kept under the name: a second entry with it would take over the first's
         # key (and send it to its own address), and two entries can't be told apart.
         old = self.cfg.provider(original_name) if original_name else None
+        # The key goes only where it was entered for: a new one is for this address; a saved one
+        # stays for its own (a changed address doesn't take it along: _key_problem) unless the
+        # technician chose to use it here; a provider new here has none until one is given.
+        if api_key or (old and use_saved_key):
+            prov.key_origin = netguard.origin(base_url)
+        elif old:
+            prov.key_origin = old.key_origin if old.key_origin is not None else netguard.origin(old.base_url)
+        else:
+            prov.key_origin = ""
         clash = self.cfg.provider(name)
         if clash and clash is not old:
             raise UserError(f"There is already a provider called {name}. The same address can be added again with "
@@ -976,7 +997,7 @@ class Engine:
         caps, error = {}, "it listed no models"
         try:
             self._secure(prov)
-            key = self._get_secret_safe("provider", prov.name)
+            key = self._provider_key_safe(prov)
             if kind == "anthropic":
                 caps = (await AnthropicClient(prov.base_url, key, http_client=self._anthropic_http)
                         .list_models_detailed())[1]
@@ -1652,7 +1673,12 @@ class Engine:
 
     # ---------------------------------------------------------------- hosts
 
-    def save_host(self, data: dict, password: str | None = None, original_name: str | None = None) -> None:
+    def save_host(self, data: dict, password: str | None = None, original_name: str | None = None,
+                  use_saved_password: bool = False) -> None:
+        """Save a host. Its saved password is held to the address it was entered for
+        (Host.password_for, _host_password), as a provider's key is: a host whose kind, address or
+        port changed without a new password keeps it for the old one, unless `use_saved_password`
+        says the technician chose to use it there (Settings asks)."""
         name = str(data.get("name", "")).strip()
         if not name or not str(data.get("host", "")).strip():
             raise UserError("Host needs a name and address.")
@@ -1692,6 +1718,12 @@ class Engine:
             if found:
                 raise UserError(f"Host not saved. {found}")
         old = self.cfg.host(original_name) if original_name else None    # as for providers
+        if password or (old and use_saved_password):
+            host.password_for = config_mod.host_origin(host)
+        elif old:
+            host.password_for = old.password_for if old.password_for is not None else config_mod.host_origin(old)
+        else:
+            host.password_for = ""
         clash = self.cfg.host(name)
         if clash and clash is not old:
             raise UserError(f"There is already a host called {name}. The same address can be added again (another "
@@ -2381,7 +2413,7 @@ class Engine:
         user, domain = host.user, ""
         if "\\" in user:
             domain, user = user.split("\\", 1)
-        password = self._get_secret_safe("host", host.name)
+        password = self._host_password(host)
         from_keyring = bool(password)
         if not password:
             password = await self.ask_user(sid, f"RDP password for {host.user or 'the user'}@{host.host}",
@@ -2708,7 +2740,7 @@ class Engine:
             # the host asks again: what was typed for this session before was refused, so it isn't saved
             self._password_refused(sid)
         if sess and host and is_password and not other_host and not sess.used_stored_password:
-            stored = self._get_secret_safe("host", host.name)
+            stored = self._host_password(host)
             if stored:
                 sess.used_stored_password = sess.keyring_password = True
                 self.log("credential_supplied", session_id=sid, source="keyring")
@@ -2738,12 +2770,71 @@ class Engine:
     def _provider_key(self, prov: Provider) -> str | None:
         """The provider's API key, before any request is built with it: one with a character no
         HTTP header can carry (a line break, a zero-width space) raises UserError, which says so
-        without quoting it; the HTTP library's own error quoted it whole."""
+        without quoting it; the HTTP library's own error quoted it whole. So does a key entered
+        for another address than the provider has now (_key_problem): it is never given out."""
         key = creds.get_secret("provider", prov.name)
-        found = netguard.key_problem(key, prov.name)
+        found = netguard.key_problem(key, prov.name) or (self._key_problem(prov) if key else None)
         if found:
             raise UserError(found)
         return key
+
+    def _host_password(self, host: Host) -> str | None:
+        """The password saved for `host`, or None: none saved, the keyring can't be read, or it was
+        entered for another address than the host has now (_password_problem), when the technician
+        is asked instead, as with none saved, and told why once."""
+        stored = self._get_secret_safe("host", host.name)
+        problem = self._password_problem(host) if stored else None
+        if problem:
+            self.log("credential_held", host=host.name, was=host.password_for, now=config_mod.host_origin(host))
+            if host.name not in self._held_said:
+                self._held_said.add(host.name)
+                self.emit("toast", level="info", text=problem)
+            return None
+        return stored
+
+    @staticmethod
+    def _password_problem(host: Host) -> str | None:
+        """Why the password saved for `host` isn't given to it, or None: it was entered for
+        another kind, address or port (Host.password_for) than the host has now. Nothing is
+        deleted (the design every DA app keeps for a saved key, Nov 2026)."""
+        if host.password_for is None:
+            return None
+        here = config_mod.host_origin(host)
+        if here == host.password_for:
+            return None
+        return (f"The password saved for {host.name} was entered for {host.password_for or 'no address'}, and "
+                f"{host.name} is now {here}, so it isn't given there: you are asked for it instead. Ticked to be "
+                f"saved, the one you type is kept for the new address; or save the host in Settings → Hosts and "
+                f"answer Yes to using the saved password there, or put the address back.")
+
+    def _provider_key_safe(self, prov: Provider) -> str | None:
+        """_provider_key, or None when the keyring can't be read."""
+        key = self._get_secret_safe("provider", prov.name)
+        found = self._key_problem(prov) if key else None
+        if found:
+            raise UserError(found)
+        return key
+
+    @staticmethod
+    def _key_problem(prov: Provider) -> str | None:
+        """Why the API key saved for `prov` isn't sent with its requests, or None: it was entered
+        for another origin than its address has now (Provider.key_origin). The keyring keeps a
+        key by the provider's name, so an address changed in config.toml by hand, or in Settings
+        without the key, took it, and everything sent with it, to wherever the address pointed.
+        Nothing is deleted: entering the key again for the new address, answering Yes when
+        Settings asks to use the saved one there, or putting the address back sends it again
+        (the design every DA app keeps, Nov 2026)."""
+        if prov.key_origin is None or is_training_url(prov.base_url):
+            return None
+        here = netguard.origin(prov.base_url)
+        if here == prov.key_origin:
+            return None
+        was = netguard.shown_origin(prov.key_origin) or "no address"
+        now = netguard.shown_origin(here) or netguard.shown(prov.base_url)
+        return (f"The API key saved for {prov.name} was entered for {was}, and {prov.name}'s address is now {now}, so "
+                f"it wasn't sent there: a key goes only to the address it was entered for. If the new address is "
+                f"right, enter the key again in Settings → AI providers → {prov.name}, or save the provider and "
+                f"answer Yes to using the saved key there; otherwise put the address back.")
 
     async def ask_user(self, sid: str, prompt: str, secret: bool, can_save: bool, host_name: str = "") -> str | None:
         """Ask the technician. With `can_save`, a "save" tick keeps the answer as the password of
@@ -2786,6 +2877,10 @@ class Engine:
             self.emit("toast", level="error", text=f"The password for {name} wasn't saved. {e}")
             return
         self.log("credential_saved", session_id=sid, host=name)
+        host = self.cfg.host(name)
+        if host and host.password_for != config_mod.host_origin(host):
+            host.password_for = config_mod.host_origin(host)        # for the address it was typed for
+            self._save()
         self._secrets_changed()
 
     def _password_refused(self, sid: str) -> None:
@@ -3763,7 +3858,7 @@ class Engine:
         if not prov:
             raise UserError("Web search needs a NanoGPT provider.")
         self._secure(prov)
-        key = self._get_secret_safe("provider", prov.name)
+        key = self._provider_key_safe(prov)
         if not key:
             raise UserError(f"No API key stored for {prov.name}.")
         s = self.cfg.settings
@@ -4169,7 +4264,7 @@ class Engine:
         if not sprov:
             raise UserError("Research needs a NanoGPT provider.")
         self._secure(sprov)
-        key = self._get_secret_safe("provider", sprov.name)
+        key = self._provider_key_safe(sprov)
         if not key:
             raise UserError(f"No API key stored for {sprov.name}.")
 

@@ -977,6 +977,17 @@ a space or
 another character no API key has (picked up where it was copied from) is refused when saved,
 and one stored before is refused before anything is sent with it, saying so without quoting it.
 
+**A key goes only to the address it was entered for** (its scheme, host and port). Change a
+provider's address in Settings without typing the key again, and DA Toolkit asks first: **Use
+the saved API key with ‹host›?**, No being the default. With No, or with the address changed in
+`config.toml` by hand, the key stays in the keyring but isn't sent to the new address: requests
+there fail, saying which address the key was entered for, and the provider list shows "key held
+to its old address". Type the key again for the new address, save the provider and answer Yes,
+or put the address back. A key saved by an earlier version is held to the address saved beside
+it from the first start of this one. A host's saved password is held the same way to the host's
+kind, address and port: changed, Settings asks whether to use it there, and with No you are
+asked for the password when you connect, as though none were saved.
+
 **Local trusts your network.** A base URL counts as Local when its host is `localhost`, an
 IP address plain http is accepted for (this machine's, a private, link-local or unique local
 one: the list above), or a name ending `.local` or `.lan`, so Confidential and Sovereign

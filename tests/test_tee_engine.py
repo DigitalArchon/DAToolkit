@@ -853,7 +853,8 @@ async def test_an_attestation_under_way_when_its_providers_address_changes_is_no
     engine._tee_factory = make
     old = engine.cfg.provider("Fake")
     engine.save_provider({"name": "Fake", "base_url": "https://other.example/api/v1",
-                          "default_model": old.default_model}, original_name="Fake")
+                          "default_model": old.default_model}, original_name="Fake",
+                         use_saved_key=True)                    # the key goes there too, by the technician's choice
     state["gate"] = None
     gate.set()
     att = await settled(engine)
@@ -882,6 +883,10 @@ async def test_an_attestation_kept_from_another_address_is_no_attestation(env): 
         guard.send(None)
     assert at_once.value.value[0] is kept and calls == ["TEE/glm-5.3"]
     prov.base_url = "https://other.example/api/v1"
+    with pytest.raises(UserError, match="API key saved for Fake was entered for https://fake.example"):
+        await engine._tee_guard(prov, "TEE/glm-5.3", "chat")      # and no key goes there (test_key_origin.py)
+    assert calls == ["TEE/glm-5.3"]
+    prov.key_origin = "https://other.example:443"                 # the key entered for it too
     client, _shown = await engine._tee_guard(prov, "TEE/glm-5.3", "chat")
     assert client is not kept and client.base_url == "https://other.example/api/v1"
     assert calls == ["TEE/glm-5.3"] * 2

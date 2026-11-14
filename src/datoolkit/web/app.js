@@ -863,6 +863,36 @@ function needVision() {
 }
 
 function hostOf(u) { try { return new URL(u).hostname.toLowerCase(); } catch { return ""; } }
+// Where an address sends what is sent to it, as netguard.origin writes it ("https://host:443"): a
+// saved key is held to the one it was entered for. "" for text that isn't an http(s) address.
+function originOf(u) {
+  try {
+    const x = new URL(String(u ?? "").trim());
+    if (!/^https?:$/.test(x.protocol) || !x.hostname) return "";
+    return `${x.protocol}//${x.hostname.toLowerCase()}:${x.port || (x.protocol === "https:" ? "443" : "80")}`;
+  } catch { return ""; }
+}
+// Where a host's saved password goes, as config.host_origin writes it ("ssh://web01.lan:22").
+function hostOrigin(kind, host, port, ssl) {
+  const k = kind === "winrm" ? `winrm+${ssl ? "https" : "http"}` : kind;
+  const dflt = { ssh: 22, rdp: 3389 }[kind] || (ssl ? 5986 : 5985);
+  return `${k}://${String(host ?? "").trim().toLowerCase()}:${port || dflt}`;
+}
+// A saved key or password goes only where it was entered for (engine._key_problem): an address
+// changed without a new one asks first whether to use it there, No being the default.
+function askUseSaved(what, where) {
+  return new Promise((resolve) => {
+    let yes = false;
+    const { box } = modal({
+      title: `Use the saved ${what} with ${where}?`,
+      body: h("div", {}, h("p", {}, `The ${what} saved here was entered for another address. Sent to ${where}, it goes, with everything sent with it, to whoever answers there.`),
+        h("p", {}, `No keeps it for the address it was entered for, and it isn't sent to ${where}: enter the ${what} again for it there, or put the address back.`)),
+      buttons: [{ label: "No" }, { label: `Use it with ${where}`, kind: "danger", onClick: () => { yes = true; } }],
+      onClose: () => resolve(yes),
+    });
+    setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
+  });
+}
 function kindOf(u) {
   const host = hostOf(u);
   return /(^|\.)nano-gpt\.com$/.test(host) ? "nanogpt" : /(^|\.)openrouter\.ai$/.test(host) ? "openrouter" : "";
@@ -4108,7 +4138,8 @@ function openSettings(tab = "providers") {
       h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: `prov-chip k-${p.kind}`, title: p.api_effective === "anthropic" ? "Anthropic Messages API" : "OpenAI-compatible API" }, p.kind_label),
         p.name === activeName ? h("span", { class: "small", title: "The chat model is on this provider" }, " · in use") : null,
         "  ", h("span", { class: "muted small" }, p.shown_url || p.base_url)),
-      h("span", { class: "small " + (p.has_key ? "" : "muted") }, p.has_key ? "🔑 key in keyring" : "no key"),
+      h("span", { class: "small " + (p.has_key && !p.key_held ? "" : "muted"), title: p.key_held || null },
+        p.key_held ? "🔑 key held to its old address" : p.has_key ? "🔑 key in keyring" : "no key"),
       h("button", { class: "small", onclick: () => pane.replaceChildren(providerForm(p)) }, "Edit"),
       h("button", { class: "small danger", onclick: async () => {
         if (await confirmModal("Delete provider", `Delete ${p.name} and its stored API key?`, "Delete", "danger")) {
@@ -4146,7 +4177,7 @@ function openSettings(tab = "providers") {
     const models = [];                              // from the provider's model list, once loaded
     const datalist = h("datalist", { id: `models-${Math.random().toString(36).slice(2)}` });
     const def = h("input", { type: "text", value: p.default_model || "", list: datalist.id, placeholder: "Filled automatically on Test (Claude Opus 5.5 if available)" });
-    const status = h("div", { class: "muted small" });
+    const status = h("div", { class: "muted small" }, p.key_held || "");
     const apiNote = h("div", { class: "muted small" });
     const showApi = () => {
       const anth = apiSel.value === "anthropic" || (!apiSel.value && /(^|\.)anthropic\.com$/.test(hostOf(url.value)));
@@ -4252,8 +4283,15 @@ function openSettings(tab = "providers") {
     };
     const save = async () => {
       const body = payload();
+      // the saved key goes only to the address it was entered for: changed without a new key, asked
+      const here = originOf(body.provider.base_url);
+      if (!p._new && p.has_key && !body.api_key && here !== (p.key_origin ?? originOf(p.base_url))) {
+        body.use_saved_key = await askUseSaved("API key", hostOf(body.provider.base_url) || body.provider.base_url);
+      }
       await api("POST", "/api/providers", body);
-      p = { ...p, ...body.provider, has_key: p.has_key || !!body.api_key, _new: false };
+      const keyOrigin = body.api_key || body.use_saved_key ? here : p.key_origin;
+      p = { ...p, ...body.provider, has_key: p.has_key || !!body.api_key, key_origin: keyOrigin, _new: false,
+        key_held: p.has_key && !body.api_key && keyOrigin !== here ? "The saved API key isn't sent to this address." : "" };
       key.value = "";
       m.saved();
       return body.provider.name;
@@ -4299,7 +4337,8 @@ function openSettings(tab = "providers") {
     const list = h("div", { class: "list" }, hosts.length ? hosts.map((x) => h("div", { class: "list-item" },
       h("div", { class: "grow" }, h("b", {}, x.name), "  ",
         h("span", { class: "muted small" }, `${x.kind.toUpperCase()} ${x.user ? x.user + "@" : ""}${x.host}${x.port ? ":" + x.port : ""} · ${x.auth}${x.os_hint ? " · " + x.os_hint : ""}`)),
-      x.has_password ? h("span", { class: "small" }, "🔑") : null,
+      x.has_password ? h("span", { class: "small", title: x.password_held || "Password in the keyring" },
+        x.password_held ? "🔑 held to its old address" : "🔑") : null,
       x.kind === "rdp" ? h("span", { class: "small", title: x.pinned ? `Pinned certificate SHA-256 ${x.pinned}` : "No certificate pinned yet" }, x.pinned ? "📌 cert pinned" : "") : null,
       h("button", { class: "small", onclick: () => pane.replaceChildren(hostForm(x)) }, "Edit"),
       h("button", { class: "small danger", onclick: async () => {
@@ -4384,9 +4423,17 @@ function openSettings(tab = "providers") {
       h("div", { class: "row" },
         h("button", { onclick: () => guarded(() => reshow("hosts")) }, "Back"), h("span", { class: "spacer" }),
         h("button", { class: "primary", onclick: () => guarded(async () => {
+          // the saved password goes only to the host it was entered for: one whose address changed,
+          // without a new password typed, is asked about
+          const port = f.port.value ? Number(f.port.value) : null;
+          const here = hostOrigin(x.kind, f.host.value, port, f.winrm_ssl.checked);
+          const was = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl);
+          const useSaved = !x._new && x.has_password && !f.password.value && here !== was
+            ? await askUseSaved("password", f.host.value.trim() || here) : undefined;
           await api("POST", "/api/hosts", {
+            use_saved_password: useSaved,
             host: {
-              name: f.name.value.trim(), kind: x.kind, host: f.host.value.trim(), port: f.port.value ? Number(f.port.value) : null,
+              name: f.name.value.trim(), kind: x.kind, host: f.host.value.trim(), port,
               user: f.user.value.trim(), auth: rdp ? "password" : f.auth.value, key_file: f.key_file.value.trim(), jump: f.jump.value.trim(),
               rdp_security: f.rdp_security.value, rdp_layout: f.rdp_layout.value,
               ssh_options: f.ssh_options.value.split("\n"), winrm_ssl: f.winrm_ssl.checked,

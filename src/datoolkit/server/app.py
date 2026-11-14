@@ -507,7 +507,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/providers")
     async def save_provider(body: dict, e: Engine = Depends(auth)):
-        e.save_provider(obj(body, "provider"), body.get("api_key") or None, body.get("original_name"))
+        # "use_saved_key": the technician chose to send the saved key to an address changed here
+        # (Settings asks); only a JSON true counts
+        e.save_provider(obj(body, "provider"), body.get("api_key") or None, body.get("original_name"),
+                        use_saved_key=body.get("use_saved_key") is True)
         return {"ok": True}
 
     @app.delete("/api/providers/{name:path}")
@@ -545,7 +548,8 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/hosts")
     async def save_host(body: dict, e: Engine = Depends(auth)):
-        e.save_host(obj(body, "host"), body.get("password") or None, body.get("original_name"))
+        e.save_host(obj(body, "host"), body.get("password") or None, body.get("original_name"),
+                    use_saved_password=body.get("use_saved_password") is True)
         return {"ok": True}
 
     @app.delete("/api/hosts/{name:path}")

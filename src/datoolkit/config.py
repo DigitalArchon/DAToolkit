@@ -127,6 +127,12 @@ class Provider:
     # model id -> route, which of the provider's hosts serves it (NanoGPT, OpenRouter):
     # {"priority": "latency" | "speed" | "price" | "host", "fp8": bool, "host": "..."}; llm/routing.py
     routes: dict[str, dict] = field(default_factory=dict)
+    # the origin (scheme, host, port: netguard.origin) of the address its API key was entered for:
+    # the key goes there alone (Engine._key_problem), so an address changed in Settings, or in this
+    # file by hand, doesn't take the key with it. "" while no key has been entered; None when read
+    # from a file written before keys were held to an address (settle_key_origins gives it the
+    # address beside it)
+    key_origin: str | None = None
 
 
 @dataclass
@@ -152,6 +158,19 @@ class Host:
     # from an earlier version is refused when opened (engine._NLA_EXT)
     rdp_security: str = "any"
     rdp_layout: str = "en-us-qwerty"
+    # where its saved password was entered for (host_origin: the kind, address and port): it is
+    # given there alone (Engine._host_password), so an address changed in Settings, or here by
+    # hand, doesn't take the password with it. "" while none was saved; None when read from a file
+    # written before passwords were held to an address (settle_key_origins)
+    password_for: str | None = None
+
+
+def host_origin(host: Host) -> str:
+    """Where a host's password goes: its kind ("winrm+http" for WinRM over plain HTTP), address
+    and port, the kind's own when none is set ("ssh://web01.lan:22")."""
+    kind = f"winrm+{'https' if host.winrm_ssl else 'http'}" if host.kind == "winrm" else host.kind
+    default = {"ssh": 22, "rdp": 3389}.get(host.kind) or (5986 if host.winrm_ssl else 5985)
+    return f"{kind}://{(host.host or '').strip().lower()}:{host.port or default}"
 
 
 @dataclass
@@ -335,12 +354,29 @@ def load(path: Path | None = None) -> Config:
         raise ValueError("it is empty, though DA Toolkit has been used on this computer")
     cfg = from_dict(tomllib.loads(raw.decode("utf-8")))
     cfg._on_disk[str(path)] = _digest(raw)
-    if _with_passwords(cfg):
+    moved = _with_passwords(cfg)
+    if settle_key_origins(cfg) or moved:
         try:
-            save(cfg, path)             # the keyring has what the file had: out of the file
+            # the keyring has what the file had: out of the file; and a key's origin, kept at once,
+            # so an address edited after this can't take the key along
+            save(cfg, path)
         except (OSError, ChangedElsewhere):
             pass                        # read-only, or just saved by another DA Toolkit: it goes at the next save
     return cfg
+
+
+def settle_key_origins(cfg: Config) -> bool:
+    """A key saved before keys were held to their address takes the origin of the address saved
+    beside it, and a host's password its address, with no question (the design every DA app keeps, Nov 2026): from then on a changed
+    address doesn't take it along. True if any did, so the file is to be written again."""
+    settled = False
+    for prov in cfg.providers:
+        if prov.key_origin is None:
+            prov.key_origin, settled = netguard.origin(prov.base_url), True
+    for host in cfg.hosts:
+        if host.password_for is None:
+            host.password_for, settled = host_origin(host), True
+    return settled
 
 
 def _stored_address(name: str) -> str:
@@ -413,6 +449,7 @@ def save(cfg: Config, path: Path | None = None) -> None:
     was never read from `path` (a first save to it) is written as before."""
     path = path or config_dir() / "config.toml"
     private_dir(path.parent)
+    settle_key_origins(cfg)         # a provider or host made in code: its key is for its address as saved
     data = tomli_w.dumps(_without_passwords(cfg.to_dict())).encode("utf-8")
     key = str(path)
     with _one_writer(path):

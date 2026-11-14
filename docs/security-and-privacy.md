@@ -196,6 +196,13 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   `config.toml` edited by hand, or written by an earlier version, is moved to the keyring and
   out of the file when the file is read, but where no keyring can take it, it stays in the
   file and is used from there.
+- **A key goes only to the address it was entered for**, its scheme, host and port. A
+  provider's address changed in Settings without the key typed again asks first ("Use the saved
+  API key with …?", No the default); with No, or with the address changed in `config.toml` by
+  hand, the key isn't sent there, and requests say which address it was entered for. Nothing is
+  deleted. A key saved by an earlier version takes the address saved beside it at the first
+  start. A host's saved password is held to the host's kind, address and port the same way:
+  changed without it, you are asked for the password when you connect.
 - **A key goes only to the service it is for.** The NanoGPT key goes to NanoGPT (chat, search,
   the scraper, attestation); no key goes to RedPill, Intel, NVIDIA or Tinfoil's mirrors. A key
   with a space, a line break or another character no key has is refused, saying so without
