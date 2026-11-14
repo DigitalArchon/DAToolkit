@@ -98,7 +98,10 @@ class AskpassBridge:
         try:
             line = await asyncio.wait_for(reader.readline(), 10)
             req = json.loads(line)
-            if not hmac.compare_digest(str(req.get("token", "")), self.token):
+            # as bytes: compare_digest raises on a str with anything but ASCII in it, and a token that
+            # can't be ours got no answer at all, the bridge's handling of it a crash
+            sent = str(req.get("token", "")).encode("utf-8", "surrogatepass")
+            if not hmac.compare_digest(sent, self.token.encode()):
                 reply = {"ok": False}
             else:
                 answer = await self._answer_while_asked(reader, self.handler(

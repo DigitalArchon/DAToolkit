@@ -84,6 +84,32 @@ async def test_askpass_bridge(tmp_path):
         await bridge.stop()
 
 
+async def test_a_token_no_ascii_can_write_is_refused_like_any_wrong_one(tmp_path):
+    """compare_digest raises TypeError for a str with anything but ASCII in it: such a token got no
+    answer at all, the bridge's handling of it a crash. It is compared as bytes now, and refused."""
+    import json
+
+    calls = []
+
+    async def handler(sid, prompt, kind):
+        calls.append(prompt)
+        return "s3cret"
+
+    bridge = AskpassBridge(tmp_path / "rt", handler)
+    await bridge.start()
+    try:
+        for token in ("tökén", "\ud800", bridge.token[:-1] + "é", 7, None):
+            reader, writer = await asyncio.open_unix_connection(str(bridge.sock_path))
+            writer.write((json.dumps({"token": token, "session": "web01", "prompt": "password:"}) + "\n").encode())
+            await writer.drain()
+            reply = await asyncio.wait_for(reader.readline(), 5)
+            writer.close()
+            assert json.loads(reply) == {"ok": False}, token
+        assert calls == []
+    finally:
+        await bridge.stop()
+
+
 async def test_the_askpass_bridge_stops_with_a_prompt_still_up(tmp_path):
     asked = asyncio.Event()
 
