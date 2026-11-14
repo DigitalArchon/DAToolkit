@@ -798,7 +798,9 @@ function attestLabel(att) {
     const partial = att.level === "partial";
     // "TEE gateway attested" where RedPill's gateway is what was attested, not the model's machine
     return { text: `🛡 ${att.headline || "TEE attested"}${partial ? " (partial)" : ""}`, cls: partial ? "warn" : "ok",
-      title: `${att.what ? `${att.what}\n\n` : ""}${att.summary}.\n${att.detail}.${teeSigners(att)}${att.what ? "" : `\n${TEE_CLEAR}`}` };
+      title: `${att.what ? `${att.what}\n\n` : ""}${att.summary}.\n${att.detail}.${teeSigners(att)}${att.what ? "" : `\n${TEE_CLEAR}`}`
+        // what each shortfall costs (llm/tee.py SHORTFALL_COSTS): every one has its words
+        + (att.costs?.length ? `\n\n${att.costs.join("\n\n")}` : "") };
   }
   return { text: att.latest_release ? "🔐 attested (older release)" : "🔐 attested", cls: "ok",
     title: `End-to-end encrypted to an attested enclave.\n${att.summary}\nKey sha256: ${(att.hpke_key_sha256 || "").slice(0, 16)}…` };

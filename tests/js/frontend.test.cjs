@@ -1221,6 +1221,15 @@ test("a TEE model's tooltip names every key its replies are checked against", as
   assert.doesNotMatch(title({ signers: [], instances: 12 }), /Reply-signing|checked against/);
 });
 
+test("a partial attestation's tooltip says what each shortfall costs", async () => {
+  const app = await page("a");
+  const title = (att) => app.call("attestLabel",
+    { status: "verified", kind: "tee", level: "partial", summary: "s", detail: "d", ...att }).title;
+  const costs = ["GPUs not tied to the quote: they may be another machine's.", "Receipt keys expired: its receipts aren't read."];
+  assert.ok(title({ costs }).endsWith(`\n\n${costs.join("\n\n")}`), title({ costs }));
+  assert.doesNotMatch(title({ costs: [] }), /\n\n$/);
+});
+
 test("the top bar says what was attested, RedPill's gateway by name, and leads its tooltip with what is its word", async () => {
   const app = await page("a");
   const label = (att) => app.call("attestLabel", { status: "verified", kind: "tee", level: "partial",

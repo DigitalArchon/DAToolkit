@@ -319,7 +319,7 @@ Confidential cases. What DA Toolkit checks:
   offers no attestation at all, is **refused**, and nothing is sent. What a refusal quotes of
   the relay is shown on one line, short and without invisible characters.
 - **Partial** when nothing failed but something couldn't be checked or falls short. The top bar
-  says so and names each shortfall. Sending still goes ahead: DA Toolkit has no setting that
+  says so, names each shortfall, and its tooltip says what each one costs. Sending still goes ahead: DA Toolkit has no setting that
   refuses a partial attestation.
 - **What is attested** is said in the top bar and its tooltip, with what is someone's word:
   - For every model RedPill serves (most `TEE/` models), what is attested is **RedPill's TEE

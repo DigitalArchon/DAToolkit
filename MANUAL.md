@@ -1155,7 +1155,8 @@ app of the author's that attests TEE models, and tested against a real attestati
    **receipt keys expired**; only keys past the time they say are refused. The
    top bar shows **🛡 TEE gateway attested (partial)** where RedPill's gateway is what was
    attested, else **🛡 TEE attested (partial)**; the tooltip leads with what was attested and
-   what that leaves to someone's word, then names each shortfall and the keys its replies are
+   what that leaves to someone's word, then names each shortfall (and, after them, what each one
+   costs) and the keys its replies are
    checked against. Sending still goes ahead.
 
    **What is attested** is said in the top bar, its tooltip and the notice after a re-check:

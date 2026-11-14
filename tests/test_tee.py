@@ -2159,3 +2159,20 @@ def test_a_keyset_whose_time_isnt_an_integer_is_unused_never_refused_as_expired(
     assert client.keyset is None and "receipt keys expired" in result.shortfalls
     with pytest.raises(TeeRefused, match="attested keys expired"):
         receipt_client(tied="statement", not_after=1_000_000_000)
+
+
+def test_every_shortfall_says_what_it_costs():
+    """Every shortfall the attestation can name has its own words saying what it costs (the cross-app
+    standard, Nov 14 2026: each one's tooltip), carried in the attestation as the page shows it."""
+    import re
+    from pathlib import Path
+
+    from datoolkit.llm import tee
+
+    named = set(re.findall(r'fall_short\("([^"{]+)"\)', Path(tee.__file__).read_text()))
+    named |= {tee.OWN_ENCLAVE_UNCHECKED, tee.GATEWAY_UNCHECKED, tee.RECEIPT_KEYS_LOOSE, tee.GPUS_LOOSE}
+    for what in named:
+        assert what in tee.SHORTFALL_COSTS and len(tee.SHORTFALL_COSTS[what]) > len(what) + 30, what
+    assert "below up to date" in tee.shortfall_cost("Intel TCB OutOfDate")
+    att = tee.Attestation(shortfalls=[tee.GPUS_LOOSE, "receipt keys expired"])
+    assert att.to_dict()["costs"] == [tee.SHORTFALL_COSTS[tee.GPUS_LOOSE], tee.SHORTFALL_COSTS["receipt keys expired"]]
