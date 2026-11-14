@@ -146,7 +146,8 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   [Local models](#local-models)) but is reached over https only. There is no exception for
   onion addresses: a provider on one must be https. The address is never rewritten to https for
   you, and it is judged whole, as written, never looked up to see where it points:
-  `http://127.0.0.1%2e.example.com/` is a name under example.com, not this computer.
+  `http://127.0.0.1%2e.example.com/` is a name under example.com, not this computer, and
+  `http://192.168.1.50./` (a dot after it) is a name your resolver asks DNS for, not that address.
 - **Certificates are always verified.** Nothing in DA Toolkit turns verification off. A WinRM
   listener with a self-signed certificate is checked by DA Toolkit itself, pinned on first use
   after you have verified it, as RDP certificates are.

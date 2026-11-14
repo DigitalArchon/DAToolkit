@@ -58,12 +58,27 @@ def is_dns_name(host: str | None) -> bool:
     return bool(_DNS_NAME.fullmatch((host or "").strip().lower().rstrip(".")))
 
 
+def _address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return None
+
+
 def is_local(host: str | None) -> bool:
     """Whether `host`, as written, is on this machine or its own network. Read whole: an IPv6
     zone ("fe80::1%eth0") is part of its address, and anything else after a "%"
     ("127.0.0.1%2e.evil.com") makes it a name, which DNS would resolve wherever it likes. It was
-    cut at the "%", so that name passed for 127.0.0.1."""
-    host = (host or "").strip().lower().rstrip(".")
+    cut at the "%", so that name passed for 127.0.0.1.
+
+    An address with a dot after it ("192.168.1.50.") isn't that address: it is a name, which
+    glibc's resolver asks DNS for (it reads only a bare number as an address), and DNS says where
+    it is. It passed for the address, since the dot was taken off first. A name with a dot after
+    it ("printer.local.") is that name, as it is to DNS. (DA Vibe Manager's netpolicy, Nov 2026.)"""
+    host = (host or "").strip().lower()
+    if host.endswith(".") and _address(host.rstrip(".")) is not None:
+        return False
+    host = host.rstrip(".")
     if not host:
         return False
     if host in LOCAL_NAMES or host.endswith(LOCAL_SUFFIXES):

@@ -84,6 +84,30 @@ def test_an_escape_in_the_host_is_not_a_way_round():
     assert winrm.problem(Host("dc", "winrm", "10.0.0.5", auth="ntlm", winrm_ssl=False)) is None
 
 
+def test_an_address_with_a_dot_after_it_is_a_name_and_not_local():
+    """glibc's resolver reads only a bare number as an address: "192.168.1.50." is a name, asked of
+    DNS, which says where it is. It passed for the address, since the dot was taken off first, so
+    plain http, the key and the case, went wherever DNS pointed. (DA Vibe Manager's netpolicy.)"""
+    import socket
+
+    from datoolkit.config import Host
+    from datoolkit.sessions import winrm
+
+    flags = socket.AI_NUMERICHOST
+    assert socket.getaddrinfo("192.168.1.50", 80, flags=flags)
+    with pytest.raises(socket.gaierror):
+        socket.getaddrinfo("192.168.1.50.", 80, flags=flags)            # no address to the resolver
+    for host in ("192.168.1.50.", "127.0.0.1.", "10.0.0.5..", "[::1].", "::1."):
+        assert not netguard.is_local(host), host
+    for url in ("http://192.168.1.50./v1", "http://127.0.0.1.:11434/v1", "http://10.0.0.5../"):
+        assert netguard.problem(url) is not None, url
+    assert winrm.problem(Host("dc", "winrm", "10.0.0.5.", auth="ntlm", winrm_ssl=False)) is not None
+    # the address itself, and a name with its dot, are as they were
+    assert netguard.is_local("192.168.1.50") and netguard.is_local("studio.local.") and netguard.is_local("localhost.")
+    assert netguard.problem("http://192.168.1.50:11434/v1") is None
+    assert netguard.problem("https://192.168.1.50./v1") is None                 # https, wherever it goes
+
+
 def test_what_is_not_a_web_address_at_all_is_refused():
     for url in ("", "   ", None, "nano-gpt.com/api", "ftp://example.com/x", "file:///etc/passwd", "http://",
                 "https://", "javascript:alert(1)"):
