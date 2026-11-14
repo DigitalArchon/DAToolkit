@@ -165,7 +165,8 @@ def test_the_browser_is_opened_on_a_one_time_code_never_the_token(monkeypatch, c
     from datoolkit.server.app import Launches
 
     opened, launches = [], Launches()
-    monkeypatch.setattr(webbrowser, "open", opened.append)
+    # as webbrowser.open is called (hostenv.open_url hands it new and autoraise too)
+    monkeypatch.setattr(webbrowser, "open", lambda url, *args: opened.append(url))
     browser_opener(8123, launches)()
     browser_opener(8123, launches)()                     # a second launch: a code of its own
     assert all(u.startswith("http://127.0.0.1:8123/#c=") and "t=" not in u for u in opened)
