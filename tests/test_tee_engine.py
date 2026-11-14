@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 
 import httpx
 import pytest
@@ -20,6 +21,7 @@ from test_engine import env, sse, wait_turn  # noqa: F401
 from test_models import _png
 from test_research import DOC, FakeWeb, agent_turns, nano, research_call, say
 from test_tee import (
+    CHECKED,
     GPUS_LOOSE,
     OWN_ENCLAVE_UNCHECKED,
     RECEIPT_KEYS_LOOSE,
@@ -35,12 +37,14 @@ from test_tee import (
 
 def tee_factory(calls: list | None = None, *, server=tee_server, **options):
     """TeeClients on test_tee's fake nano-gpt (`server`: tee_server, or receipt_server for one
-    with RedPill's keys and receipts), Intel's and NVIDIA's checks stood in for."""
+    with RedPill's keys and receipts), Intel's and NVIDIA's checks stood in for. Their clock reads
+    just after the fake receipts were served (test_tee's CHECKED); a request is sent now, before
+    that, so a receipt holds."""
     def make(base, key, model):
         if calls is not None:
             calls.append(model)
         return TeeClient(base, key, model, client=server(**options),
-                         intel=lambda raw, s: UP_TO_DATE, nvidia=lambda a, n, s: 8)
+                         intel=lambda raw, s: UP_TO_DATE, nvidia=lambda a, n, s: 8, wall=lambda: CHECKED)
     return make
 
 
@@ -107,6 +111,25 @@ async def test_a_reply_other_than_the_one_signed_fails_and_one_not_comparable_is
     engine.send("and now?")
     await wait_turn(engine)
     assert await signature_of(engine.chat[-1]) == "signed"
+
+
+async def test_a_reply_handed_back_with_an_earlier_exchanges_receipt_fails(env):  # noqa: F811
+    """The same bytes and their genuine receipt, served by the gateway an hour before this turn's
+    request was sent: a relay replaying an earlier reply. It read "verified" on the hashes alone;
+    now the turn's reply is "failed" and the model is attested again (SealedLore 1a61096)."""
+    engine, fake, _ = env
+    reply = sse(({"role": "assistant", "content": "Let's look."}, "stop"))
+    engine._tee_factory = tee_factory(server=receipt_server, tied="statement", stream=reply.encode(),
+                                      served_at=int(time.time()) - 3600)
+    engine.new_case("old", "open")
+    engine.select_model("Fake", "TEE/glm-5.3")
+    await settled(engine)
+    fake.stream_headers = {"X-Receipt-Id": "rcpt-1"}
+    fake.responses.append(reply)
+    engine.send("VPN is down")
+    await wait_turn(engine)
+    assert await signature_of(engine.chat[-1]) == "failed"
+    assert ("Fake", "TEE/glm-5.3") in engine._tee_doubted
 
 
 async def test_nothing_is_sent_to_a_tee_model_whose_attestation_fails(env):  # noqa: F811
@@ -1015,6 +1038,7 @@ async def test_a_turn_takes_the_worst_of_its_replies_one_that_names_nothing_amon
         def __init__(self, id_, receipt_id):
             self.id, self.receipt_id, self.tee_route = id_, receipt_id, None
             self.body_hash = "sha256:" + hashlib.sha256(reply.encode()).hexdigest()
+            self.sent_at = time.time()
     good = [Engine._reply_record(Reply("c1", "rcpt-1"), first), Engine._reply_record(Reply("c1", "rcpt-2"), second)]
     entry = {"model": "TEE/glm-5.3", "tee_signature": "checking"}
     engine.chat.append(entry)

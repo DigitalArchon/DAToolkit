@@ -322,8 +322,10 @@ Confidential cases. What DA Toolkit checks:
     came without a receipt that holds. Not a failed check, but nothing shows the reply came from
     the enclave attested. A turn or a run takes the mark of its worst reply;
   - **✖ check failed**: another key signed it, or it isn't the bytes signed, or its receipt
-    doesn't hold. Said in a notice, and the model is attested again before anything more is
-    sent to it;
+    doesn't hold: another reply's, or one the gateway says it served before DA Toolkit sent the
+    request (or after the check), five minutes' leeway either way for the two clocks: an
+    earlier exchange handed back. Said in a notice, and the model is attested again before
+    anything more is sent to it;
   - **unsigned**: the provider signs no replies (Chutes).
 
   Your own messages carry no TEE mark in DA Toolkit: what reached the enclave is shown only by

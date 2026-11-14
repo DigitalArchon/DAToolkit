@@ -1396,14 +1396,16 @@ class Engine:
     @staticmethod
     def _reply_record(result, tee: tuple | None = None) -> tuple:
         """What a TEE reply's check needs of it (llm/tee.py check_reply): the completion's id, the
-        receipt its headers named, the sha256 of every byte its stream carried, nano-gpt's route.
+        receipt its headers named, the sha256 of every byte its stream carried, nano-gpt's route,
+        and when its request was sent (its receipt must have been served after that).
         Every reply of a TEE model has a record, one that named no id and no receipt too: such a
         reply can't be looked up, and is "unchecked" (_reply_outcome), never left out.
 
         With `tee` (what _tee_guard returned for the reply's request), the attested client that
         request went out under comes last, and the reply is checked with that one
         (_reply_outcome), whichever client the rest of its turn is checked with."""
-        record = result.id, result.receipt_id, result.body_hash, result.tee_route
+        record = (result.id, result.receipt_id, result.body_hash, result.tee_route,
+                  getattr(result, "sent_at", None))
         return (*record, tee[0]) if tee else record
 
     async def _reply_outcome(self, key: tuple[str, str], client: tee_mod.TeeClient,
@@ -1426,17 +1428,17 @@ class Engine:
         ReplyCheck.receipt), for the mark's tooltip (_tee_found).
 
         `client`: the attested client to check with, unless the record names its own (_reply_record)."""
-        rid, receipt_id, body_hash, route, *under = record
+        rid, receipt_id, body_hash, route, sent_at, *under = record
         client = under[0] if under else client
         upstream, receipt = None, False
         try:
             if self.cfg.settings.tee_name_upstreams:
                 found = await asyncio.to_thread(client.check, rid, receipt_id=receipt_id, body_hash=body_hash,
-                                                route=route, name_upstream=True)
+                                                route=route, sent_at=sent_at, name_upstream=True)
                 outcome, upstream, receipt = found.mark, found.upstream, found.receipt
             else:
                 found = await asyncio.to_thread(client.check_reply, rid, receipt_id=receipt_id,
-                                                body_hash=body_hash, route=route)
+                                                body_hash=body_hash, route=route, sent_at=sent_at)
                 outcome, receipt = str(found), bool(getattr(found, "receipt", False))
         except Exception:  # noqa: BLE001 - a check that couldn't be made is not a failed one
             # signed by the keys a model attested through RedPill's gateway alone, too, which has
@@ -4548,7 +4550,7 @@ class Engine:
         retired = None        # the model is no longer offered: {"model", "offered": [...]} for the note
         in_flight = None      # (system, messages sent, ...) of the request being streamed, for the log
         # A TEE model's replies this turn: (completion id, receipt id, sha256 of the stream's bytes,
-        # route, the client its request went out under), for their signed records (_reply_record;
+        # route, when it was sent, the client its request went out under), for their signed records (_reply_record;
         # llm/tee.py check_reply)
         replies: list[tuple] = []
         tee = None

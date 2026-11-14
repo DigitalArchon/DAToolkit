@@ -1153,7 +1153,9 @@ app of the author's that attests TEE models, and tested against a real attestati
    models is the exact stream DA Toolkit received, so a TEE model is always asked for a stream,
    a write-up or a second opinion too; where RedPill's signed receipt comes with it, that is
    checked too (Ed25519, under the keys kept at attestation, for the same request and reply,
-   its upstream verified). Each reply is marked
+   its upstream verified, and served after DA Toolkit sent the request: a receipt the gateway
+   says it served earlier, or after the check, is another exchange's handed back, with five
+   minutes' leeway either way for the two clocks). Each reply is marked
    with what its check showed, beside the AI's message, the image's description, the write-up,
    the second opinion in the queue, the research card or the compaction summary; a turn or a
    research run takes the mark of its worst reply:
@@ -1173,7 +1175,8 @@ app of the author's that attests TEE models, and tested against a real attestati
      gateway's signature says only that the reply passed through it, and the receipt is its
      word that the model's own enclave answered;
    - **✖ check failed**: the reply doesn't match its record: another key signed it, it names
-     other bytes, or its receipt doesn't hold;
+     other bytes, or its receipt doesn't hold (another reply's, or one served before the
+     request was sent);
    - **unsigned**: the provider signs no replies (Chutes); every instance that could answer
      was attested before sending instead, but nothing shows which one answered. A reply
      RedPill's gateway answers in Chutes' place names its receipt, and is checked like any

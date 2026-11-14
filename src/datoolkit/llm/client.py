@@ -7,6 +7,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import time
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -219,10 +220,13 @@ class TurnResult:
     usage: dict | None = None
     id: str | None = None  # the completion's id: a TEE model's reply signature is looked up by it
     # A TEE model's stream (llm/tee.py check_reply): the receipt its headers named (its record is
-    # looked up by that), the route nano-gpt took, and the sha256 of every byte it carried
+    # looked up by that), the route nano-gpt took, the sha256 of every byte it carried, and when its
+    # request went (time.time(), just before it was sent): its receipt must have been served after
+    # that, or it was another request's handed back
     receipt_id: str | None = None
     tee_route: str | None = None
     body_hash: str | None = None
+    sent_at: float | None = None
     # Anthropic's Messages API (llm/anthropic_api.py): the turn's own content blocks, kept so they
     # go back unchanged (thinking signatures, search results); the state rendered before it as a
     # turn-scoped system message; its prefix fingerprint; the searches Anthropic ran, the sources
@@ -357,11 +361,16 @@ class LLMClient:
         as the SDK builds them, and an error the stream carries raises as the SDK raises it. Every
         stream is read so; `receipts` keeps the receipt's headers and the hash on the TurnResult.
         Stopped or cancelled, the connection is dropped, so the provider stops generating. From
-        SealedLore's providers/openai_compat.py (Nov 2026)."""
+        SealedLore's providers/openai_compat.py (Nov 2026).
+
+        With `receipts`, when the request went is kept too (`TurnResult.sent_at`): a receipt the
+        gateway says it served before then isn't this request's (llm/tee.py `_receipt_holds`)."""
         try:
+            sent_at = time.time()
             async with self._client.chat.completions.with_streaming_response.create(**kwargs) as response:
                 body = hashlib.sha256()
                 if receipts:
+                    acc.result.sent_at = sent_at
                     acc.result.receipt_id = (response.headers.get("x-receipt-id")
                                              or response.headers.get("x-tee-signature-id"))
                     acc.result.tee_route = response.headers.get("x-tee-verification-route")
