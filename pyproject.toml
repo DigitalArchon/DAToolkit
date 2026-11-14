@@ -32,9 +32,11 @@ dependencies = [
     "tomli-w>=1.0",
     # attached images are re-encoded from pixels only (safety/images.py)
     "pillow>=10",
-    # RDP certificate pinning (sessions/rdpcert.py); TEE attestation (llm/tee.py, dcap.py, nras.py);
-    # the companion's TLS certificate (companion.py)
-    "cryptography>=42",
+    # RDP certificate pinning (sessions/rdpcert.py); TEE attestation and receipts (llm/tee.py, dcap.py,
+    # nras.py); the companion's TLS certificate (companion.py); EHBP's sealing. 50.0.2, what the
+    # AppImage's lock ships, for a source install too, so a relock or a pip install never stands on
+    # an older one (the floor every DA app sets, Nov 2026)
+    "cryptography>=50.0.2",
     # pairing QR codes for the phone companion (companion.py); pure Python
     "segno>=1.6",
     # TEE attestation requests (llm/tee.py) and web search

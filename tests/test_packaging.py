@@ -308,6 +308,7 @@ def test_the_lock_meets_every_floor_pyproject_sets():
     floors = [(found.group(1), found.group(2)) for dep in deps
               if (found := re.match(r"([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?>=([0-9.]+)", dep))]
     assert ("pyasn1", "0.6.5") in floors and ("dnspython", "2.9.0") in floors
+    assert ("cryptography", "50.0.2") in floors, "what the lock ships, for a source install too"
     locked = {key(name): pin for name, pin in
               re.findall(r"(?m)^([\w.-]+)(?:\[[^\]]*\])?==(\S+) \\$", (PACKAGING / "requirements.lock").read_text())}
     for name, floor in floors:
