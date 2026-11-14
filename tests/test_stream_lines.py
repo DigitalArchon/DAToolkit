@@ -7,7 +7,6 @@ import gzip
 import json
 import time
 
-import anthropic
 import httpx
 import httpx2
 import pytest
