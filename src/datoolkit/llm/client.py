@@ -6,7 +6,6 @@ import codecs
 import contextvars
 import hashlib
 import ipaddress
-import json
 import re
 import time
 import uuid

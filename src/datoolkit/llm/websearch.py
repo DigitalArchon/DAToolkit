@@ -7,7 +7,6 @@ technician to approve each one. Results are untrusted text, like command output.
 from __future__ import annotations
 
 import html
-import json
 import re
 from urllib.parse import urlsplit
 
