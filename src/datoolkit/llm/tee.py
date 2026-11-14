@@ -1,5 +1,8 @@
 """TEE models on nano-gpt: attestation before anything is sent, and a signature check on
 every reply. Ported from SealedLore (its providers/tee.py, Sept 2026); the checks are the same.
+This copy is the one DA Vibe Manager's and DA Private Coder's llm/tee.py are, line for line but
+their imports and names (each app's test_shared_code holds them to it): a change is made here
+first, then copied.
 
 What the attestation is of (looked into Nov 2026, in DA Vibe Manager): for most of nano-gpt's
 TEE/ models it is RedPill's gateway (its "aci/1" report, relayed by nano-gpt), which passes each
@@ -599,6 +602,10 @@ class TeeClient:
         nvidia: Callable[..., int] | None = None,
         wall: Callable[[], float] = time.time,
     ) -> None:
+        # https, or a local address: the key goes there; and a key no header can carry is sent nowhere
+        # (DA Vibe Manager's copy, Nov 2026)
+        netguard.check(base_url)
+        netguard.check_key(api_key, urlparse(base_url).hostname or "the provider")
         self.base_url = base_url
         self.api_key = api_key
         self.model = model

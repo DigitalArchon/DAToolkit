@@ -200,6 +200,19 @@ def key_problem(key, name: str = "the provider") -> str | None:
     return None
 
 
+class UnusableKey(ValueError):
+    """An API key no HTTP header can carry (key_problem): nothing is sent with it."""
+
+
+def check_key(key, name: str = "the provider"):
+    """`key`, unless no HTTP header can carry it: then UnusableKey, saying why and nothing of the key
+    (DA Vibe Manager's netpolicy.check_key: the TEE and Private Mode clients refuse one as they are made)."""
+    found = key_problem(key, name)
+    if found:
+        raise UnusableKey(found)
+    return key
+
+
 def check(url: str | None) -> str:
     """Raise InsecureURL unless `url` may be used. Returns it stripped."""
     found = problem(url)

@@ -754,3 +754,66 @@ async def test_whatever_of_the_relays_an_error_quotes_is_one_line_with_nothing_h
     assert len(said) == 4
     for message in said:
         assert one_visible_line(message) and SHOWN in message, message
+
+
+# ------------------------------------------------------------------- one copy for the DA Toolkit family
+# DA Vibe Manager's and DA Private Coder's llm/private_mode.py are this one, line for line; what they
+# needed of their own became the hooks below (Nov 2026).
+
+async def test_each_new_attestation_is_told_to_whoever_asked_and_never_fails_it():
+    relay = Relay(replies=[(200, TOOL_REPLY), (200, TOOL_REPLY)])
+    told = []
+
+    def on_attested(attestation):
+        told.append(attestation.release_tag)
+        raise RuntimeError("the log is full")          # only a report: it never fails the attestation
+    client = relay.client(Enclave(RELAY, verifier=relay.verifier, on_attested=on_attested))
+    await collect(client)
+    await collect(client)                              # the kept attestation: nothing new to tell
+    assert told == ["v1.2.3"]
+
+
+async def test_a_caller_may_ask_to_be_told_when_the_sealed_reply_has_begun():
+    relay = Relay(replies=[(200, TOOL_REPLY), (200, TOOL_REPLY)])
+    client = relay.client()
+    events = [kind async for kind, _ in client.stream("private/glm-5-3", [{"role": "user", "content": "x"}],
+                                                      opened=True)]
+    assert events[0] == "open" and events.count("open") == 1 and events[-1] == "done"
+    assert "open" not in [kind for kind, _ in await collect(client)]      # never unasked
+
+
+async def test_a_refusal_before_the_reply_began_is_still_asked_again_with_opened():
+    relay = Relay(replies=[(400, '{"error":"missing_encrypted_body_header"}'), (200, TOOL_REPLY)])
+    client = relay.client()
+    kinds = [kind async for kind, _ in client.stream("private/glm-5-3", [{"role": "user", "content": "x"}],
+                                                     opened=True)]
+    assert kinds[0] == "open" and relay.verifies == 2
+
+
+async def test_complete_keeps_what_the_reply_cost():
+    relay = Relay(replies=[(200, chunk({"role": "assistant", "content": "ok"}) + "data: " + json.dumps(
+        {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "m",
+         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}) + "\n\ndata: [DONE]\n\n")])
+    client = relay.client()
+    assert await client.complete("private/glm-5-3", [{"role": "user", "content": "x"}]) == "ok"
+    assert client.last_usage and client.last_usage["prompt_tokens"] == 3
+
+
+def test_the_client_refuses_plain_http_and_a_key_no_header_can_carry_before_anything_is_fetched():
+    from datoolkit.llm.netguard import InsecureURL, UnusableKey
+    enclave = Enclave(RELAY, verifier=lambda *a: pytest.fail("attested"))
+    with pytest.raises(InsecureURL):
+        PrivateModeClient("http://nano-gpt.com/api/v1", "sk-test", enclave)
+    with pytest.raises(UnusableKey):
+        PrivateModeClient(BASE, "sk-test\nX-Other: 1", enclave)
+
+
+async def test_the_list_of_private_models_is_never_asked_over_plain_http():
+    from datoolkit.llm.netguard import InsecureURL
+    from datoolkit.llm.private_mode import list_private_models
+    asked = []
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: asked.append(r) or httpx.Response(200, json={})))
+    with pytest.raises(InsecureURL):
+        await list_private_models("http://nano-gpt.com/api/v1", http=http)
+    assert not asked

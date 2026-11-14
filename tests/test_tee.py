@@ -2121,3 +2121,14 @@ def test_a_client_closed_stays_open_for_the_check_under_way_and_opens_for_one_be
     handed = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404)))
     TeeClient("https://fake.example/api/v1", "k", "TEE/x", client=handed).close()
     assert not handed.is_closed                         # one it was given isn't its to close
+
+
+def test_a_tee_client_refuses_plain_http_and_a_key_no_header_can_carry_as_it_is_made():
+    """From DA Vibe Manager's copy of llm/tee.py, now the one copy (Nov 2026): the key goes to an
+    https address, or a local one, and only as a header can carry it."""
+    from datoolkit.llm.netguard import InsecureURL, UnusableKey
+    with pytest.raises(InsecureURL):
+        TeeClient("http://nano-gpt.com/api/v1", "k", "TEE/glm-5.3")
+    with pytest.raises(UnusableKey):
+        TeeClient("https://nano-gpt.com/api/v1", "k\r\nX: 1", "TEE/glm-5.3")
+    TeeClient("http://127.0.0.1:9/v1", "k", "TEE/glm-5.3").close()

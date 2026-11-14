@@ -9,7 +9,10 @@ and usage.
 NanoGPT ships this as a Node proxy (`@nanogpt/private-mode`) run with `npx ...@latest`, so the
 code holding the plaintext would come from, and be updated by, the party the encryption is
 meant to keep out. Instead this module does what the proxy does using Tinfoil's own Python SDK,
-pinned exactly in pyproject.toml. The design follows SealedLore's providers/private_mode.py:
+pinned exactly in pyproject.toml. The design follows SealedLore's providers/private_mode.py.
+This copy is the one DA Vibe Manager's and DA Private Coder's llm/private_mode.py are, line for
+line but their imports and names (each app's test_shared_code holds them to it): a change is made
+here first, then copied.
 
 1. **Attest** (`Enclave.current`): Tinfoil's `SecureClient.verify` fetches the attestation
    bundle through NanoGPT's relay and checks it against the hardware vendor's roots (AMD SEV-SNP
@@ -249,8 +252,10 @@ class Enclave:
     """The attested enclave one provider seals to; re-attests when stale or rotated."""
 
     def __init__(self, relay: str, verifier: Verifier = tinfoil_verify,
-                 clock: Callable[[], float] = since_boot):
+                 clock: Callable[[], float] = since_boot, on_attested: Callable[[Attestation], None] | None = None):
         self.relay = relay
+        # Told each new attestation, for an app's log (and an older release, for the user: DA Vibe Manager's)
+        self._on_attested = on_attested
         # Ours, not NanoGPT's: see the module docstring. In memory only.
         self.cache_secret = secrets.token_hex(32)
         self._verifier = verifier
@@ -285,6 +290,11 @@ class Enclave:
                     raise PrivateModeError(f"the private model's enclave couldn't be attested: "
                                            f"{relay_said(str(e), 500)}; nothing was sent") from e
                 self._at = self._clock()
+                if self._on_attested:
+                    try:
+                        self._on_attested(self._verified.attestation)
+                    except Exception:  # noqa: BLE001 - only its report
+                        pass
             return self._verified
 
     def invalidate(self, verified: Verified | None = None) -> None:
@@ -371,12 +381,16 @@ class PrivateModeClient:
                  plain_http: httpx.AsyncClient | None = None):
         if not offers_private_mode(base_url):
             raise PrivateModeError(f"{netguard.shown(base_url)} does not offer NanoGPT Private Mode")
+        # https, and a key a header can carry, before anything is fetched with it (DA Vibe Manager's copy)
+        netguard.check(base_url)
         if not api_key:
             raise PrivateModeError("An API key is required for Private Mode.")
+        netguard.check_key(api_key, urlparse(base_url).hostname or "the provider")
         self.enclave = enclave
         self._api_key = api_key
         self._transport_factory = transport_factory
         self._plain = plain_http
+        self.last_usage: dict | None = None     # the last `complete`'s
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
@@ -441,8 +455,10 @@ class PrivateModeClient:
         return scope, upstream
 
     async def stream(self, model: str, messages: list[dict], tools: list[dict] | None = None,
-                     params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
-        """Yield ("text"|"reasoning", str) deltas, then ("done", TurnResult)."""
+                     params: dict | None = None, *, opened: bool = False) -> AsyncIterator[tuple[str, object]]:
+        """Yield ("text"|"reasoning", str) deltas, then ("done", TurnResult). With `opened`, ("open",
+        None) first, once the enclave's sealed reply has begun: for a caller that answers its own
+        caller then (DA Vibe Manager's gateway, as its LLMClient's streams do)."""
         if not is_private_mode(model):
             raise PrivateModeError(f"{model} isn't a Private Mode model; nothing was sent")
         await self.check_offered(model)
@@ -453,8 +469,8 @@ class PrivateModeClient:
             # the SDK is imported on the event loop.
             from ehbp import EHBPError, KeyConfigMismatchError
             try:
-                async for event in self._one_request(model, messages, tools, verified, params):
-                    started = True
+                async for event in self._one_request(model, messages, tools, verified, params, opened):
+                    started = started or event[0] != "open"     # nothing of the reply yet: it may be asked again
                     yield event
                 return
             except KeyConfigMismatchError as e:
@@ -471,7 +487,8 @@ class PrivateModeClient:
             self.enclave.invalidate(verified)  # key rotated: attest again and retry once
 
     async def _one_request(self, model: str, messages: list[dict], tools: list[dict] | None,
-                           verified: Verified, params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
+                           verified: Verified, params: dict | None = None,
+                           opened: bool = False) -> AsyncIterator[tuple[str, object]]:
         probe = shape_body(model, model, messages, tools, self.enclave.cache_secret, params)
         scope, upstream = await self._preflight(model, len(json.dumps(probe).encode()))
         body = shape_body(model, upstream, messages, tools, self.enclave.cache_secret, params)
@@ -510,6 +527,8 @@ class PrivateModeClient:
                                            resp.status_code)
                 if resp.headers.get("x-nanogpt-private-mode") != "tinfoil":
                     raise PrivateModeError("the reply didn't come back through Private Mode; refused")
+                if opened:
+                    yield "open", None             # its reply has begun (`stream`'s `opened`)
                 # split at an event stream's line ends alone, and no further than MAX_LINE_CHARS without
                 # one (llm/client.py read_lines): httpx's aiter_lines also splits at U+2028 and U+0085,
                 # which JSON leaves unescaped in a string, and holds a line however long it grows
@@ -543,15 +562,19 @@ class PrivateModeClient:
         yield "done", result
 
     async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
+        """The reply's text; what it cost on `last_usage` (DA Vibe Manager's Engine reads it)."""
         text = ""
         async for kind, val in self.stream(model, messages, params=params):
             if kind == "text":
                 text += val
+            elif kind == "done":
+                self.last_usage = val.usage
         return text
 
 
 async def list_private_models(base_url: str, http: httpx.AsyncClient | None = None) -> list[str]:
     """The relay's public list of Private Mode model ids (no key needed)."""
+    netguard.check(base_url)
     client = http or httpx.AsyncClient(**_reading(timeout=30))
     try:
         resp = await client.get(relay_url(base_url) + "/models", headers={"Accept": "application/json"})
