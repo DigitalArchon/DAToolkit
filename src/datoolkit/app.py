@@ -16,7 +16,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import config, coredumps
+from . import config, coredumps, hostenv
 from .engine import Engine
 from .hostenv import put_back, set_for_self
 from .server.app import Launches, create_app, runtime_dir
@@ -27,8 +27,8 @@ def browser_opener(port: int, launches: Launches):
     token, since what a browser is opened with is on its command line, which every user of this computer
     can read (/proc/<pid>/cmdline). (DA Vibe Manager's app.py, 41f957d, Nov 2026.)"""
     def open_in_browser() -> None:
-        import webbrowser
-        webbrowser.open(f"http://127.0.0.1:{port}/#c={launches.new()}")
+        # the browser started with the environment as it was (hostenv.open_url): not this app's GTK_USE_PORTAL=0
+        hostenv.open_url(f"http://127.0.0.1:{port}/#c={launches.new()}")
     return open_in_browser
 
 
@@ -261,6 +261,7 @@ def window_problem() -> str | None:
 
 def main(argv: list[str] | None = None) -> None:
     coredumps.no_core_dumps()          # it will hold keys and passwords: none of it to a core file
+    hostenv.browsers_get_the_original_environment()     # the window's links too (pywebview's webbrowser.open)
     ap = argparse.ArgumentParser(prog="datoolkit", description="Gated AI diagnostic console")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--browser", action="store_true",

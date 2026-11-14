@@ -42,9 +42,11 @@ def dumpable_test_run(monkeypatch):
     (coredumps.py): here that would be the test run's own, for every test after it, and an
     undumpable process can't read its own /proc/self/environ, nor may the desktop portal answer it.
     tests/test_coredumps.py checks the real thing in processes of its own."""
-    from datoolkit import coredumps
+    from datoolkit import coredumps, hostenv
 
     monkeypatch.setattr(coredumps, "no_core_dumps", lambda: None)
+    # nor is webbrowser.open replaced for the whole run (hostenv.open_url is tested by itself)
+    monkeypatch.setattr(hostenv, "browsers_get_the_original_environment", lambda: None)
 
 
 @pytest.fixture(autouse=True)

@@ -230,10 +230,14 @@ container image itself; you pull it once, and it runs exactly the pinned image.
 - **A crash writes none of the app's memory to disk.** The app, the askpass helper that carries
   a password to ssh and the WinRM console turn core dumps off as they start, so neither a core
   file nor the system's crash collector keeps a copy of the keys, passwords and cases they hold,
-  and other programs of yours can't read their memory or environment while they run. The
-  desktop portal (xdg-desktop-portal) refuses such a process, so where your desktop asks GTK for
-  the portal's file dialogs (`GTK_USE_PORTAL=1`), the app window uses GTK's own: the programs it
-  starts still get your setting.
+  and other programs of yours can't read their memory or environment while they run: they aren't
+  dumpable, their core size limit is 1 (which the kernel refuses to write a core for, where 0 is
+  left to the crash collector) and their core filter is empty. The programs they start (your
+  shells, ssh) inherit the limit and the filter; the hard limit is left as it was, so `ulimit -c`
+  can raise the limit again there. The desktop portal (xdg-desktop-portal) refuses an undumpable
+  process, so where your desktop asks GTK for the portal's file dialogs (`GTK_USE_PORTAL=1`), the
+  app window uses GTK's own: the programs it starts, and the browser it opens (a link clicked in
+  the window included), still get your setting.
 - **What never reaches a file or a log**: keys and saved passwords. What does: `requests.jsonl`
   keeps every model request as it was sent (the output you reviewed and sent, not raw terminal
   output), `events.jsonl` the case's audit trail, and `term-<session>.log` each terminal's raw
