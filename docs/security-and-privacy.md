@@ -167,8 +167,9 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   model provider at an address the Local tier counts, for attesting a model at one of the
   addresses plain http is accepted for, and for a WinRM host at one of those, where Basic
   authentication over plain HTTP would otherwise hand the proxy the password. Everything
-  further away (cloud providers, NanoGPT's services, the attestation services, a WinRM host
-  elsewhere) goes through the proxy when one is set. SSH is your system's `ssh` and follows
+  further away (cloud providers, NanoGPT's services, a `private/` model's sealed requests among
+  them, the attestation services, a WinRM host elsewhere) goes through the proxy when one is
+  set, but for a host your `NO_PROXY` names. SSH is your system's `ssh` and follows
   its own configuration; RDP goes through guacd on this computer.
 - **The app's own pages** are served on 127.0.0.1 only, never on the network, and every answer
   says that it may not be framed by another page, read as another type of content, or named

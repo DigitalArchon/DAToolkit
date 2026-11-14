@@ -292,10 +292,33 @@ class Enclave:
             return self._ids
 
 
-def sealing_transport(public_key_hex: str) -> httpx.AsyncBaseTransport:
+def environment_proxy(url: str) -> str | None:
+    """The proxy the environment names for `url` (HTTPS_PROXY, ALL_PROXY and the like, NO_PROXY
+    honoured), as the relay's other requests read it: the preflight, the model list and the
+    attestation's fetches go through it. None when there is none, or `url`'s host is exempt.
+
+    httpx reads no proxy from the environment for a client given a transport of its own, so the
+    sealed request is told it here: until Nov 2026 it alone of the relay's requests went direct,
+    from this machine's own address, beside a preflight that had gone through the proxy (DA
+    Assistant's sealed.py and proxy.for_url, Nov 2026)."""
+    import urllib.request
+
+    parsed = urlparse(url)
+    if urllib.request.proxy_bypass_environment(parsed.hostname or ""):
+        return None
+    found = urllib.request.getproxies_environment()
+    chosen = found.get(parsed.scheme.lower()) or found.get("all")
+    if not chosen:
+        return None
+    return chosen if "://" in chosen else f"http://{chosen}"
+
+
+def sealing_transport(public_key_hex: str, proxy: str | None = None) -> httpx.AsyncBaseTransport:
+    """EHBP sealing to the attested key, over a transport that goes through `proxy`, when there
+    is one (`environment_proxy`), and sends nothing EHBP didn't seal (`_NonEmptyBodyTransport`)."""
     from ehbp import AsyncEHBPTransport
 
-    return AsyncEHBPTransport.from_public_key_hex(public_key_hex, inner=_NonEmptyBodyTransport())
+    return AsyncEHBPTransport.from_public_key_hex(public_key_hex, inner=_NonEmptyBodyTransport(proxy=proxy))
 
 
 class _NonEmptyBodyTransport(httpx.AsyncHTTPTransport):
@@ -334,7 +357,7 @@ class PrivateModeClient:
     """Same streaming interface as LLMClient, but every request is sealed to an attested enclave."""
 
     def __init__(self, base_url: str, api_key: str | None, enclave: Enclave,
-                 transport_factory: Callable[[str], httpx.AsyncBaseTransport] = sealing_transport,
+                 transport_factory: Callable[[str, str | None], httpx.AsyncBaseTransport] = sealing_transport,
                  plain_http: httpx.AsyncClient | None = None):
         if not offers_private_mode(base_url):
             raise PrivateModeError(f"{netguard.shown(base_url)} does not offer NanoGPT Private Mode")
@@ -451,7 +474,10 @@ class PrivateModeClient:
         }
         acc = StreamAccumulator()
         saw_done = False
-        async with httpx.AsyncClient(transport=self._transport_factory(verified.hpke_public_key),
+        # through the environment's proxy, as the preflight went (`environment_proxy`), read at each
+        # request as httpx reads it for the others
+        route = environment_proxy(self.enclave.relay)
+        async with httpx.AsyncClient(transport=self._transport_factory(verified.hpke_public_key, route),
                                      timeout=TIMEOUT_SECONDS, follow_redirects=False) as client:
             async with client.stream("POST", self.enclave.relay + "/v1/chat/completions",
                                      json=body, headers=headers) as resp:
