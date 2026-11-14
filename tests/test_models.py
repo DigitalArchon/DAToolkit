@@ -433,6 +433,72 @@ async def test_an_overflow_is_recognised_however_the_openai_library_words_its_er
     assert capabilities.overflow("Error code: 400") == (False, None)
 
 
+async def _provider_errors(*answers):
+    """The errors the real client raises for each of `answers` (httpx.Response), as the openai installed words
+    them, each with its twin as openai 3.38 and later word it: only the body's message in the text."""
+    import openai
+
+    from datoolkit.llm.client import LLMClient
+
+    out = []
+    for answer in answers:
+        client = LLMClient("https://fake.example/v1", "sk-test",
+                           httpx.AsyncClient(transport=httpx.MockTransport(lambda r, a=answer: a)))
+        with pytest.raises(openai.APIStatusError) as caught:
+            await client.complete("m", [{"role": "user", "content": "hi"}])
+        error = caught.value
+        message = error.body.get("message") if isinstance(error.body, dict) else None
+        later = type(error)(f"Error code: {error.status_code}" + (f" - {message}" if message else ""),
+                            response=error.response, body=error.body)
+        out.append((error, later))
+    return out
+
+
+async def test_an_error_is_shown_with_the_providers_own_words_labelled_short_and_on_one_line():
+    """errors.shown_error: whichever openai wrote it, the status, the provider's message, and the rest of what it
+    answered labelled as its own, on one line and cut short; 3.37 wrote the whole body in, uncut, and 3.38 and
+    later nothing of a body that isn't JSON ("Error code: 400")."""
+    from datoolkit.llm.errors import SHOWN_WORDS, shown_error
+
+    (plain, plain_later), (coded, coded_later), (long, long_later) = await _provider_errors(
+        httpx.Response(400, text="the upstream said no:\nquota\u2028exceeded for this key"),
+        httpx.Response(400, json={"error": {"message": "This request is too long.", "code": "context_length_exceeded"}}),
+        httpx.Response(400, text="x" * 70_000))
+    assert shown_error(plain) == shown_error(plain_later) == \
+        "Error code: 400 (the provider said: the upstream said no: quota exceeded for this key)"
+    assert shown_error(coded) == shown_error(coded_later) == \
+        'Error code: 400 - This request is too long. (the provider said: {"code": "context_length_exceeded"})'
+    assert shown_error(long) == shown_error(long_later) == f"Error code: 400 (the provider said: {'x' * SHOWN_WORDS})"
+    assert shown_error(ValueError("not a provider's")) == "not a provider's"
+
+
+async def test_a_setting_refused_in_words_only_the_body_holds_is_still_recognised(env):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("c", "open")
+    prov = engine.cfg.provider("Fake")
+    params = {"temperature": 0.3, "max_tokens": 4000, "reasoning_effort": "medium"}
+    [(error, later)] = await _provider_errors(
+        httpx.Response(400, text="moonshotai/kimi-k3 does not support temperature on the selected route"))
+    assert engine._learn_unsupported(prov, "kimi", params, error) == "temperature"
+    assert engine._learn_unsupported(prov, "kimi-later", params, later) == "temperature"
+
+
+async def test_a_failed_turn_shows_what_the_provider_answered_whichever_openai_is_installed(env, monkeypatch):  # noqa: F811
+    from test_engine_turn_loop import answering
+    from test_revise_search import setup
+
+    engine, fake, _ = env
+    setup(engine)
+    answering(engine, fake, monkeypatch, lambda body: httpx.Response(
+        400, text="this key's daily limit is spent\n" + "y" * 5000))
+    engine.send("web01 is slow")
+    await wait_turn(engine)
+    note = engine.chat[-1]["text"]
+    assert note.startswith("AI request BadRequestError: Error code: 400 (the provider said: this key's daily limit is "
+                           "spent y")
+    assert len(note) < 400 and "\n" not in note
+
+
 @pytest.mark.parametrize("error,setting", [
     ("moonshotai/kimi-k3 does not support temperature on the selected route", "temperature"),
     ("Error code: 400 - {'error': {'message': \"Unsupported value: 'temperature' does not support 0.3 with this model. "

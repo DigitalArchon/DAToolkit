@@ -31,6 +31,7 @@ from .case import SENSITIVITIES, Case, _slug, clean_text, fence, utf8
 from .config import Config, Host, Provider, data_dir, private_dir
 from .llm import prompts
 from .llm.client import SENSITIVITY_TIERS, LLMClient, detect_tier, is_private_mode
+from .llm.errors import error_words, shown_error
 from .llm.private_mode import (Enclave, ModelRetired, PrivateModeClient,
                                list_private_models, offers_private_mode, relay_url)
 from .llm import capabilities, model_prompts, netguard, research, routing, textcalls, websearch
@@ -950,7 +951,7 @@ class Engine:
                     ids = await client.list_models()
             except Exception as e:  # noqa: BLE001
                 if not (isinstance(client, AnthropicClient) and not client.official and prov.default_model):
-                    raise UserError(f"Could not list models from {netguard.shown(prov.base_url)}: {e}") from e
+                    raise UserError(f"Could not list models from {netguard.shown(prov.base_url)}: {shown_error(e)}") from e
                 # an Anthropic-compatible endpoint without a model list: its default model is the one
                 ids = [prov.default_model]
             if self._api(prov) == "anthropic":
@@ -1087,7 +1088,7 @@ class Engine:
             self._learned_ctx[(prov.name, model)] = limit
         known = self.context_limit(prov, model)
         size = f" ({known['tokens']:,} tokens)" if known else ""
-        self.log("context_overflow", model=model, limit=known["tokens"] if known else None, error=str(err)[:500])
+        self.log("context_overflow", model=model, limit=known["tokens"] if known else None, error=shown_error(err))
         return (f"failed: the conversation is too long for {model}'s context window{size}. Compact or remove "
                 "earlier exchanges under Context ▾ → What the AI knows…, then retry; or switch to a model with a "
                 "larger window.")
@@ -1173,25 +1174,26 @@ class Engine:
         nearest of those is sent from now on. Returns the setting, or None when the error is
         something else."""
         sent = params.get("reasoning_effort")
-        takes = params_mod.efforts_named(str(err), sent) if sent else ()
+        words = error_words(err)           # the body too: openai 3.38 and later leave it out of str(err)
+        takes = params_mod.efforts_named(words, sent) if sent else ()
         instead = params_mod.nearest_effort(sent, list(takes)) if takes else sent
         if takes and instead != sent:
             self._efforts[(prov.name, model)] = takes
             self.log("effort_unsupported", model=model, effort=sent, instead=instead, takes=list(takes),
-                     error=str(err)[:300])
+                     error=shown_error(err))
             self.chat.append({"kind": "note", "text": f"{model} doesn't take the {sent} reasoning effort (it takes "
                                                       f"{', '.join(takes)}), so it is sent {instead} from now on; "
                                                       f"the request was sent again."})
             self._changed()
             return "reasoning_effort"
-        key = next((m.group(1).lower() for pat in _REFUSED_SETTING for m in pat.finditer(str(err))
+        key = next((m.group(1).lower() for pat in _REFUSED_SETTING for m in pat.finditer(words)
                     if m.group(1).lower() in params), "")
-        if not key and sent and params_mod.effort_unsupported(str(err)):
+        if not key and sent and params_mod.effort_unsupported(words):
             key = "reasoning_effort"
         if not key:
             return None
         self._unsupported.setdefault((prov.name, model), set()).add(key)
-        self.log("setting_unsupported", model=model, setting=key, error=str(err)[:300])
+        self.log("setting_unsupported", model=model, setting=key, error=shown_error(err))
         self.chat.append({"kind": "note", "text": f"{model} doesn't accept the {key} setting on its current route, "
                                                   f"so it is left out for this model; the request was sent again without it."})
         self._changed()
@@ -3636,7 +3638,7 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 if self._learn_unsupported(prov, model, params, e):
                     continue
-                self._log_request("compact", model, tier, messages[0]["content"], sent, {"error": str(e)}, conv_index=start,
+                self._log_request("compact", model, tier, messages[0]["content"], sent, {"error": shown_error(e)}, conv_index=start,
                                   case=case)
                 if capabilities.overflow(e)[0]:
                     self._overflow_message(prov, model, e)
@@ -3649,7 +3651,7 @@ class Engine:
                         continue
                     raise UserError(f"Even the part to compact is too long for {model}. Compact fewer exchanges, "
                                     "or remove some first.") from e
-                raise UserError(f"Compaction request failed: {e}") from e
+                raise UserError(f"Compaction request failed: {shown_error(e)}") from e
         text = (result.content or "").strip() if result else ""
         self._log_request("compact", model, tier, messages[0]["content"], sent, {
             "content": text, "reasoning": result.reasoning if result else "",
@@ -4265,9 +4267,9 @@ class Engine:
             self.log("research", task=task, brief=brief, url=url, model=model, status="timeout")
             return "Research timed out without a report. Carry on without it, or try a narrower brief."
         except Exception as e:  # noqa: BLE001
-            update(status="failed", error=str(e))
-            self.log("research", task=task, brief=brief, url=url, model=model, status="failed", error=str(e))
-            return f"Research failed: {e}"
+            update(status="failed", error=shown_error(e))
+            self.log("research", task=task, brief=brief, url=url, model=model, status="failed", error=shown_error(e))
+            return f"Research failed: {shown_error(e)}"
         return text + (" (The technician edited your request before it ran.)" if rec.get("edited") else "")
 
     @staticmethod
@@ -4863,7 +4865,7 @@ class Engine:
             if (self.attestation or {}).get("model") == model:
                 self.attestation = retired
         except Exception as e:  # noqa: BLE001
-            error = f"not sent: {e}" if isinstance(e, UserError) else netguard.scrubbed(f"{type(e).__name__}: {e}")
+            error = f"not sent: {e}" if isinstance(e, UserError) else netguard.scrubbed(f"{type(e).__name__}: {shown_error(e)}")
             self._log_failed_round(in_flight, model, tier, entry, error)
             overflowed = not isinstance(e, UserError) and self._overflow_message(prov, model, e)
             if overflowed:
@@ -5328,8 +5330,8 @@ class Engine:
         try:
             text = await self._complete(client, hprov, hmodel, messages, replies)
         except Exception as e:  # noqa: BLE001
-            self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"error": str(e)})
-            raise UserError(f"The vision helper {hmodel} failed: {e}") from e
+            self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"error": shown_error(e)})
+            raise UserError(f"The vision helper {hmodel} failed: {shown_error(e)}") from e
         self._log_request("describe_image", hmodel, htier, prompts.VISION_PROMPT, messages[1:], {"content": text})
         marks = await self._tee_marks(hprov, hmodel, tee, self._reply_checks(hprov, hmodel, tee, replies or []),
                                       f"description of {name}")
@@ -5453,8 +5455,8 @@ class Engine:
         try:
             text = await self._complete(self._client(prov, model), prov, model, messages, replies)
         except Exception as e:  # noqa: BLE001
-            self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": str(e)}, case=case)
-            raise UserError(f"{purpose} request " + (self._overflow_message(prov, model, e) or f"failed: {e}")) from e
+            self._log_request(purpose, model, tier, system_prompt, messages[1:], {"error": shown_error(e)}, case=case)
+            raise UserError(f"{purpose} request " + (self._overflow_message(prov, model, e) or f"failed: {shown_error(e)}")) from e
         self._log_request(purpose, model, tier, system_prompt, messages[1:], {"content": text}, case=case)
         marks = await self._tee_marks(prov, model, tee, self._reply_checks(prov, model, tee, replies or []),
                                       purpose.replace("_", " "), case)
@@ -5602,9 +5604,9 @@ class Engine:
         try:
             text = await self._complete(self._client(prov, model), prov, model, messages, replies)
         except Exception as e:  # noqa: BLE001
-            self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": str(e)},
+            self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"error": shown_error(e)},
                               case=case)
-            raise UserError(f"Review request failed: {e}") from e
+            raise UserError(f"Review request failed: {shown_error(e)}") from e
         self._log_request("second_opinion", model, tier, prompts.REVIEW_PROMPT, messages[1:], {"content": text}, case=case)
         marks = await self._tee_marks(prov, model, tee, self._reply_checks(prov, model, tee, replies or []),
                                       f"second opinion on #{num}", case)

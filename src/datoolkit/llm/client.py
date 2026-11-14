@@ -19,6 +19,7 @@ from openai import APIError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClien
 from openai.types.chat import ChatCompletionChunk
 
 from . import netguard
+from .errors import error_words
 from .secure_http import ACCEPT_ENCODING, MAX_BODY_BYTES, MAX_ERROR_BYTES, ProviderError, encoded, loads, too_much
 
 # standard: plaintext to a cloud provider. tee: runs in an enclave, but the prompt passes the
@@ -298,7 +299,7 @@ _NO_STREAM_OPTIONS: set[str] = set()
 
 def refuses_stream_options(err: Exception) -> bool:
     """Whether a server's refusal of a chat request is about `stream_options`."""
-    return getattr(err, "status_code", None) in (400, 422) and "stream_options" in str(err).lower()
+    return getattr(err, "status_code", None) in (400, 422) and "stream_options" in error_words(err).lower()
 
 
 def not_json(response) -> ProviderError:
