@@ -87,6 +87,34 @@ def test_the_attestation_client_reads_an_error_to_64_kb_and_no_further():
     assert len(response.content) == secure_http.MAX_ERROR_BYTES
 
 
+def test_a_redirects_own_body_is_read_to_64_kb_followed_or_not():
+    """httpx reads a redirect it follows whole before following it: read only so far, as an error's."""
+    sent = []
+
+    def handler(request):
+        if request.url.path == "/moved":
+            body = b"r" * (secure_http.MAX_ERROR_BYTES * 16)
+            sent.append(0)
+
+            def counted():
+                for piece in pieces(body):
+                    sent[-1] += len(piece)
+                    yield piece
+            return httpx.Response(302, headers={"location": "/here"}, content=counted())
+        return httpx.Response(200, content=b"fine")
+    client = sync_client(handler)
+    followed = client.get("https://x.test/moved", follow_redirects=True)
+    assert followed.text == "fine" and len(followed.history[0].content) == secure_http.MAX_ERROR_BYTES
+    assert sent[0] <= secure_http.MAX_ERROR_BYTES + 4096, "the rest unread"
+    assert len(client.get("https://x.test/moved").content) == secure_http.MAX_ERROR_BYTES
+
+
+async def test_a_redirects_body_through_the_sdks_hook_is_read_to_64_kb():
+    body = await read_through_hook(httpx.Response(
+        307, headers={"location": "https://x.test/there"}, content=apieces(b"r" * (secure_http.MAX_ERROR_BYTES * 4))))
+    assert len(body) == secure_http.MAX_ERROR_BYTES
+
+
 def test_the_attestation_client_refuses_a_body_past_32_mb_counted_decoded(monkeypatch):
     monkeypatch.setattr(secure_http, "MAX_BODY_BYTES", 100_000)
     packed = gzip.compress(b"0" * 1_000_000)
