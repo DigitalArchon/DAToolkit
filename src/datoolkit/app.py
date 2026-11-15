@@ -222,6 +222,53 @@ def _bundled_girepository() -> None:
         set_for_self("GI_TYPELIB_PATH", ":".join(missing + ([current] if current else [])))
 
 
+# The app window's size where the screen has room for it, and the least it may be made
+WINDOW_SIZE = (1500, 950)
+WINDOW_MIN = (900, 600)
+# of the work area at most, each way: the window's frame and the desktop's panels take the rest
+WINDOW_SHARE = 0.9
+
+
+def work_area() -> tuple[int, int] | None:
+    """The width and height of the work area of the monitor the window will most likely open on
+    (the primary one, else the first), or None where GDK can't say. On Wayland GTK 3 knows no
+    panels, so this is the monitor's whole size there (WINDOW_SHARE leaves room for them)."""
+    try:
+        import gi
+
+        gi.require_version("Gdk", "3.0")
+        from gi.repository import Gdk
+
+        display = Gdk.Display.get_default()
+        if display is None:
+            return None
+        monitor = display.get_primary_monitor() or (display.get_monitor(0) if display.get_n_monitors() else None)
+        if monitor is None:
+            return None
+        rect = monitor.get_workarea()
+        return (rect.width, rect.height) if rect.width > 0 and rect.height > 0 else None
+    except Exception:  # noqa: BLE001 - no GDK, no display: the window keeps its usual size
+        return None
+
+
+def window_geometry(area: tuple[int, int] | None) -> tuple[tuple[int, int], tuple[int, int]]:
+    """(size, least size) of the app window on a work area of `area` (width, height): the usual
+    size where it fits in WINDOW_SHARE of the area, else that share; the least size never more than
+    the size. Until Nov 2026 the window always opened 1500 wide: on a 1280-pixel screen (KDE on
+    Wayland) its right side, Settings among it, was off the screen until it was maximised."""
+    if not area:
+        return WINDOW_SIZE, WINDOW_MIN
+    room = (max(1, int(area[0] * WINDOW_SHARE)), max(1, int(area[1] * WINDOW_SHARE)))
+    size = (min(WINDOW_SIZE[0], room[0]), min(WINDOW_SIZE[1], room[1]))
+    return size, (min(WINDOW_MIN[0], size[0]), min(WINDOW_MIN[1], size[1]))
+
+
+def create_main_window(webview, url: str):
+    """The app window, fitted to the screen it opens on (window_geometry)."""
+    size, least = window_geometry(work_area())
+    return webview.create_window("DA Toolkit", url, width=size[0], height=size[1], min_size=least)
+
+
 def harden_window(webview) -> None:
     """The app window's WebKit settings, before it starts: a file:// page may not read other files
     (pywebview allows it by default). Nothing of DA Toolkit's is file://: the page is the local
@@ -333,8 +380,7 @@ def main(argv: list[str] | None = None) -> None:
             # icon); under `python -m datoolkit` it would otherwise be "__main__.py"
             GLib.set_prgname(desktop_id())
             GLib.set_application_name("DA Toolkit")
-            desktop._window = webview.create_window("DA Toolkit", url + "&desktop=1", width=1500, height=950,
-                                                    min_size=(900, 600))
+            desktop._window = create_main_window(webview, url + "&desktop=1")
             window = desktop._window
 
             def on_started():

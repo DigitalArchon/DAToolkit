@@ -257,3 +257,51 @@ def test_the_app_window_lets_no_file_page_read_other_files():
     for name in ("app.js", "index.html"):           # no address of the page's own is a file's (comments aside)
         code = "\n".join(line for line in (web / name).read_text().splitlines() if not line.lstrip().startswith("//"))
         assert "file://" not in code, name
+
+
+@pytest.mark.parametrize("area, size, least", [
+    ((1280, 800), (1152, 720), (900, 600)),       # a 1280-pixel screen: 1500 wide put Settings off it
+    ((1366, 768), (1229, 691), (900, 600)),
+    ((1920, 1080), (1500, 950), (900, 600)),      # room for the usual size: unchanged
+    ((800, 600), (720, 540), (720, 540)),         # smaller than the least size: that follows the screen too
+    (None, (1500, 950), (900, 600)),              # GDK can't say: as before
+])
+def test_the_window_fits_the_work_area_it_opens_on(area, size, least):
+    assert app_mod.window_geometry(area) == (size, least)
+
+
+def test_the_window_is_created_at_the_fitted_size(monkeypatch):
+    made = {}
+
+    class FakeWebview:
+        @staticmethod
+        def create_window(title, url, **kw):
+            made.update(kw, title=title, url=url)
+            return "window"
+
+    monkeypatch.setattr(app_mod, "work_area", lambda: (1280, 770))
+    assert app_mod.create_main_window(FakeWebview, "http://127.0.0.1:1/?t=x&desktop=1") == "window"
+    assert (made["width"], made["height"], made["min_size"]) == (1152, 693, (900, 600))
+    assert made["url"].endswith("&desktop=1")
+
+
+def test_the_work_area_is_read_from_the_screen_gdk_opens_on(tmp_path):
+    """GDK's own answer on a real (virtual) 1280x800 screen, in a process of its own."""
+    import importlib.util
+    import json
+    import shutil
+    import subprocess
+    import sys
+
+    if not shutil.which("xvfb-run") or importlib.util.find_spec("gi") is None:
+        pytest.skip("needs Xvfb and PyGObject")
+    code = ("import json; from datoolkit import app; a = app.work_area(); "
+            "print(json.dumps([a, app.window_geometry(a)]))")
+    child_env = {k: v for k, v in __import__("os").environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    child_env.update(HOME=str(tmp_path), XDG_RUNTIME_DIR=str(tmp_path), GDK_BACKEND="x11")
+    out = subprocess.run(["xvfb-run", "-a", "-s", "-screen 0 1280x800x24 -nolisten tcp", sys.executable, "-c", code],
+                         capture_output=True, text=True, timeout=60, env=child_env)
+    area, (size, least) = json.loads(out.stdout.strip().splitlines()[-1])
+    assert area == [1280, 800]
+    assert size == [1152, 720] and least == [900, 600]
+
