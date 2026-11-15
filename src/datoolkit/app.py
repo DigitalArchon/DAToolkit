@@ -119,6 +119,16 @@ class Desktop:
 
         return self._on_main(lambda: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text()) or ""
 
+    def close(self) -> None:
+        """Close the app window (POST /api/quit in the window: the server stopping alone left the
+        window up, saying the connection was lost, until it was closed by hand). Its loop then
+        ends, and main's finally puts the recent files list back and stops the server. pywebview's
+        destroy hands the work to GTK's own thread, and first waits for the window to be shown:
+        so from a thread of its own, never holding up the caller's loop."""
+        window = self._window
+        if window is not None:
+            threading.Thread(target=window.destroy, name="close-window", daemon=True).start()
+
     def clipboard_set(self, text: str) -> None:
         from gi.repository import Gdk, Gtk
 
@@ -306,6 +316,13 @@ def window_problem() -> str | None:
     return None
 
 
+def quit_app(server, desktop: Desktop | None) -> None:
+    """POST /api/quit: the server stops, and in the app window the window closes too."""
+    server.should_exit = True
+    if desktop is not None:
+        desktop.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     coredumps.no_core_dumps()          # it will hold keys and passwords: none of it to a core file
     hostenv.browsers_get_the_original_environment()     # the window's links too (pywebview's webbrowser.open)
@@ -349,8 +366,7 @@ def main(argv: list[str] | None = None) -> None:
         return engine
 
     launches = Launches()
-    app = create_app(token, make_engine, desktop, on_quit=lambda: setattr(server, "should_exit", True),
-                     launches=launches)
+    app = create_app(token, make_engine, desktop, on_quit=lambda: quit_app(server, desktop), launches=launches)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
                                            ws_max_size=16 * 1024 * 1024))
     thread = threading.Thread(target=server.run, daemon=True)

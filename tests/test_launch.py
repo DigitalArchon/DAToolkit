@@ -305,3 +305,20 @@ def test_the_work_area_is_read_from_the_screen_gdk_opens_on(tmp_path):
     assert area == [1280, 800]
     assert size == [1152, 720] and least == [900, 600]
 
+
+def test_quit_in_the_window_closes_the_window_too():
+    """POST /api/quit in the app window stopped only the server: the window stayed, saying the
+    connection was lost."""
+    import threading
+    import types
+
+    closed = threading.Event()
+    window = types.SimpleNamespace(destroy=closed.set)
+    server = types.SimpleNamespace(should_exit=False)
+    app_mod.quit_app(server, app_mod.Desktop(window))
+    assert server.should_exit
+    assert closed.wait(2)
+    browser = types.SimpleNamespace(should_exit=False)
+    app_mod.quit_app(browser, None)                # in the browser there is no window to close
+    assert browser.should_exit
+    app_mod.Desktop(None).close()                  # a window not made yet: nothing to close
