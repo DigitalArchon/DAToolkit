@@ -16,7 +16,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import config, coredumps, hostenv
+from . import config, coredumps, hostenv, recentguard
 from .engine import Engine
 from .hostenv import put_back, set_for_self
 from .server.app import Launches, create_app, runtime_dir
@@ -348,10 +348,14 @@ def main(argv: list[str] | None = None) -> None:
                     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, close)
 
             harden_window(webview)
+            # the Save dialog's file and the Attach photo button's kept out of the desktop's recent
+            # files list (recentguard): pywebview's own dialog, and WebKit's for the page
+            recentguard.guard_pywebview(window)
             webview.start(on_started, gui="gtk", private_mode=True, icon=window_icon())
     except KeyboardInterrupt:
         pass
     finally:
+        recentguard.put_back()          # GTK writes the list from its model as the loop ends
         server.should_exit = True
         thread.join(timeout=5)
 

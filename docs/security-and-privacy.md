@@ -243,6 +243,12 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   process, so where your desktop asks GTK for the portal's file dialogs (`GTK_USE_PORTAL=1`), the
   app window uses GTK's own: the programs it starts, and the browser it opens (a link clicked in
   the window included), still get your setting.
+- **The window's file dialogs leave your recent files list as it was.** GTK's file chooser (Save
+  for an export, Attach a photo) adds every file chosen to the desktop's recent files list
+  (`~/.local/share/recently-used.xbel`) and rewrites the whole list as it does, dropping entries
+  older than 30 days, then again as the app quits. The app puts the list back as it was, byte for
+  byte, after each of those writes. A change another program makes to the list in the quarter of
+  a second after you choose a file, or as the app quits, is lost, as GTK's own write would lose it.
 - **What never reaches a file or a log**: keys and saved passwords. What does: `requests.jsonl`
   keeps every model request as it was sent (the output you reviewed and sent, not raw terminal
   output), `events.jsonl` the case's audit trail, and `term-<session>.log` each terminal's raw
