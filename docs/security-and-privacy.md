@@ -247,8 +247,9 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   for an export, Attach a photo) adds every file chosen to the desktop's recent files list
   (`~/.local/share/recently-used.xbel`) and rewrites the whole list as it does, dropping entries
   older than 30 days, then again as the app quits. The app puts the list back as it was, byte for
-  byte, after each of those writes. A change another program makes to the list in the quarter of
-  a second after you choose a file, or as the app quits, is lost, as GTK's own write would lose it.
+  byte, after each of those writes, and after one that comes before your choice reaches the app
+  (as a Save's typed name can). A change another program makes to the list in the quarter of a
+  second around your choice, or as the app quits, is lost, as GTK's own write would lose it.
 - **What never reaches a file or a log**: keys and saved passwords. What does: `requests.jsonl`
   keeps every model request as it was sent (the output you reviewed and sent, not raw terminal
   output), `events.jsonl` the case's audit trail, and `term-<session>.log` each terminal's raw
