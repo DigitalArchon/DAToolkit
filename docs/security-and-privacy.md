@@ -261,9 +261,10 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   LAN. DA Toolkit allows it for your own network only, and asks before a key goes there ("Send
   the API key unencrypted to …?", No the default, saving nothing); the Yes is kept for that
   address, a new key asks again, and a key for such an address nobody agreed to (a hand edit of
-  `config.toml`) isn't sent. A key already going there before this was asked goes on, with no
-  question, from the first start. To this computer itself (`localhost`, `127.0.0.1`) nothing is
-  asked: it never leaves it.
+  `config.toml`) isn't sent. Nor is one that already went there before this was asked: it is
+  held back until you agree to it once (**Send it unencrypted…** in the provider's form, No the
+  default), and until then a request that would send it is refused, naming the machine. To this
+  computer itself (`localhost`, `127.0.0.1`) nothing is asked: it never leaves it.
 
 ## AI models
 
@@ -578,12 +579,14 @@ with no such address has it listen on every interface.
 | The tool cache | `~/.local/share/datoolkit/tools/` |
 | Sigstore's trust root (Tinfoil's verifier) | `~/.local/share/sigstore-python`, `~/.cache/sigstore-python` |
 
-Every folder DA Toolkit makes under its two is readable by you alone, and every file it keeps
-there (settings, a case's state, draft, transcript and files, research reports, baselines, pins,
-the phone's key and certificate) is written whole or not at all: to a temporary file of its own,
-readable by you alone from the start, flushed to the disk, then renamed into place, its folder
-flushed after, so a crash or a power cut leaves the file before or the file after, never half of
-one. An export you save is written the same way, readable by you alone. **Kept in memory only**,
+Every folder DA Toolkit makes under its two is readable by you alone, and every file it
+rewrites there (settings, a case's state, draft, `transcript.md` and files, research reports,
+baselines, pins, the phone's key and certificate) is written whole or not at all: to a temporary
+file of its own, readable by you alone from the start, flushed to the disk, then renamed into
+place, its folder flushed after, so a crash or a power cut leaves the file before or the file
+after, never half of one. The logs it only adds to (`events.jsonl`, `requests.jsonl` and the
+terminals' `term-<session>.log`) are appended to instead. An export you save is written whole
+too, readable by you alone. **Kept in memory only**,
 and gone when DA Toolkit quits: the launch token and codes, phone pairing codes and the paired
 phones' token hashes, attestations and their keys, RedPill's session records, the model
 lists read from providers, and a password you ticked to save, until its host has accepted it.

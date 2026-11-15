@@ -1466,7 +1466,12 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
   (`APPIMAGE`, `APPDIR` and the like) and the `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` it
   points at the system's CA store for its own connections. A tool run in a DA Toolkit terminal
   so behaves as it does in any other, and a CA bundle you set in those variables yourself is
-  kept.
+  kept. One thing is passed on, on purpose: DA Toolkit writes no core file when it crashes (see
+  [Security and privacy](docs/security-and-privacy.md#keys-and-passwords)), and the shells and
+  programs it starts inherit its core size limit of 1 and its empty core filter, so a program
+  that crashes in a DA Toolkit terminal writes no core file either. To debug such a crash, raise
+  both in that shell first: `ulimit -c unlimited` and `echo 0x33 > /proc/self/coredump_filter`
+  (the kernel's default filter).
 - **When a session ends.** A terminal session ends when its shell or `ssh` exits, even if a
   background job started in it still holds the terminal (the job is left running). If a
   session's transcript can't be written (a full disk, usually), the terminal goes on working,
