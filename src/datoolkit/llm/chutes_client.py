@@ -80,7 +80,7 @@ from .chutes_e2ee import (
     listed_models, measured, mlkem_refusal, public_key, published_measurements, seal_request)
 from .client import StreamAccumulator, openai_messages, read_lines
 from .dcap import since_boot
-from .privacy import CHUTES_E2EE_ORIGIN, CHUTES_KEY_ORIGINS
+from .privacy import CHUTES_E2EE_ORIGIN, CHUTES_KEY_ORIGINS, chutes_tee, key_origin, shown_origin
 from .private_mode import _reading, relay_said
 from .secure_http import ProviderError, loads, make_client
 from .tee import (
@@ -138,18 +138,18 @@ EVIDENCE_LIMIT = ("Chutes allows 60 calls a minute for everyone's evidence toget
 CHUTES_BASE_HINT = "https://llm.chutes.ai/v1 or https://claude.chutes.ai"
 
 
-def not_chutes(base_url: str, key_origin: str = "") -> str | None:
+def not_chutes(base_url: str, saved_for: str = "") -> str | None:
     """Why Chutes' end-to-end encryption can't go through the endpoint at `base_url`, its key saved
-    for `key_origin` (a netguard.origin), or None: its discovery, evidence and sealed requests are
-    api.chutes.ai's, and the key goes there only from an endpoint at one of Chutes' own hosts,
-    saved for one of them (privacy.CHUTES_KEY_ORIGINS: the one exception to a key going only to the
-    origin it was entered for)."""
-    if netguard.origin(base_url) not in CHUTES_KEY_ORIGINS:
+    for `saved_for` (privacy.key_origin's form), or None: its discovery, evidence and sealed
+    requests are api.chutes.ai's, and the key goes there only from an endpoint at one of Chutes' own
+    hosts, saved for one of them (privacy.CHUTES_KEY_ORIGINS: the one exception to a key going only
+    to the origin it was entered for)."""
+    if key_origin(base_url) not in CHUTES_KEY_ORIGINS:
         return (f"{netguard.shown(base_url)} isn't one of Chutes' own addresses: its end-to-end encrypted models "
                 f"are sent only through {CHUTES_ORIGIN}, from a provider at {CHUTES_BASE_HINT}, so nothing was "
                 "sent. Set the provider's address to that.")
-    if key_origin and key_origin not in CHUTES_KEY_ORIGINS:
-        return (f"The key was saved for {netguard.shown_origin(key_origin)}, which isn't one of Chutes' own "
+    if saved_for and saved_for not in CHUTES_KEY_ORIGINS:
+        return (f"The key was saved for {shown_origin(saved_for)}, which isn't one of Chutes' own "
                 f"addresses, so it isn't sent to {CHUTES_ORIGIN}; nothing was sent. Enter your Chutes key for "
                 "this provider (Settings → AI providers).")
     return None
@@ -287,17 +287,18 @@ def chutes_body(model: str, messages: list[dict], tools: list[dict] | None = Non
 class ChutesE2EEClient:
     """The same streaming interface as LLMClient (stream, complete, list_models), for Chutes' -TEE
     models, every request sealed to an attested instance. The provider's address and key as the
-    app holds them (`key_origin`: where the key was saved for, a netguard.origin; "" when not
+    app holds them (`key_origin`: where the key was saved for, privacy.key_origin's form; "" when not
     recorded). Hooks, replaceable for tests: `client` (the blocking client discovery, evidence and
     the public lists go through: no redirect followed), `checks_client`, `intel` and `nvidia`
     (llm/tee.py's), `stream_transport` (the sealed request's), `state` (shared by the clients of
-    one provider: the attestations and nonces), `clock`."""
+    one provider: the attestations and nonces), `clock`; `on_attested`: told each attestation that
+    checked an instance anew (an Attestation), for the app's log, never failing it."""
 
     def __init__(self, base_url: str, api_key: str | None, *, key_origin: str = "", client: httpx.Client | None = None,
                  checks_client: httpx.Client | None = None, intel: Callable[..., Any] | None = None,
                  nvidia: Callable[..., int] | None = None, state: ChutesState | None = None,
                  stream_transport: httpx.AsyncBaseTransport | None = None,
-                 clock: Callable[[], float] = since_boot):
+                 clock: Callable[[], float] = since_boot, on_attested: Callable[[Attestation], None] | None = None):
         self.base_url = base_url
         self.key_origin = key_origin
         self._api_key = api_key or ""
@@ -308,6 +309,7 @@ class ChutesE2EEClient:
         self._intel = intel
         self._nvidia = nvidia
         self._stream_transport = stream_transport
+        self._on_attested = on_attested
         self._stop = threading.Event()
         # The instance the last request was sealed to; what the last `complete` cost.
         self.last_instance: str | None = None
@@ -412,7 +414,7 @@ class ChutesE2EEClient:
         headers = dict(kwargs.pop("headers", None) or {})
         if keyed:
             key = self._key()
-            if netguard.origin(url) != netguard.origin(CHUTES_ORIGIN):  # never: every keyed URL is built here
+            if key_origin(url) != key_origin(CHUTES_ORIGIN):  # never: every keyed URL is built here
                 raise ProviderError(f"refusing to send the Chutes key to {netguard.shown(url)}")
             headers["Authorization"] = f"Bearer {key}"
         try:
@@ -537,6 +539,11 @@ class ChutesE2EEClient:
             attestation = self._record(model, pool, left_out)
             with state.lock:
                 state.attestations[pool.chute_id] = attestation
+            if needing and self._on_attested:
+                try:
+                    self._on_attested(attestation)
+                except Exception:  # noqa: BLE001 - only its report
+                    pass
             return attestation
 
     def _attest(self, tee: TeeClient, model: str, chute_id: str, needing: list[_Instance],
@@ -866,6 +873,55 @@ class ChutesE2EEClient:
             elif kind == "done":
                 self.last_usage = val.usage
         return text
+
+
+class ChutesClient:
+    """One Chutes provider's chat, as LLMClient's interface (stream, complete, list_models): its -TEE
+    models (privacy.chutes_tee) always through `e2ee`, sealed end to end, whatever the provider
+    speaks; every other model through `plain`, the app's ordinary client for the provider's address
+    (OpenAI-compatible at llm.chutes.ai, Anthropic's Messages API at claude.chutes.ai, where the key
+    goes as a bearer token: privacy.anthropic_bearer). The model list is Chutes' public one, every
+    model (`list_chutes_models`), whatever the provider speaks. `plain` is never handed a -TEE
+    model: an app's plain client refuses one too (privacy.plain_refusal)."""
+
+    def __init__(self, base_url: str, e2ee: ChutesE2EEClient, plain: Any, *, http: httpx.AsyncClient | None = None):
+        self.base_url = base_url
+        self.e2ee = e2ee
+        self.plain = plain
+        self._http = http
+        self.last_usage: dict | None = None
+
+    def sealed(self, model: str) -> bool:
+        """Whether `model` goes end-to-end encrypted (one of Chutes' -TEE models on its host)."""
+        return chutes_tee(model, self.base_url)
+
+    def _for(self, model: str) -> Any:
+        return self.e2ee if self.sealed(model) else self.plain
+
+    async def stream(self, model: str, messages: list[dict], tools: list[dict] | None = None,
+                     params: dict | None = None, *, opened: bool = False) -> AsyncIterator[tuple[str, object]]:
+        if self.sealed(model):
+            stream = self.e2ee.stream(model, messages, tools, params, opened=opened)
+        elif opened:
+            stream = self.plain.stream(model, messages, tools, params, opened=True)
+        else:
+            stream = self.plain.stream(model, messages, tools, params)
+        async for event in stream:
+            yield event
+
+    async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
+        client = self._for(model)
+        text = await client.complete(model, messages, params)
+        self.last_usage = getattr(client, "last_usage", None)
+        return text
+
+    async def list_models(self) -> list[str]:
+        return sorted(await list_chutes_models(self._http))
+
+    async def list_models_detailed(self) -> tuple[list[str], dict[str, dict]]:
+        """(every model Chutes lists, its capabilities: `listing_capabilities`, with `confidential`)."""
+        listed = await list_chutes_models(self._http)
+        return sorted(listed), listing_capabilities(listed)
 
 
 def _chunk(item: dict[str, Any]) -> ChatCompletionChunk:

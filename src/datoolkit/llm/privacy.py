@@ -62,7 +62,7 @@ TINFOIL_ORIGIN = "https://inference.tinfoil.sh:443"
 CHUTES_BASE_URL = "https://llm.chutes.ai/v1"
 CHUTES_ANTHROPIC_URL = "https://claude.chutes.ai"
 CHUTES_E2EE_ORIGIN = "https://api.chutes.ai"
-# Chutes' own hosts, a fixed list, as netguard.origin writes them: a Chutes key saved for one of
+# Chutes' own hosts, a fixed list, as `key_origin` writes them: a Chutes key saved for one of
 # them goes to the endpoint's own address for Chutes' ordinary models and to CHUTES_E2EE_ORIGIN for
 # its -TEE ones, over https, and nowhere else. The one stated exception to "a key goes only to the
 # origin it was entered for" (`key_may_go`).
@@ -99,6 +99,32 @@ def _host_of(base_url: str) -> str:
 
 def _under(host: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
+
+
+def key_origin(url: str) -> str:
+    """Where an address sends a key: its scheme, host and port ("https://llm.chutes.ai:443"), the port
+    said when the address leaves it to its scheme, in lower case; "" for text that isn't an http(s)
+    address. The form every DA app holds a saved key to (DA Toolkit's netguard.origin, DA Vibe
+    Manager's netpolicy.origin, DA Private Coder's creds.origin), written here so this module needs
+    none of them."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return ""
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not host:
+        return ""
+    port = port or (443 if scheme == "https" else 80)
+    return f"{scheme}://{f'[{host}]' if ':' in host else host}:{port}"
+
+
+def shown_origin(kept: str) -> str:
+    """An origin as said to the user: without its scheme's own port."""
+    for scheme, port in (("https", 443), ("http", 80)):
+        if kept.startswith(f"{scheme}://") and kept.endswith(f":{port}"):
+            return kept[: -len(f":{port}")]
+    return kept
 
 
 def sealed_service(base_url: str, api: str = "") -> str:
@@ -176,10 +202,10 @@ def anthropic_bearer(base_url: str) -> bool:
 
 
 def key_may_go(saved_for: str, url: str) -> bool:
-    """Whether a key saved for `saved_for` (a netguard.origin) may be sent to `url`: the origin it
-    was saved for, or, for a Chutes key, any of Chutes' own hosts, over https (`CHUTES_KEY_ORIGINS`,
-    the one stated exception). A key saved for no origin yet goes nowhere by this."""
-    now = netguard.origin(url)
+    """Whether a key saved for `saved_for` (a `key_origin`) may be sent to `url`: the origin it was
+    saved for, or, for a Chutes key, any of Chutes' own hosts, over https (`CHUTES_KEY_ORIGINS`, the
+    one stated exception). A key saved for no origin yet goes nowhere by this."""
+    now = key_origin(url)
     if not saved_for or not now:
         return False
     if now == saved_for:
@@ -364,7 +390,7 @@ def more_private(one: Privacy, other: Privacy) -> Privacy:
 
 def record_of(privacy: Privacy, base_url: str = "") -> dict:
     """`privacy` as a conversation keeps it (JSON), with the origin its calls go to."""
-    return {"kind": privacy.kind, "service": privacy.service, "origin": netguard.origin(base_url)}
+    return {"kind": privacy.kind, "service": privacy.service, "origin": key_origin(base_url)}
 
 
 def held(record: object) -> Privacy:

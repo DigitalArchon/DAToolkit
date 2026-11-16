@@ -12,7 +12,8 @@ from datoolkit.llm.privacy import (
     CHUTES, CHUTES_ANTHROPIC_URL, CHUTES_BASE_URL, CHUTES_E2EE_ORIGIN, CHUTES_KEY_ORIGINS, HIGHEST, NANOGPT_PRIVATE,
     NANOGPT_TEE, NONE, NOT_PRIVATE, PARTIAL, PRIVACY_LEVELS, TINFOIL, TINFOIL_BASE_URL, TINFOIL_ORIGIN, Privacy,
     anthropic_bearer, chat_api, chutes_tee, held, held_back, holds, is_anthropic, is_tee_id, is_tinfoil, key_may_go,
-    level_of, move_note, move_refusal, on_chutes, plain_refusal, privacy_at, rank, record_of, sealed_service)
+    key_origin, level_of, move_note, move_refusal, on_chutes, plain_refusal, privacy_at, rank, record_of,
+    sealed_service, shown_origin)
 
 NANO = "https://nano-gpt.com/api/v1"
 MODEL = "Qwen/Qwen3.8-27B-TEE"
@@ -28,6 +29,16 @@ def test_the_constants_are_the_services_own():
     assert (CHUTES_BASE_URL, CHUTES_ANTHROPIC_URL, CHUTES_E2EE_ORIGIN) == (
         "https://llm.chutes.ai/v1", "https://claude.chutes.ai", "https://api.chutes.ai")
     assert CHUTES_KEY_ORIGINS == {netguard.origin(u) for u in (CHUTES_BASE_URL, CHUTES_ANTHROPIC_URL, CHUTES_E2EE_ORIGIN)}
+
+
+@pytest.mark.parametrize("url", [TINFOIL_BASE_URL, "https://LLM.Chutes.AI/v1", "https://u:p@api.chutes.ai",
+                                 "http://192.168.1.5:11434/v1", "https://[fd00::5]:8443/x", "http://localhost",
+                                 "ftp://example.com", "not an address", "http://[::1"])
+def test_a_key_origin_is_written_as_the_apps_own(url):
+    """The form every DA app holds a saved key to (here netguard.origin), so the Chutes key's three
+    origins compare with what the app keeps."""
+    assert key_origin(url) == netguard.origin(url)
+    assert shown_origin(key_origin(url)) == netguard.shown_origin(netguard.origin(url))
 
 
 def test_nanogpts_models_read_as_they_always_did():

@@ -912,3 +912,61 @@ async def test_with_nvidias_keys_out_of_reach_every_instance_is_left_out(fake):
     with pytest.raises(TeeRefused, match="NVIDIA's signing keys couldn't be fetched"):
         await complete(provider(fake, nvidia=keys_gone))
     assert fake.opened == []
+
+
+# --- one provider: its -TEE models sealed, the others through the plain client ----------------
+
+
+class Plain:
+    """The app's ordinary client for the provider's address, recording what it was handed."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+        self.last_usage = {"prompt_tokens": 1}
+
+    async def stream(self, model, messages, tools=None, params=None):
+        self.asked.append(model)
+        yield "text", "plain"
+        yield "done", None
+
+    async def complete(self, model, messages, params=None):
+        self.asked.append(model)
+        return "plain"
+
+
+async def test_a_chutes_provider_seals_its_tee_models_and_hands_the_others_to_the_plain_client(fake):
+    plain = Plain()
+    chutes = module.ChutesClient(BASE, provider(fake), plain,
+                                 http=httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+    events = [e async for e in chutes.stream(MODEL, MESSAGES)]
+    assert "".join(v for k, v in events if k == "text") == "The door opens." and plain.asked == []
+    assert fake.count("/e2e/invoke") == 1
+    assert [e async for e in chutes.stream(ORDINARY_ID, MESSAGES)][0] == ("text", "plain")
+    assert await chutes.complete(ORDINARY_ID, MESSAGES) == "plain" and chutes.last_usage == {"prompt_tokens": 1}
+    assert plain.asked == [ORDINARY_ID, ORDINARY_ID] and fake.count("/e2e/invoke") == 1
+    for written in (" test/model-tee", "test/Model-TEE:THINKING"):
+        assert chutes.sealed(written), "when in doubt, sealed"
+    ids, caps = await chutes.list_models_detailed()
+    assert ids == ["plain/Model", MODEL] == await chutes.list_models()
+    assert caps[MODEL]["confidential"] is True and caps["plain/Model"]["confidential"] is False
+    assert caps[MODEL]["context"] == 131072 and caps[MODEL]["pricing"]["prompt"] == 0.2
+
+
+ORDINARY_ID = "plain/Model"
+
+
+async def test_each_attestation_that_checked_an_instance_anew_is_told_and_never_fails_it(fake):
+    told = []
+    chutes = provider(fake)
+    chutes._on_attested = told.append
+    await complete(chutes)
+    await complete(chutes)
+    assert len(told) == 1 and told[0].service == "chutes", "the second found every instance attested"
+
+    def broken(_attestation):
+        raise RuntimeError("the log is full")
+
+    again = provider(fake)
+    again._on_attested = broken
+    text, _ = await complete(again)
+    assert text == "The door opens."
