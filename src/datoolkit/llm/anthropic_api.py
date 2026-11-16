@@ -60,8 +60,11 @@ from .capabilities import EFFORTS
 from .client import (CONNECT_TIMEOUT, NO_RESULT, ToolCall, TurnResult, cut_off, is_private_mode, no_reply,
                      only_what_it_was_given, reading_options, redirected)
 from .params import nearest_effort
+from . import netguard
+from .privacy import PROXY_ERROR_TEXT, anthropic_bearer, plain_refusal
+from .private_mode import relay_said
 from .providers import is_official_anthropic
-from .secure_http import loads
+from .secure_http import ProviderError, loads
 
 THINKING_BETA = "thinking-binding-controls-2026-08-01"
 # What the API does with a thinking block whose history changed anyway: drop it and carry on.
@@ -493,9 +496,15 @@ class AnthropicClient:
         # Anthropic-compatible server on this machine or its network is reached directly, not
         # through a proxy the environment names, and its answers are read only so far (llm/client.py
         # reading_options). And it sends no header the environment holds for Anthropic's SDK
-        # (only_what_it_was_given).
+        # (only_what_it_was_given). Chutes' proxy of this API (claude.chutes.ai) takes the key only as
+        # a bearer token, Anthropic's own and every other the x-api-key header (privacy.anthropic_bearer:
+        # live, SealedLore Nov 2026, an x-api-key reached Chutes' backend as nothing); a credential
+        # given either way, the SDK reads none from the environment.
+        self.base_url = base_url
+        credential = ({"api_key": None, "auth_token": api_key or "not-needed"} if anthropic_bearer(base_url)
+                      else {"api_key": api_key or "not-needed"})
         self._client = _Anthropic(
-            api_key=api_key or "not-needed", base_url=base, max_retries=1,
+            **credential, base_url=base, max_retries=1,
             timeout=anthropic.Timeout(600, connect=CONNECT_TIMEOUT),
             http_client=http_client or anthropic.DefaultAsyncHttpxClient(
                 follow_redirects=False, **reading_options(base_url)))
@@ -588,6 +597,10 @@ class AnthropicClient:
                       params: dict | None = None) -> AsyncIterator[tuple[str, object]]:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
+        # one of Chutes' TEE models, or Tinfoil's host: only ever sent sealed, by its own client
+        refusal = plain_refusal(self.base_url, "this request", model=model)
+        if refusal:
+            raise ProviderError(refusal)
         kwargs, extra, info = self.request(model, messages, tools, params)
         result = TurnResult(state_sent=info["state_sent"], prefix_sha=info["prefix_sha"])
         blocks_all: list[dict] = []
@@ -669,6 +682,13 @@ class AnthropicClient:
         if search_tail is not None:
             result.text_after_search = result.content[search_tail:]
         result.id = msg.id if msg else None
+        if stop == "error":
+            # Chutes' proxy says a refusal of the model's server mid-stream as text of its own,
+            # PROXY_ERROR_TEXT first, then this stop reason, one Anthropic's API never gives: never
+            # kept as the reply (live, SealedLore Nov 2026)
+            said = result.content.split(PROXY_ERROR_TEXT, 1)[-1]
+            raise ProviderError(f"{netguard.shown(self.base_url)} reported an error from the model's server: "
+                                f"{relay_said(said, 300) or 'no words'}")
         result.finish_reason = _STOPS.get(stop or "", stop)
         result.usage = openai_usage(usage)
         result.searches = list(searches.values())

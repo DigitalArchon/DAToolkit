@@ -113,14 +113,24 @@ def reading_options(base_url: str) -> dict:
             **local_http_options(base_url)}
 
 
-def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None = None) -> str:
-    # e2ee is never taken from an override: only a private/ model is sealed (Engine.save_provider)
+def detect_tier(model_id: str, base_url: str, overrides: dict[str, str] | None = None, api: str = "") -> str:
+    """A model's tier on the provider at `base_url` speaking `api`. Whatever is sealed end to end is
+    judged first (llm/privacy.py privacy_at: NanoGPT's private/, every model on Tinfoil's host or
+    speaking its protocol, Chutes' -TEE models on Chutes' hosts), before any override and before
+    the TEE patterns below: "e2ee" for the highest privacy, "tee" for Chutes' -TEE models (partial
+    privacy, as NanoGPT's TEE/ models are), never "local" or an override. A Chutes -TEE id read by
+    the patterns alone was taken for a NanoGPT TEE model, whose attestation was then asked of
+    Chutes' own address with the key (DA Vibe Manager's finding, Nov 2026)."""
+    from .privacy import HIGHEST, privacy_at   # privacy reads tee.py, which reads this module
+
+    found = privacy_at(model_id, base_url, api)
+    if found.sealed:
+        return "e2ee" if found.level == HIGHEST else "tee"
+    # e2ee is never taken from an override: only a sealed model is sealed (Engine.save_provider)
     if overrides and model_id in overrides and overrides[model_id] in ("standard", "tee", "local"):
         return overrides[model_id]
     if is_local_url(base_url):
         return "local"
-    if is_private_mode(model_id):
-        return "e2ee"
     parts = model_id.strip().lower().split("/")
     if "tee" in parts or parts[0] == "phala" or model_id.lower().endswith(("-tee", ":tee")):
         return "tee"
@@ -317,12 +327,24 @@ class LLMClient:
         # client follows redirects, which would send the request again to wherever a reply
         # points, plain http and other hosts included: netguard checked only the base URL.
         # And a local server is reached directly, whatever proxy the environment names.
+        self.base_url = base_url
         self._client = _OpenAI(base_url=base_url, api_key=api_key or "not-needed", max_retries=1,
                                timeout=Timeout(300, connect=CONNECT_TIMEOUT),
                                http_client=http_client or DefaultAsyncHttpxClient(
                                    follow_redirects=False, **reading_options(base_url)))
 
+    def _refuse_sealed(self, model: str, what: str = "this request") -> None:
+        """Nothing goes in the clear to an end-to-end encrypted endpoint (Tinfoil's host), nor a
+        model sent only sealed (NanoGPT's private/, Chutes' -TEE on Chutes' hosts), whatever chose
+        this client (llm/privacy.py plain_refusal: when in doubt, sealed)."""
+        from .privacy import plain_refusal
+
+        found = plain_refusal(self.base_url, what, model=model)
+        if found:
+            raise ProviderError(found)
+
     async def list_models(self) -> list[str]:
+        self._refuse_sealed("", "a model list with the key")
         page = await self._client.models.list()
         return sorted(m.id for m in page.data)
 
@@ -342,6 +364,7 @@ class LLMClient:
         connection closed mid-answer, and what arrived is no reply."""
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
+        self._refuse_sealed(model)
         kwargs: dict = {"model": model, "messages": openai_messages(messages), "stream": True,
                         "stream_options": {"include_usage": True}}
         if tools:
@@ -438,6 +461,7 @@ class LLMClient:
     async def complete(self, model: str, messages: list[dict], params: dict | None = None) -> str:
         if is_private_mode(model):
             raise RuntimeError(f"{model} is a Private Mode model and is only ever sent sealed; nothing was sent")
+        self._refuse_sealed(model)
         whole = WHOLE_BODY.set(True)        # a reply not streamed: read no further than MAX_BODY_BYTES
         try:
             raw = await self._client.chat.completions.with_raw_response.create(

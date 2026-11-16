@@ -1,19 +1,23 @@
 """What kind of service a provider is, and which API it speaks.
 
 A provider is an address and a key. Most speak OpenAI's chat completions API (NanoGPT,
-OpenRouter, WaveSpeed, local servers); Anthropic's own endpoint speaks the Messages API, as
-do some others that copy it ("Anthropic-compatible"). The API is worked out from the address
-unless the technician chooses it (Provider.api), and the kind only labels the provider and
-decides what it offers: NanoGPT searches, Private Mode and routes; OpenRouter routes;
-Anthropic native web search, thinking and its prompt caching."""
+OpenRouter, WaveSpeed, Chutes, local servers); Anthropic's own endpoint speaks the Messages API, as
+do some others that copy it ("Anthropic-compatible", Chutes' claude.chutes.ai among them); Tinfoil's
+own API speaks Tinfoil's protocol, every request sealed end to end (llm/tinfoil_direct.py). The API
+is worked out from the address unless the technician chooses it (Provider.api), and a sealed host
+is spoken in its protocol whatever was chosen (llm/privacy.py chat_api: when in doubt, sealed).
+The kind labels the provider and decides what it offers: NanoGPT searches, Private Mode and
+routes; OpenRouter routes; Anthropic native web search, thinking and its prompt caching; Tinfoil
+and Chutes their public model lists, read without the key."""
 
 from __future__ import annotations
 
 from urllib.parse import urlsplit
 
 from .client import is_local_url
+from .privacy import CHUTES_BASE_URL, TINFOIL_BASE_URL, chat_api, is_tinfoil, on_chutes
 
-APIS = ("openai", "anthropic")
+APIS = ("openai", "anthropic", "tinfoil")
 
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 
@@ -21,12 +25,14 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 PRESETS = [
     ("nanogpt", "NanoGPT", "NanoGPT", "https://nano-gpt.com/api/v1", "openai"),
     ("anthropic", "Anthropic", "Anthropic", ANTHROPIC_BASE_URL, "anthropic"),
+    ("tinfoil", "Tinfoil", "Tinfoil", TINFOIL_BASE_URL, ""),
+    ("chutes", "Chutes", "Chutes", CHUTES_BASE_URL, ""),
     ("openrouter", "OpenRouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai"),
     ("wavespeed", "WaveSpeed", "WaveSpeed", "https://llm.wavespeed.ai/v1", "openai"),
     ("local", "Local (Ollama / LM Studio / vLLM)", "Local", "http://localhost:11434/v1", "openai"),
 ]
 
-KIND_LABELS = {"nanogpt": "NanoGPT", "anthropic": "Anthropic", "openrouter": "OpenRouter", "wavespeed": "WaveSpeed",
+KIND_LABELS = {"nanogpt": "NanoGPT", "anthropic": "Anthropic", "tinfoil": "Tinfoil", "chutes": "Chutes", "openrouter": "OpenRouter", "wavespeed": "WaveSpeed",
                "local": "Local", "training": "Training", "openai-compatible": "OpenAI-compatible",
                "anthropic-compatible": "Anthropic-compatible"}
 
@@ -48,10 +54,10 @@ def is_official_anthropic(base_url: str) -> bool:
 
 
 def api_of(base_url: str, api: str = "") -> str:
-    """The API a provider speaks: its own choice, else Anthropic's for api.anthropic.com."""
-    if api in APIS:
-        return api
-    return "anthropic" if is_official_anthropic(base_url) else "openai"
+    """The API a provider speaks: Tinfoil's for Tinfoil's host whatever was chosen, else its own
+    choice, else by the address: Anthropic's for api.anthropic.com and Chutes' claude.chutes.ai,
+    OpenAI's for anything else (privacy.chat_api)."""
+    return chat_api(base_url, api if api in APIS else "")
 
 
 def kind_of(base_url: str, api: str = "") -> str:
@@ -60,6 +66,10 @@ def kind_of(base_url: str, api: str = "") -> str:
     host = _host(base_url)
     if _on(host, "nano-gpt.com"):
         return "nanogpt"
+    if is_tinfoil(base_url, api):
+        return "tinfoil"
+    if on_chutes(base_url):
+        return "chutes"
     if is_official_anthropic(base_url):
         return "anthropic"
     if _on(host, "openrouter.ai"):
