@@ -3,7 +3,7 @@
 This is how DA Toolkit handles your security and your clients' privacy: what leaves this
 computer and where it goes, what stays, how keys and passwords are kept, what each kind of AI
 model can see, and what DA Toolkit can't protect you from. It describes DA Toolkit as of
-version 0.1.0b30 (November 2026). For how to use each feature, see the [manual](../MANUAL.md);
+version 0.1.0b31 (November 2026). For how to use each feature, see the [manual](../MANUAL.md);
 the sections named below are the manual's.
 
 ## In short
@@ -21,8 +21,12 @@ the sections named below are the manual's.
   and anything at all over plain `http://` to a machine outside your own network. DA Toolkit
   has no telemetry, no crash reports and no update check.
 - **Case sensitivity decides which models may see a case**: Open cases any model, Confidential
-  cases only end-to-end encrypted (`private/`) or local models, Sovereign cases only local ones.
-  A case's sensitivity can only be raised.
+  cases only models with the highest privacy (NanoGPT's `private/`, Tinfoil's) or local ones,
+  Sovereign cases only local ones. A case's sensitivity can only be raised.
+- **Every model says how private it is**: highest (end-to-end encrypted to an attested, measured
+  enclave: NanoGPT's `private/` and Tinfoil's models), partial (NanoGPT's `TEE/` models, text in
+  the clear at NanoGPT's gateway; Chutes' `-TEE` models, encrypted to a key resting on software
+  Chutes signs), or not private. **A case moves only to a model at its level or higher.**
 - **Secrets live in the OS keyring**, never in a log, and not in the config file (with one
   exception, where no keyring is to be had: see [Keys and passwords](#keys-and-passwords)).
 - **Your own network is reached directly.** A proxy named in your environment is used for what
@@ -75,6 +79,29 @@ With a NanoGPT provider (`nano-gpt.com`), DA Toolkit also uses, with the same ke
   model and the request's size, and the public list of Private Mode models (fetched with no
   key).
 
+### Tinfoil (`inference.tinfoil.sh`, `atc.tinfoil.sh`), preliminary
+
+With a Tinfoil provider, every request goes to Tinfoil's own API sealed on this computer to its
+attested router enclave's key (see [Tinfoil's models](#tinfoils-models-preliminary)), with your
+Tinfoil key in its header and nothing else of ours in the clear. Before that, Tinfoil's attestation
+service (`atc.tinfoil.sh`) is asked for the router's bundle by the provider's host, with no key,
+and the model list (`/v1/models`) is fetched with no key. Tinfoil sees your account, the model,
+timing, sizes and cost.
+
+### Chutes (`llm.chutes.ai`, `claude.chutes.ai`, `api.chutes.ai`), preliminary
+
+With a Chutes provider, an ordinary model's requests go to its address as to any provider's
+(OpenAI's API at `llm.chutes.ai`, Anthropic's through Chutes' proxy at `claude.chutes.ai`, where
+the key goes as a bearer token), **readable by Chutes**. A `-TEE` model's requests are sealed on
+this computer to one attested instance's key and sent to `api.chutes.ai` (see
+[Chutes' -TEE models](#chutes--tee-models-preliminary)): with your key, the discovery of the
+model's instances and their keys and single-use nonces, each instance's own evidence when it is
+new, and the sealed request, whose headers (the model's chute, the instance, the nonce) Chutes
+reads. With no key: the model's instances' evidence for our nonce (`/chutes/…/evidence`), Chutes'
+published VM measurements (`/servers/tdx/measurements`), and the model list (`llm.chutes.ai`).
+Chutes sees your account, the model, the instance, timing, sizes and cost; the instance's operator
+(a third-party miner), ciphertext.
+
 ### Attestation services
 
 Checking that a model's enclave is genuine contacts, with nothing of your case in any of it:
@@ -82,10 +109,11 @@ Checking that a model's enclave is genuine contacts, with nothing of your case i
 - **Intel** (`api.trustedservices.intel.com`, `certificates.trustedservices.intel.com`) for a
   TEE model: its public certificates, revocation lists and platform ratings, to check the
   enclave's quote. Kept for an hour, once they have been read and their signatures checked.
+- **The same two** for a Chutes `-TEE` model's instances, with nothing of your case.
 - **NVIDIA** (`nras.attestation.nvidia.com`) for a TEE model: the GPU evidence from the
   enclave's own report, for NVIDIA's signed verdict, and NVIDIA's signing keys (kept for an
   hour).
-- **Tinfoil's verifier**, for a `private/` model, run by Tinfoil's own SDK (pinned to an exact
+- **Tinfoil's verifier**, for a `private/` model and a Tinfoil provider's, run by Tinfoil's own SDK (pinned to an exact
   version): Tinfoil's mirrors of GitHub (`github-proxy.tinfoil.sh`, the router's latest release
   and its Sigstore bundle), of AMD's and Intel's certificate services (`kds-proxy.tinfoil.sh`,
   `tdx-proxy.tinfoil.sh`), and Sigstore's public trust root (`tuf-repo-cdn.sigstore.dev`, which
@@ -111,7 +139,7 @@ the session id, and what came back.
 
 ### Other providers
 
-**Anthropic** (`api.anthropic.com`), **OpenRouter**, **WaveSpeed** and any other provider are
+**Anthropic** (`api.anthropic.com`, the key in its `x-api-key` header), **OpenRouter**, **WaveSpeed** and any other provider are
 contacted only when you add them, for their model lists and the requests you send. With
 Anthropic's own web search chosen (Settings → General, Open cases only), Claude searches on
 Anthropic's side while it answers, at most four times a turn, so those queries aren't shown to
@@ -215,7 +243,12 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   is held to the host's kind, address and port the same way: changed without it, you are asked
   for the password when you connect.
 - **A key goes only to the service it is for.** The NanoGPT key goes to NanoGPT (chat, search,
-  the scraper, attestation); no key goes to RedPill, Intel, NVIDIA or Tinfoil's mirrors. A key
+  the scraper, attestation); the Tinfoil key to `https://inference.tinfoil.sh` alone (Tinfoil's
+  host, over the pinned connection); a Chutes key saved for one of Chutes' three hosts
+  (`llm.chutes.ai`, `api.chutes.ai`, `claude.chutes.ai`) to those three alone, over https, which is
+  the one stated exception to a key going only to the address it was entered for (its
+  end-to-end encryption is `api.chutes.ai`'s whatever the provider's address); no key goes to
+  RedPill, Intel, NVIDIA, Tinfoil's attestation service or mirrors, or Chutes' evidence and lists. A key
   with a space, a line break or another character no key has is refused, saying so without
   quoting it.
 - **Host passwords** are typed into ssh's prompt through DA Toolkit's askpass bridge, given to
@@ -273,7 +306,8 @@ container image itself; you pull it once, and it runs exactly the pinned image.
 |---|---|---|
 | Standard | any other | everything |
 | TEE | `TEE/…` and `phala/…`; also an id with `tee` as one of its `/` parts, or ending `-tee` or `:tee` | everything, in the clear on NanoGPT's servers; the model is attested before anything is sent |
-| E2EE | NanoGPT `private/…` | ciphertext only, plus your account, the model, timing, sizes and usage |
+| TEE (Chutes) | a `-TEE` model of a Chutes provider | ciphertext only, sealed to an attested instance, plus your account, the model, timing, sizes and usage (see [Chutes' -TEE models](#chutes--tee-models-preliminary)) |
+| E2EE | NanoGPT `private/…`; every model of a Tinfoil provider | ciphertext only, plus your account, the model, timing, sizes and usage |
 | Local | any model at `localhost`, a local-network address, or a name ending `.local` or `.lan` | nothing leaves your network |
 
 | Case sensitivity | Models allowed |
@@ -282,8 +316,18 @@ container image itself; you pull it once, and it runs exactly the pinned image.
 | Confidential | E2EE, Local |
 | Sovereign | Local only |
 
-A model's tier can be overridden (Standard, TEE or Local), never to E2EE: only a `private/`
-model is sealed. Marking a cloud model Local lets Confidential and Sovereign cases use it, so
+A model's tier can be overridden (Standard, TEE or Local), never to E2EE, and an end-to-end
+encrypted model's never: a sealed model is judged sealed before anything else, by the provider's
+address as much as by its name (Tinfoil's host is sealed whatever its API is set to).
+
+**Privacy levels** (shown wherever a model is chosen and on each reply): **highest**, NanoGPT's
+`private/` models and every Tinfoil model, end-to-end encrypted to an attested enclave whose
+software is measured; **partial**, NanoGPT's `TEE/` models (attested, text in the clear at
+NanoGPT's gateway) and Chutes' `-TEE` models (encrypted all the way, to a key that rests on
+software Chutes signs); **not private**, every other model. A case keeps the level of its latest
+reply: it moves only to a model at that level or higher, and is refused, in words naming the
+levels, a less private one (choosing it, or sending to it after the case was opened again). So a
+`private/` or Tinfoil case never moves to Chutes. Marking a cloud model Local lets Confidential and Sovereign cases use it, so
 do that only for a model on your own hardware. See the manual's
 [Model tiers and end-to-end encryption](../MANUAL.md#model-tiers-and-end-to-end-encryption).
 
@@ -313,6 +357,53 @@ own verifier, pinned, never NanoGPT's `npx` proxy, whose code NanoGPT could chan
    one.
 
 What NanoGPT still sees: your account, the model, when, how much, and the sizes.
+
+### Tinfoil's models (preliminary)
+
+The same router enclave as NanoGPT's `private/` models, reached directly at
+`https://inference.tinfoil.sh/v1`:
+
+1. **Attested before anything is sent**, by Tinfoil's SDK from Tinfoil's own attestation service,
+   never its router lookup: the report must be the router release Tinfoil published (Sigstore),
+   bind the key requests are sealed to and the TLS key, and name the provider's own host, or
+   nothing is sent. A release older than the latest is flagged. Made again every five minutes,
+   and when the enclave says our key has changed.
+2. **Pinned TLS**: before a byte of a request leaves, the server's TLS key must be the attested
+   one, through a proxy's tunnel too; a mismatch sends nothing and attests again.
+3. **Sealed on this computer** (EHBP), the request body with a prompt-cache secret of its own,
+   random and kept in memory only; only a reply the enclave sealed, with its finish and its end,
+   is taken. What Tinfoil's servers write in an error is shown as theirs, unauthenticated.
+
+What isn't proved: that the router hands your request only to attested model enclaves (its
+published code, whose build is what is attested). Tinfoil sees your account, the model, timing,
+sizes and cost.
+
+### Chutes' -TEE models (preliminary)
+
+Partial privacy, always. For each request:
+
+1. **Discovery** (with your key): up to five of the model's instances, each with its ML-KEM-768
+   key and single-use nonces.
+2. **Each instance attested** at most 15 minutes before use, for DA Toolkit's nonce: its Intel TDX
+   quote checked as a TEE model's is (Intel's chain, no debug TD, its TLS key bound and signing
+   our nonce and that quote), NVIDIA's signed verdict on its GPUs, **its encryption key bound to
+   our nonce by the quote**, and its MRTD and RTMRs one of the sets Chutes publishes. An instance
+   that fails any of these, or whose GPUs NVIDIA didn't vouch for, is left out, named, and never
+   sealed to; with none left nothing is sent.
+3. **Sealed on this computer** to one attested instance's key (ML-KEM-768 from the cryptography
+   library already used, ChaCha20-Poly1305), a nonce used once. The reply streams: every piece is
+   held to its number, so one dropped, repeated or out of its place, or a stream that ends before
+   the model's own sealed end, is refused in words and nothing of it is shown. A seal that doesn't
+   hold refuses the reply and has every instance attested again. What Chutes writes unsealed (an
+   error, its copy of the usage) is shown as Chutes', unauthenticated, or used only where the
+   sealed usage is missing.
+
+**What it can't prove**, and why it is partial: the program inside the instance that makes, holds
+and uses the key (Chutes' aegis library, a closed binary) is admitted by Chutes' signature, not
+measured, so that only the model reads your text rests on software Chutes signs; and the list of
+measured images is Chutes' word (reproducible from its open sek8s source, not rebuilt here). The
+instance's prompt cache is shared by everyone it serves, so how soon a reply begins could hint at
+what another user sent. Chutes' client library (`chutes-e2ee`) isn't used: it attests nothing.
 
 ### TEE models (`TEE/`)
 
@@ -589,8 +680,9 @@ after, never half of one. The logs it only adds to (`events.jsonl`, `requests.js
 terminals' `term-<session>.log`) are appended to instead. An export you save is written whole
 too, readable by you alone. **Kept in memory only**,
 and gone when DA Toolkit quits: the launch token and codes, phone pairing codes and the paired
-phones' token hashes, attestations and their keys, RedPill's session records, the model
-lists read from providers, and a password you ticked to save, until its host has accepted it.
+phones' token hashes, attestations and their keys (Tinfoil's router and its prompt-cache secret,
+Chutes' instances and their nonces among them), RedPill's session records, the model lists read
+from providers, and a password you ticked to save, until its host has accepted it.
 Exports go where you save them; a copy stays in the case folder.
 
 Settings, case files and pins are written whole (to a temporary file, flushed, then renamed),
@@ -623,6 +715,10 @@ against:
   passes NanoGPT, and whoever serves the model, in the clear, and for a model RedPill serves the
   machine that runs it is RedPill's word. A `private/` model's metadata (account, model,
   timing, sizes) is NanoGPT's to see.
+- **Chutes' end-to-end encryption, partial by design.** Its key is made and held by a closed
+  binary that Chutes signs and nothing measures, against measurements from Chutes' own list; an
+  ordinary Chutes model's text is Chutes' to read. Tinfoil direct and Chutes' encryption are
+  preliminary: built to the services' code and checked live, not long in use.
 - **Searches in the clear.** Approved queries and research briefs reach the search provider,
   and the research model, as written.
 - **Your local network.** Plain http to a Local model server or a WinRM host on it crosses the

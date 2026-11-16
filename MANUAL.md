@@ -798,6 +798,8 @@ changed.
 |---|---|---|---|
 | NanoGPT | `https://nano-gpt.com/api/v1` | OpenAI's API | Most models, `private/` (E2EE) and `TEE/` models, web search and the research agent, routes |
 | Anthropic | `https://api.anthropic.com` | Anthropic's Messages API | Claude directly: its reasoning shown, prompt caching, Anthropic's own web search (optional), the refusal fallback |
+| Tinfoil | `https://inference.tinfoil.sh/v1` | Tinfoil's protocol, end-to-end encrypted | Every model sealed to Tinfoil's attested router, over a connection pinned to its attested TLS key: the highest privacy (preliminary) |
+| Chutes | `https://llm.chutes.ai/v1` (or `https://claude.chutes.ai`, its Anthropic proxy) | OpenAI's API (Anthropic's there) | Every model Chutes lists; its `-TEE` models always sealed end to end to an attested Chutes instance: partial privacy (preliminary); its others not private |
 | OpenRouter | `https://openrouter.ai/api/v1` | OpenAI's API | Many models, with their image support and context windows reported; routes by priority |
 | WaveSpeed | `https://llm.wavespeed.ai/v1` | OpenAI's API | Open models |
 | Local | `http://localhost:11434/v1` | OpenAI's API | Ollama, LM Studio, vLLM: the Local tier |
@@ -821,8 +823,16 @@ environment rides along: the variables the OpenAI and Anthropic libraries read b
 (`OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_CUSTOM_HEADERS`, `ANTHROPIC_CUSTOM_HEADERS`) add
 no header to a request, and a provider is sent its own key only.
 
-The **API** is worked out from the address (Anthropic's for `api.anthropic.com`, OpenAI's for
-everything else) unless you choose it. An Anthropic-compatible service gets the plain Messages
+The **API** is worked out from the address (Anthropic's for `api.anthropic.com` and Chutes'
+`claude.chutes.ai`, Tinfoil's for `inference.tinfoil.sh` and its other hosts, OpenAI's for
+everything else) unless you choose it. **Tinfoil and Chutes are recognised by their address**,
+however it got into the settings (Add Tinfoil or Add Chutes, typed by hand, or an older
+`config.toml`): a Tinfoil address is always spoken in Tinfoil's end-to-end encrypted protocol,
+whatever the API is set to, and its API is saved as the address's; a Chutes `-TEE` model always
+goes end-to-end encrypted, whatever the provider speaks. No other client ever sends them in the
+clear. A Tinfoil or Chutes provider's model list is the service's public one, read without your
+key (Tinfoil's chat models with their prices and reasoning efforts; every model Chutes lists).
+On `claude.chutes.ai` the key goes as a bearer token, which is how Chutes' proxy takes it. An Anthropic-compatible service gets the plain Messages
 API request (messages, tools, system prompt, temperature) without Anthropic's own extras; if
 it has no model list, the provider's default model is the one offered. A provider set to the
 Anthropic API lists no `private/` models and can't be given one: those are only ever sent
@@ -935,13 +945,50 @@ out in [Security and privacy](docs/security-and-privacy.md).
 | Tier | Detected from | What the provider can see |
 |---|---|---|
 | **Standard** | anything else | Everything |
-| **TEE** | ids with `TEE` as one of their `/` parts (`TEE/…`, `…/tee/…`; case doesn't matter), ids starting `phala/`, and ids ending `-tee` or `:tee` | Attested before anything is sent (for most `TEE/` models, RedPill's gateway, which passes each request on to the machine that runs the model), but prompts pass NanoGPT's gateway **in the clear** |
-| **E2EE** | NanoGPT `private/…` ids, however written (`Private/…` too) | Ciphertext only, plus your account, the model, timing, sizes and usage |
+| **TEE** | Chutes' `-TEE` models on a Chutes provider (sealed end to end, partial privacy: see **Privacy levels** below); ids with `TEE` as one of their `/` parts (`TEE/…`, `…/tee/…`; case doesn't matter), ids starting `phala/`, and ids ending `-tee` or `:tee` | Attested before anything is sent (for most `TEE/` models, RedPill's gateway, which passes each request on to the machine that runs the model), but prompts pass NanoGPT's gateway **in the clear** |
+| **E2EE** | NanoGPT `private/…` ids, however written (`Private/…` too), and every model of a Tinfoil provider | Ciphertext only, plus your account, the model, timing, sizes and usage |
 | **Local** | a base URL on this machine or its local network (see **Local trusts your network** below), whatever the model is called | Nothing leaves your network |
 
-The first of these that applies is the tier: one you set for the model in the provider's Model
-overrides, then Local for any model at a local address, then E2EE for a `private/` id, then
-TEE, and Standard for the rest.
+The first of these that applies is the tier: an end-to-end encrypted model's (E2EE for a
+`private/` id and any Tinfoil model, TEE for a Chutes `-TEE` model), which no override changes;
+then one you set for the model in the provider's Model overrides; then Local for any model at a
+local address, then TEE, and Standard for the rest. A Chutes `-TEE` id is never taken for one of
+NanoGPT's TEE models: its attestation is Chutes' own (below), never asked of NanoGPT's TEE
+endpoints.
+
+**Privacy levels.** Every model says how private it is, beside its tier in the model picker, on
+the top bar and on each reply (hover it for what it means): **highest** (NanoGPT's `private/`
+models and Tinfoil's: end-to-end encrypted to an attested enclave whose software is measured),
+**partial** (NanoGPT's `TEE/` models, whose text passes NanoGPT's gateway in the clear, and
+Chutes' `-TEE` models, encrypted all the way to a key that rests on software Chutes signs), or
+**not private** (every other model, Chutes' others included: their provider can read your text).
+**A case moves only to a model at its level or higher**: once a reply came from a model with the
+highest privacy, choosing a Chutes, TEE or ordinary model for the case is refused, saying why
+(the model picker shows such a model greyed, with the reason); a case answered by a Chutes `-TEE`
+or `TEE/` model may move to either, or up. A case opened again while a less private model is
+chosen sends nothing until a model at its level is chosen. Start a new case to use a less private
+model. A Confidential case allows the highest privacy (and Local) only, not Chutes' partial.
+
+**Tinfoil direct (preliminary).** Every request to a Tinfoil provider is sealed on this computer
+to the key of Tinfoil's router enclave, attested first from Tinfoil's own attestation service
+(`atc.tinfoil.sh`) by Tinfoil's SDK, the same verifier as NanoGPT's `private/` models: the
+enclave's report must be the release Tinfoil published (Sigstore) and name this provider's host.
+The connection is pinned to the TLS key the attestation binds: a server whose key isn't it gets
+not one byte. The attestation is made again every five minutes; the top bar shows
+"🔐 attested, Tinfoil". Tinfoil sees your account, the model, timing, sizes and cost; that the
+router hands your request only to attested model enclaves is its published code.
+
+**Chutes' end-to-end encryption (preliminary).** A Chutes `-TEE` model's request is sealed
+(ML-KEM-768, ChaCha20-Poly1305) to the key of one Chutes instance, a TDX machine run by a
+third-party miner, after that instance is attested: its Intel TDX quote, for DA Toolkit's
+nonce, binds that key; NVIDIA vouches for its GPUs; its VM image is one Chutes publishes. An
+instance that fails any of these is left out and never sealed to. Replies stream, each piece held
+to its number: a piece dropped, repeated or out of its place is refused. Always **partial**: the
+program that makes and holds the key (Chutes' aegis library, a closed binary) is admitted by
+Chutes' signature, not measured, and the list of measured images is Chutes' own. The top bar shows
+"🔐 E2EE attested (Chutes) (partial)", with what each shortfall costs. Your Chutes key goes only
+to Chutes' own three hosts (`llm`, `api` and `claude.chutes.ai`), the one exception to a key
+going only to the address it was entered for.
 
 **Requests go over https, or not at all.** A base URL that is plain `http://` is accepted
 only for this machine and its local network, which is how a model server of your own is
