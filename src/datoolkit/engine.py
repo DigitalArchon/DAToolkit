@@ -1052,15 +1052,16 @@ class Engine:
         if refresh or provider_name not in self._models:
             client = None
             try:
-                client = self._client(prov)
                 if self._kind(prov) in ("tinfoil", "chutes"):
-                    # their public lists, read without the key: Tinfoil's chat models with their prices
-                    # and efforts, every model Chutes lists (claude.chutes.ai has no listing of its own)
+                    # their public lists, read without the key (none need be saved yet): Tinfoil's chat
+                    # models with their prices and efforts, every model Chutes lists (claude.chutes.ai
+                    # has no listing of its own)
+                    self._secure(prov)
                     ids, caps = await self._sealed_listing(prov)
                     self._caps[prov.name] = caps
                     self._caps_failed.pop(prov.name, None)
                     client = None
-                elif isinstance(client, AnthropicClient):
+                elif isinstance(client := self._client(prov), AnthropicClient):
                     ids, caps = await client.list_models_detailed()
                     if caps:
                         self._caps[prov.name] = caps

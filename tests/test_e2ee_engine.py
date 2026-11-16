@@ -343,3 +343,13 @@ def test_a_request_held_after_an_await_is_refused_once_the_case_was_answered_mor
     with pytest.raises(UserError, match=f"The model z-ai/glm-5.3 {HELD}"):
         engine._still_open(engine.case, nano, "z-ai/glm-5.3")
     assert engine._still_open(engine.case, nano, "private/glm-5-3") == "e2ee"
+
+
+async def test_a_tinfoil_or_chutes_provider_lists_its_models_before_a_key_is_saved(tmp_path):
+    engine = Engine(Config(providers=[Provider("T Lab", TINFOIL), Provider("C Lab", CLAUDE_CHUTES)]), lambda e: None,
+                    tmp_path / "rt", save_config=lambda c: None)
+    engine._sealed_states["T Lab"] = TinfoilState(TINFOIL, listing=Listing(TINFOIL, client=httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=TINFOIL_MODELS)))))
+    engine._caps_http = httpx.AsyncClient(transport=httpx.MockTransport(FakeChutes().handler))
+    assert "glm-5-3" in {m["id"] for m in await engine.list_models("T Lab")}
+    assert CHUTES_TEE in {m["id"] for m in await engine.list_models("C Lab")}
