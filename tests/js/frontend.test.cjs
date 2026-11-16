@@ -2213,3 +2213,81 @@ test("a host's address changed without a new password asks first whether the sav
   assert.equal(same.posts("/api/hosts").length, 1, "the same address: nothing asked");
   assert.equal(same.posts("/api/hosts").at(-1).body.use_saved_password, undefined);
 });
+
+// ------------------------------------------------------------------ Tinfoil and Chutes (provider round, Nov 2026)
+
+test("Settings offers Add Tinfoil and Add Chutes, each filling in its own address, with a tooltip saying what it is", async () => {
+  const app = await page("a");
+  app.call("openSettings");
+  await app.clock.tick(50);
+  const tinfoil = button(app.$(".modal"), "Add Tinfoil"), chutes = button(app.$(".modal"), "Add Chutes");
+  assert.match(tinfoil.title, /^Tinfoil's own API, end-to-end encrypted \(https:\/\/inference\.tinfoil\.sh\/v1\).*highest privacy/);
+  assert.match(chutes.title, /^Chutes \(https:\/\/llm\.chutes\.ai\/v1\).*-TEE models are always sent end-to-end encrypted \(partial privacy, preliminary\); its others aren't private\./);
+  tinfoil.click();
+  await app.clock.tick(0);
+  const inputs = app.$(".modal").querySelectorAll("input[type=text]");
+  assert.equal(inputs[0].value, "Tinfoil");
+  assert.equal(inputs[1].value, "https://inference.tinfoil.sh/v1");
+  assert.match(app.$(".modal .content").textContent, /Tinfoil's own API, end-to-end encrypted \(preliminary\).*whatever the API is set to/);
+});
+
+test("a Tinfoil or Chutes address typed by hand is recognised, whatever the API chosen", async () => {
+  const app = await page("a");
+  app.call("openSettings");
+  await app.clock.tick(50);
+  button(app.$(".modal"), "Add other OpenAI-compatible").click();
+  await app.clock.tick(0);
+  const url = app.$(".modal").querySelectorAll("input[type=text]")[1];
+  await app.type(url, "https://INFERENCE.tinfoil.sh./v1");
+  assert.match(app.$(".modal .content").textContent, /Tinfoil's own API, end-to-end encrypted/);
+  await app.type(url, "https://llm.chutes.ai/v1");
+  assert.match(app.$(".modal .content").textContent, /Sent as OpenAI chat completions\. Chutes \(preliminary\): its -TEE models are always sent end-to-end encrypted/);
+  const again = await page("a");
+  again.call("openSettings");
+  await again.clock.tick(50);
+  button(again.$(".modal"), "Add Chutes").click();
+  await again.clock.tick(0);
+  await again.type(again.$(".modal").querySelectorAll("input[type=text]")[1], "https://claude.chutes.ai");
+  assert.match(again.$(".modal .content").textContent, /Anthropic's Messages API through Chutes' own proxy, the key as a bearer token\. Chutes \(preliminary\)/);
+  assert.equal(app.call("kindOf", "https://proxy.example/v1", "tinfoil"), "tinfoil");
+  assert.equal(app.call("apiOf", "https://inference.tinfoil.sh/v1", "anthropic"), "tinfoil");
+  assert.equal(app.call("apiOf", "https://llm.chutes.ai/v1", ""), "openai");
+  assert.equal(app.call("kindOf", "https://chutes.ai.example/v1"), "");
+});
+
+test("Chutes' attestation reads partial with what it costs, and Tinfoil's names Tinfoil", async () => {
+  const app = await page("a");
+  const chutes = app.call("attestLabel", { status: "verified", service: "chutes", headline: "E2EE attested (Chutes)",
+    level: "partial", what: "Sealed on this computer to the key of one Chutes instance", summary: "partially verified: w",
+    detail: "3 of 3 instances", costs: ["The workload holding the key unmeasured: …"] });
+  assert.equal(chutes.text, "🔐 E2EE attested (Chutes) (partial)");
+  assert.equal(chutes.cls, "warn");
+  assert.match(chutes.title, /^Partial privacy\. Sealed on this computer.*The workload holding the key unmeasured/s);
+  const tinfoil = app.call("attestLabel", { status: "verified", service: "tinfoil", what: "Attested: Tinfoil's router enclave", summary: "s", hpke_key_sha256: "ab" });
+  assert.equal(tinfoil.text, "🔐 attested, Tinfoil");
+  assert.match(tinfoil.title, /^Highest privacy\. Attested: Tinfoil's router enclave/);
+});
+
+test("the privacy level is shown on the top bar, in the model picker and on each reply", async () => {
+  const pv = (level, service, note) => ({ kind: level === "none" ? "" : "sealed", service, level, level_words: level, note });
+  const app = await page("a", (s) => {
+    s.active = { ...(s.active || {}), provider: "Fake", kind: "chutes", kind_label: "Chutes", model: "q/M-TEE",
+      privacy: pv("partial", "chutes", "Partial privacy. End-to-end encrypted to one Chutes instance"),
+      case_privacy: { level: "highest", level_words: "Highest privacy" } };
+    s.chat = [{ kind: "assistant", text: "hi", model: "glm-5-3", tier: "e2ee", privacy: pv("highest", "tinfoil", "Highest privacy. Tinfoil") }];
+  }, { "GET /api/models": () => ({ models: [
+    { id: "q/M-TEE", tier: "tee", allowed: true, vision: true, privacy: pv("partial", "chutes", "Partial privacy.") },
+    { id: "plain/M", tier: "standard", allowed: false, why: "plain/M isn't end-to-end encrypted, so it has no privacy, and this case is kept to the highest privacy", vision: true, privacy: pv("none", "", "Not private.") },
+  ] }) });
+  const badge = app.$("#privacy-badge");
+  assert.equal(badge.textContent, "🔐 partial privacy (Chutes)");
+  assert.match(badge.title, /^Partial privacy\. End-to-end encrypted to one Chutes instance.*moves only to a model at that level or higher/s);
+  assert.match(app.$("#chat-log").textContent, /🔐 highest privacy \(Tinfoil\)/);
+  app.call("pickModel", { title: "Model", onPick: () => {} });
+  await app.clock.tick(50);
+  const rows = app.$(".modal").querySelectorAll(".model-row");
+  assert.match(rows[0].textContent, /partial privacy \(Chutes\)/);
+  const blocked = rows.find((r) => r.textContent.includes("plain/M"));
+  assert.match(blocked.textContent, /not private/);
+  assert.match(blocked.title, /kept to the highest privacy/);
+});

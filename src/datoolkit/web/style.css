@@ -560,6 +560,13 @@ button[data-needs-vision]:disabled { opacity: .35; }
 .prov-chip.k-openrouter { color: #b9a2f0; border-color: #5b4a86; }
 .prov-chip.k-local { color: var(--local); border-color: #2c6e50; }
 .prov-chip.k-training { color: var(--muted); }
+.prov-chip.k-tinfoil { color: #b79bf2; border-color: #6b3fc4; }
+.prov-chip.k-chutes { color: #e6c36a; border-color: #7d6a2c; }
+/* how private a model is (llm/privacy.py): highest, partial, none */
+.privacy { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); vertical-align: 1px; }
+.privacy.hidden { display: none; }
+.privacy.highest { color: #fff; background: #6b3fc4; border-color: #6b3fc4; }
+.privacy.partial { color: var(--tee); border-color: var(--tee); }
 #route-btn.on { color: var(--accent); }
 #search-chip { color: var(--warn); }
 .route-badge { font-size: 11px; color: var(--accent); margin-left: 6px; }

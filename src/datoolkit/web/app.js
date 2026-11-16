@@ -753,6 +753,12 @@ function renderTop() {
   const tb = $("#tier-badge");
   tb.textContent = st.active_tier || "";
   tb.className = `badge ${st.active_tier || ""}`;
+  const pb = $("#privacy-badge");
+  const chip = privacyChip(act?.model ? act.privacy : null);
+  pb.className = chip ? chip.className : "privacy hidden";
+  pb.textContent = chip ? chip.textContent : "";
+  pb.title = chip ? chip.title + (act.case_privacy?.level && act.case_privacy.level !== "none"
+    ? `\n\nThis case was answered with ${act.case_privacy.level_words.toLowerCase()}: it moves only to a model at that level or higher.` : "") : "";
   const ab = $("#attest-btn");
   const att = st.attestation && st.attestation.model === st.config.active_model ? st.attestation : null;
   const lab = attestLabel(att);
@@ -774,6 +780,21 @@ function renderTop() {
 // What was attested leads (att.what, llm/tee.py what_was_attested): for most TEE models it is
 // RedPill's gateway, which passes each request on, and the machine that runs the model is its word.
 const TEE_CLEAR = "The text passes NanoGPT's servers in the clear. A private/ model is end-to-end encrypted instead.";
+// The services' own addresses (llm/privacy.py): what Add Tinfoil and Add Chutes fill in.
+const TINFOIL_BASE_URL = "https://inference.tinfoil.sh/v1";
+const CHUTES_BASE_URL = "https://llm.chutes.ai/v1";
+// What the provider form says of each (llm/privacy.py TINFOIL_NOTE, CHUTES_NOTE, CHUTES_PLAIN_NOTE).
+const TINFOIL_NOTE = "Tinfoil's own API, end-to-end encrypted (preliminary): every request is sealed on this machine to the key of Tinfoil's attested router enclave and sent over a connection pinned to the enclave's attested TLS key. Highest privacy, whatever the API is set to. The model list is read without the key.";
+const CHUTES_PROVIDER_NOTE = "Chutes (preliminary): its -TEE models are always sent end-to-end encrypted to an attested Chutes instance (partial privacy: the program that holds the key is Chutes' signed, closed binary, not measured); its other models aren't private, Chutes reads their text. The key goes only to Chutes' own hosts (llm, api and claude.chutes.ai).";
+const PRIVACY_CHIP = { highest: "🔐 highest privacy", partial: "partial privacy", none: "not private" };
+// How private a model is (llm/privacy.py, engine.py _privacy_view): a chip saying its level, the
+// level's own note in its tooltip, wherever a model is chosen or a reply is marked.
+function privacyChip(pv, extra = "") {
+  if (!pv?.level) return null;
+  const text = pv.level === "partial" && pv.service === "chutes" ? "🔐 partial privacy (Chutes)" :
+    pv.level === "highest" && pv.service === "tinfoil" ? "🔐 highest privacy (Tinfoil)" : PRIVACY_CHIP[pv.level];
+  return h("span", { class: `privacy ${pv.level}`, title: `${pv.note || pv.level_words || ""}${extra}` }, text);
+}
 // Settings → Model, under "Name the provider behind each TEE reply" (off by default): what it does,
 // and whom it tells (SealedLore's TEE_UPSTREAMS_NOTE, 44e145d).
 const TEE_UPSTREAMS_NOTE = "Most TEE models are attested as RedPill's gateway, which passes each request on to the provider that runs the model. With this on, after a TEE reply checks out DA Toolkit asks RedPill which provider that was (Phala, Fortanix, NEAR AI, 0G, Tinfoil…) and shows it beside the reply's mark. This connects to api.redpill.ai directly, not through NanoGPT, so RedPill sees this computer's internet address and that one of its models was used around then. Only the session's id is sent, never your messages or your key. It is one small download per model about an hour, and never for models Chutes serves, whose records are megabytes each. What it names is RedPill's word, matched to the receipt the attested gateway signed.";
@@ -794,6 +815,16 @@ function attestLabel(att) {
     title: tee ? "Verifying the enclave: Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict…" : "Verifying the enclave…" };
   if (att.status === "failed") return { text: tee ? "⚠ TEE attestation refused" : "⚠ attestation failed", cls: "bad", title: `${att.error}\nNothing is sent to it until attestation succeeds.` };
   if (att.status === "retired") return { text: "⚠ no longer offered", cls: "bad", title: `${att.error}.\nNothing is sent to it.${att.offered?.length ? `\nStill offered: ${att.offered.join(", ")}` : ""}` };
+  if (att.service === "chutes") {
+    // Chutes' own end-to-end encryption: always partial (llm/tee.py WORKLOAD_UNMEASURED, MEASUREMENTS_LISTED)
+    return { text: `🔐 ${att.headline || "E2EE attested (Chutes)"} (partial)`, cls: "warn",
+      title: `Partial privacy. ${att.what ? `${att.what}\n\n` : ""}${att.summary}.\n${att.detail}.`
+        + (att.costs?.length ? `\n\n${att.costs.join("\n\n")}` : "") };
+  }
+  if (att.service === "tinfoil") {
+    return { text: att.latest_release ? "🔐 attested, Tinfoil (older release)" : "🔐 attested, Tinfoil", cls: "ok",
+      title: `Highest privacy. ${att.what || att.summary}\n${att.summary}\nKey sha256: ${(att.hpke_key_sha256 || "").slice(0, 16)}…` };
+  }
   if (tee) {
     const partial = att.level === "partial";
     // "TEE gateway attested" where RedPill's gateway is what was attested, not the model's machine
@@ -938,9 +969,19 @@ function askInTheClear(where) {
     setTimeout(() => box.querySelector(".buttons button")?.focus(), 40);
   });
 }
-function kindOf(u) {
-  const host = hostOf(u);
+// A provider's kind by its address, as llm/providers.py kind_of reads it (the kinds the form needs):
+// Tinfoil's host, or the Tinfoil protocol chosen, whatever else; Chutes' hosts.
+function kindOf(u, api = "") {
+  const host = hostOf(u).replace(/\.$/, "");
+  if (api === "tinfoil" || /(^|\.)tinfoil\.sh$/.test(host)) return "tinfoil";
+  if (/(^|\.)chutes\.(ai|dev)$/.test(host)) return "chutes";
   return /(^|\.)nano-gpt\.com$/.test(host) ? "nanogpt" : /(^|\.)openrouter\.ai$/.test(host) ? "openrouter" : "";
+}
+// The API a provider speaks, as llm/privacy.py chat_api reads it.
+function apiOf(u, api = "") {
+  if (kindOf(u, api) === "tinfoil") return "tinfoil";
+  if (api) return api;
+  return /(^|\.)(api\.anthropic\.com|claude\.chutes\.ai)$/.test(hostOf(u).replace(/\.$/, "")) ? "anthropic" : "openai";
 }
 // A token count as typed (engine.parse_tokens): 32768, 32k, 1.5M; 0 when it isn't one.
 function parseTokens(v) {
@@ -1062,6 +1103,7 @@ function renderEntry(e, live = false, parts = null) {
   // assistant (final or streaming)
   const who = h("div", { class: "who" }, "AI", e.model ? ` · ${e.model}` : "",
     e.tier ? h("span", { class: `badge ${e.tier}` }, e.tier) : null,
+    e.privacy ? [" ", privacyChip(e.privacy)] : null,
     e.served_by ? h("span", { class: "small warn", title: `${e.model} declined part of this request, so Anthropic had ${e.served_by} answer it (the refusal fallback).` }, ` answered by ${e.served_by}`) : null,
     e.route ? h("span", { class: `route-badge ${e.route.met === false ? "bad" : e.route.met ? "ok" : ""}`, title: `Route: ${e.route.label}.${e.route.why ? `\n${e.route.why}` : ""}` },
       e.route.met === false ? "⚠ route not followed" : "⚡ routed") : null,
@@ -3996,7 +4038,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
   const sens = st.case?.sensitivity || "open";
   const legend = {
     open: "Open case: all tiers allowed.",
-    confidential: "Confidential case: only E2EE (private/…) and Local models are allowed.",
+    confidential: "Confidential case: only E2EE models with the highest privacy (NanoGPT's private/…, Tinfoil's) and Local models are allowed.",
     sovereign: "Sovereign case: only Local models are allowed.",
   }[sens];
   let m;
@@ -4008,7 +4050,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     shown.sort((a, b) => (b.allowed - a.allowed) || ((recent.indexOf(a.id) + 1 || 99) - (recent.indexOf(b.id) + 1 || 99)) || a.id.localeCompare(b.id));
     listEl.replaceChildren(...shown.slice(0, 400).map((x, i) => h("div", {
       class: `model-row${x.allowed ? "" : " blocked"}${x.id === curModel && prov === curProv ? " current" : ""}`,
-      title: x.allowed ? x.id : `Not permitted for a ${sens} case`,
+      title: x.allowed ? x.id : x.why || `Not permitted for a ${sens} case`,
       role: "option", tabindex: i ? -1 : 0, "aria-selected": String(x.id === curModel && prov === curProv), "aria-disabled": x.allowed ? null : "true",
       onclick: async () => {
         if (!x.allowed) return;
@@ -4020,6 +4062,7 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
     x.tested ? h("span", { class: "cap tested", title: `DA Toolkit's prompts were tested with this model (evaluation of ${S.state.model_notes?.evaluated || "2026-10-10"}). ${x.tested}` }, "✓ tested") : null,
     h("span", { class: `cap${x.vision ? "" : " off"}`, title: x.vision === true ? "Reads images" : x.vision === false ? "Text only: can't read images" : "Unknown whether it reads images (set it under Settings → AI providers)" },
       x.vision === true ? "👁" : x.vision === false ? "text only" : "?"),
+    privacyChip(x.privacy),
     h("span", { class: `badge ${x.tier}` }, x.tier))));
     if (!shown.length) {
       listEl.append(h("div", { class: "muted" }, pool.length || !filter ? "No matching models." : `No ${filterNote || "matching"} models from ${prov}.`));
@@ -4203,6 +4246,8 @@ function openSettings(tab = "providers") {
       h("div", { class: "row wrap" },
         preset("Add NanoGPT", "NanoGPT", "https://nano-gpt.com/api/v1", "", { class: "primary" }),
         preset("Add Anthropic", "Anthropic", "https://api.anthropic.com", "anthropic", { title: "Anthropic's own API: Claude with its reasoning shown, prompt caching, and Anthropic's own web search if you choose it (Settings → General)" }),
+        preset("Add Tinfoil", "Tinfoil", TINFOIL_BASE_URL, "", { title: `Tinfoil's own API, end-to-end encrypted (${TINFOIL_BASE_URL}): its address filled in, your Tinfoil key to type. Every model on it has the highest privacy (preliminary).` }),
+        preset("Add Chutes", "Chutes", CHUTES_BASE_URL, "", { title: `Chutes (${CHUTES_BASE_URL}): every model it lists, its address filled in, your Chutes key to type. Its -TEE models are always sent end-to-end encrypted (partial privacy, preliminary); its others aren't private.` }),
         preset("Add OpenRouter", "OpenRouter", "https://openrouter.ai/api/v1", ""),
         preset("Add WaveSpeed", "WaveSpeed", "https://llm.wavespeed.ai/v1", ""),
         preset("Add local (Ollama / LM Studio / vLLM)", "Local", "http://localhost:11434/v1", "")),
@@ -4216,7 +4261,7 @@ function openSettings(tab = "providers") {
     const name = h("input", { type: "text", value: p.name, placeholder: "A name you'll recognise, e.g. Anthropic" });
     const url = h("input", { type: "text", value: p.base_url, placeholder: "https://…" });
     const apiSel = h("select", {}, [["", "Worked out from the address"], ["openai", "OpenAI-compatible (chat completions)"],
-      ["anthropic", "Anthropic Messages API"]].map(([v, l]) => h("option", { value: v, selected: v === (p.api || "") }, l)));
+      ["anthropic", "Anthropic Messages API"], ["tinfoil", "Tinfoil, end-to-end encrypted"]].map(([v, l]) => h("option", { value: v, selected: v === (p.api || "") }, l)));
     const key = h("input", { type: "password", autocomplete: "off",
       placeholder: p.has_key ? "Stored in keyring — leave blank to keep" : "Paste API key (stored in the OS keyring)" });
     const models = [];                              // from the provider's model list, once loaded
@@ -4243,6 +4288,14 @@ function openSettings(tab = "providers") {
     };
     const apiNote = h("div", { class: "muted small" });
     const showApi = () => {
+      // recognised by the address, however it got here (a preset, typed, an older config): Tinfoil's
+      // host is spoken in Tinfoil's protocol whatever is chosen (llm/privacy.py, when in doubt, sealed)
+      const service = kindOf(url.value, apiSel.value);
+      if (service === "tinfoil") { apiNote.textContent = TINFOIL_NOTE; return; }
+      if (service === "chutes") {
+        apiNote.textContent = `${apiOf(url.value, apiSel.value) === "anthropic" ? "Sent as Anthropic's Messages API through Chutes' own proxy, the key as a bearer token. " : "Sent as OpenAI chat completions. "}${CHUTES_PROVIDER_NOTE}`;
+        return;
+      }
       const anth = apiSel.value === "anthropic" || (!apiSel.value && /(^|\.)anthropic\.com$/.test(hostOf(url.value)));
       const official = /(^|\.)anthropic\.com$/.test(hostOf(url.value));
       apiNote.textContent = anth ? (official
@@ -4387,7 +4440,7 @@ function openSettings(tab = "providers") {
       h("div", { class: "muted small" }, "For a model whose tier, image support or context window DA Toolkit gets wrong, or that the provider doesn't report (local models, mostly). Leave a column on Auto to keep what is detected (shown in brackets once the model list is loaded)."),
       table,
       h("div", { class: "row" }, h("button", { type: "button", class: "small", onclick: () => addRow().focus() }, "Add a model"), loadBtn),
-      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict; for most TEE models what is attested is RedPill's gateway, which passes each request on to the machine that runs the model) and each reply's signed record checked where its provider signs one (Chutes signs none), but the prompt passes NanoGPT's gateway in the clear (TEE/, phala/); E2EE = sealed on this machine to an attested enclave (NanoGPT private/… models only, attested with Tinfoil's verifier; never set by hand); LOCAL = your own hardware (localhost/private IP URLs). Marking a cloud model Local lets Confidential and Sovereign cases use it: only do so for a model that really runs on your own hardware."),
+      h("div", { class: "muted small" }, "Tiers: STANDARD = normal cloud; TEE = attested before anything is sent (Intel TDX quote, Intel's revocation lists and TCB, NVIDIA's GPU verdict; for most TEE models what is attested is RedPill's gateway, which passes each request on to the machine that runs the model) and each reply's signed record checked where its provider signs one (Chutes signs none), but the prompt passes NanoGPT's gateway in the clear (TEE/, phala/), and Chutes' -TEE models, sealed end to end to an attested Chutes instance whose key rests on software Chutes signs: both partial privacy; E2EE = the highest privacy, sealed on this machine to an attested enclave whose software is measured (NanoGPT private/… models and every model of a Tinfoil provider, attested with Tinfoil's verifier; never set by hand); LOCAL = your own hardware (localhost/private IP URLs). Marking a cloud model Local lets Confidential and Sovereign cases use it: only do so for a model that really runs on your own hardware."),
       held, status,
       h("div", { class: "row" },
         h("button", { onclick: () => guarded(() => reshow("providers")) }, "Back"),
