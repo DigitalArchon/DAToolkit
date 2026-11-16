@@ -2291,3 +2291,35 @@ test("the privacy level is shown on the top bar, in the model picker and on each
   assert.match(blocked.textContent, /not private/);
   assert.match(blocked.title, /kept to the highest privacy/);
 });
+
+test("a Chutes key moved between Chutes' own hosts isn't asked about; anywhere else it is", async () => {
+  const save = async (from, to) => {
+    const app = await page("a", (s) => {
+      const p = s.config.providers.find((x) => x.name === "Fake");
+      p.base_url = from;
+      p.key_origin = app_origin(from);
+    }, { "POST /api/providers": () => ({ ok: true }) });
+    app.call("openSettings");
+    await app.clock.tick(0);
+    const item = app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("Fake"));
+    button(item, "Edit").click();
+    await app.clock.tick(0);
+    assert.doesNotMatch(app.$(".modal .content").textContent, /The saved API key is for/, "the form says nothing is held");
+    const url = app.$(".modal").querySelectorAll("input").find((i) => i.placeholder === "https://…");
+    url.value = to;
+    button(app.$(".modal"), "Save").click();
+    await app.clock.tick(0);
+    return app;
+  };
+  const app_origin = (u) => { const x = new URL(u); return `${x.protocol}//${x.hostname}:${x.port || 443}`; };
+  const quiet = await save("https://llm.chutes.ai/v1", "https://claude.chutes.ai");
+  assert.ok(!quiet.document.querySelectorAll(".modal h2").some((h) => /Use the saved API key/.test(h.textContent)));
+  assert.equal(quiet.posts("/api/providers").length, 1);
+  assert.equal(quiet.posts("/api/providers")[0].body.use_saved_key, undefined);
+  const asked = await save("https://llm.chutes.ai/v1", "https://chutes.example.com/v1");
+  assert.equal(asked.document.querySelectorAll(".modal").at(-1).querySelector("h2").textContent,
+    "Use the saved API key with chutes.example.com?");
+  assert.equal(asked.call("keyReaches", "https://api.chutes.ai:443", "https://llm.chutes.ai:443"), true);
+  assert.equal(asked.call("keyReaches", "https://llm.chutes.ai:443", "http://llm.chutes.ai:80"), false);
+  assert.equal(asked.call("keyReaches", "https://inference.tinfoil.sh:443", "https://router-0.tinfoil.sh:443"), false);
+});

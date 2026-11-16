@@ -934,6 +934,14 @@ function hostOrigin(kind, host, port, ssl) {
   const dflt = { ssh: 22, rdp: 3389 }[kind] || (ssl ? 5986 : 5985);
   return `${k}://${String(host ?? "").trim().toLowerCase()}:${port || dflt}`;
 }
+// Chutes' own three hosts, as llm/privacy.py CHUTES_KEY_ORIGINS writes them: a Chutes key saved for one
+// goes to the others too, over https, the one stated exception to a key going only where it was entered.
+const CHUTES_KEY_ORIGINS = ["https://llm.chutes.ai:443", "https://api.chutes.ai:443", "https://claude.chutes.ai:443"];
+// Whether a key saved for `was` goes to `now` (llm/privacy.py key_may_go): the same origin, or, for a
+// Chutes key, another of Chutes' own hosts, which isn't asked about.
+function keyReaches(was, now) {
+  return !!was && (was === now || (CHUTES_KEY_ORIGINS.includes(was) && CHUTES_KEY_ORIGINS.includes(now)));
+}
 // An origin as said to the technician, without its scheme's own port (netguard.shown_origin).
 function shownOrigin(o) { return String(o || "").replace(/^(https:\/\/.*):443$|^(http:\/\/.*):80$/, "$1$2"); }
 // A saved key or password goes only where it was entered for (engine._key_problem): an address
@@ -4272,7 +4280,7 @@ function openSettings(tab = "providers") {
     const held = h("div", { class: "muted small" });
     const showHeld = () => {
       const was = p.key_origin ?? originOf(p.base_url), now = originOf(p.base_url);
-      held.replaceChildren(...(!p._new && p.has_key && was && was !== now
+      held.replaceChildren(...(!p._new && p.has_key && was && !keyReaches(was, now)
         ? [`The saved API key is for ${shownOrigin(was)}, not sent to ${hostOf(p.base_url) || p.base_url}. Type the key again above for this address, or `,
           h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
             await save(true);
@@ -4404,7 +4412,7 @@ function openSettings(tab = "providers") {
       // once for an address (a No kept: p.key_declined)
       const here = originOf(body.provider.base_url);
       const was = p.key_origin ?? originOf(p.base_url);
-      if (!p._new && p.has_key && !body.api_key && here !== was && (ask || here !== p.key_declined)) {
+      if (!p._new && p.has_key && !body.api_key && !keyReaches(was, here) && (ask || here !== p.key_declined)) {
         body.use_saved_key = await askUseSaved("API key", hostOf(body.provider.base_url) || body.provider.base_url);
       }
       const keyOrigin = body.api_key || body.use_saved_key ? here : p.key_origin ?? was;
