@@ -967,7 +967,10 @@ highest privacy, choosing a Chutes, TEE or ordinary model for the case is refuse
 (the model picker shows such a model greyed, with the reason); a case answered by a Chutes `-TEE`
 or `TEE/` model may move to either, or up. A case opened again while a less private model is
 chosen sends nothing until a model at its level is chosen. Start a new case to use a less private
-model. A Confidential case allows the highest privacy (and Local) only, not Chutes' partial.
+model. The vision helper, the second-opinion reviewer and the research model are held to the same
+rule: one less private than the case is given nothing of it (no image, no command to review, no
+brief), and says why where it would be used. A Confidential case allows the highest privacy (and
+Local) only, not Chutes' partial.
 
 **Tinfoil direct (preliminary).** Every request to a Tinfoil provider is sealed on this computer
 to the key of Tinfoil's router enclave, attested first from Tinfoil's own attestation service

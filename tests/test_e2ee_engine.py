@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import httpx
 import pytest
@@ -263,3 +264,82 @@ def test_a_private_model_keeps_its_own_client(tmp_path):
     engine = engine_with(tmp_path, nano)
     assert isinstance(engine._client(nano, "private/glm-5-3"), PrivateModeClient)
     assert isinstance(engine._client(nano, "TEE/glm-5.3"), LLMClient)
+
+
+# --- the helpers: nothing of a case goes to a model less private than it was answered with ----------
+
+
+def kept_highest(tmp_path, *extra: Provider) -> tuple[Engine, Provider]:
+    tin = Provider("T Lab", TINFOIL)
+    engine = engine_with(tmp_path, tin, *extra)
+    engine._start_attestation = lambda *a, **k: None
+    engine.new_case("client H", "open")
+    engine.chat.append({"kind": "assistant", "text": "x", **engine._privacy_view(tin, "glm-5-3")})
+    engine.cfg.active_provider, engine.cfg.active_model = "T Lab", "glm-5-3"
+    return engine, tin
+
+
+HELD_WORDS = ("has no privacy (not end-to-end encrypted or TEE: not private), and this case is kept to the highest "
+        "privacy, so nothing of the case goes to it: choose a ")
+HELD = re.escape(HELD_WORDS)
+
+
+async def test_the_vision_helper_less_private_than_the_case_gets_no_image(tmp_path):
+    nano = Provider("N Lab", NANO, vision_overrides={"z-ai/vision": "yes"})
+    engine, tin = kept_highest(tmp_path, nano)
+    tin.vision_overrides = {"glm-5-3": "no"}
+    engine.cfg.settings.vision_model = "N Lab|z-ai/vision"
+    status = engine.vision_status()
+    assert status["mode"] == "none" and f"The vision helper z-ai/vision {HELD_WORDS}vision helper at that level" in status["why"]
+    with pytest.raises(UserError, match="The vision helper z-ai/vision has no privacy"):
+        await engine._describe_image("a.png", "data:image/png;base64,AAAA", "")
+    engine.cfg.settings.vision_model = "N Lab|private/vision"
+    nano.vision_overrides["private/vision"] = "yes"
+    assert engine.vision_status()["mode"] == "helper", "a helper at the case's level"
+
+
+async def test_the_reviewer_less_private_than_the_case_reviews_nothing(tmp_path):
+    nano = Provider("N Lab", NANO)
+    engine, _tin = kept_highest(tmp_path, nano)
+    engine.cfg.settings.review_model = "N Lab|z-ai/glm-5.3"
+    for auto in (False, True):
+        with pytest.raises(UserError, match=f"The reviewer z-ai/glm-5.3 {HELD}"):
+            engine._review_target(auto)
+    engine.cfg.settings.review_model = "N Lab|TEE/glm-5.3"
+    with pytest.raises(UserError, match="has partial privacy .* kept to the highest privacy"):
+        engine._review_target()
+    engine.cfg.settings.review_model = "N Lab|private/glm-5-3"
+    assert engine._review_target()[1] == "private/glm-5-3"
+
+
+async def test_the_research_model_less_private_than_the_case_gets_no_brief(tmp_path):
+    nano = Provider("N Lab", NANO)
+    engine, _tin = kept_highest(tmp_path, nano)
+    engine.cfg.settings.research_model = "N Lab|anthropic/claude-sonnet-5.5"
+    with pytest.raises(UserError, match=f"The research model anthropic/claude-sonnet-5.5 {HELD}"):
+        await engine._research_target()
+    engine._models["N Lab"] = ["anthropic/claude-sonnet-5.5"]
+    engine.cfg.settings.research_model = ""
+    engine._search_provider = lambda: nano
+    with pytest.raises(UserError, match="research model anthropic/claude-sonnet-5.5 has no privacy"):
+        await engine._research_target()
+
+
+async def test_compaction_and_write_ups_go_only_to_the_chat_model_at_the_cases_level(tmp_path):
+    nano = Provider("N Lab", NANO)
+    engine, _tin = kept_highest(tmp_path, nano)
+    engine.conv = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"},
+                   {"role": "user", "content": "z"}, {"role": "assistant", "content": "w"}]
+    engine.cfg.active_provider, engine.cfg.active_model = "N Lab", "z-ai/glm-5.3"
+    with pytest.raises(UserError, match="^Nothing was sent. z-ai/glm-5.3 isn't end-to-end encrypted"):
+        await engine.ticket_summary()
+    with pytest.raises(UserError, match="^Nothing was sent"):
+        await engine._compact_preview(0)
+
+
+def test_a_request_held_after_an_await_is_refused_once_the_case_was_answered_more_privately(tmp_path):
+    nano = Provider("N Lab", NANO)
+    engine, _tin = kept_highest(tmp_path, nano)
+    with pytest.raises(UserError, match=f"The model z-ai/glm-5.3 {HELD}"):
+        engine._still_open(engine.case, nano, "z-ai/glm-5.3")
+    assert engine._still_open(engine.case, nano, "private/glm-5-3") == "e2ee"

@@ -1254,6 +1254,9 @@ class Engine:
             tier = self._check_tier(prov, model)
         except UserError as e:
             return f"The vision helper {model} isn't allowed here: {e}"
+        held = self._helper_problem(prov, model, "vision helper")
+        if held:
+            return held
         if self.vision_of(prov, model) is False:
             return f"The vision helper {model} can't read images itself."
         return prov, model, tier
@@ -4204,7 +4207,7 @@ class Engine:
             prov = self.cfg.provider(pname)
             if not prov:
                 raise UserError(f"The research model's provider {pname} no longer exists (Settings → Model).")
-            return prov, model, self._tier(prov, model)
+            return self._research_held(prov, model)
         prov = self._search_provider()
         if not prov:
             raise UserError("Research needs a NanoGPT provider.")
@@ -4220,6 +4223,14 @@ class Engine:
                 raise UserError(f"{prov.name} lists no Claude Sonnet 5.5 or 5; choose a research model in Settings → Model.")
             self._research_auto[prov.name] = pick
         model = self._research_auto[prov.name]
+        return self._research_held(prov, model)
+
+    def _research_held(self, prov: Provider, model: str) -> tuple[Provider, str, str]:
+        """The research model, unless it is less private than the open case was answered with: the
+        brief it is given is the case's, written from it (_helper_problem)."""
+        held = self._helper_problem(prov, model, "research model")
+        if held:
+            raise UserError(held)
         return prov, model, self._tier(prov, model)
 
     async def _research_complete(self, prov: Provider, model: str, tier: str, purpose: str, checks: list):
@@ -4734,6 +4745,19 @@ class Engine:
         higher, so a private/ one never to Chutes, nor a TEE/ one to an ordinary model)."""
         return privacy_mod.move_refusal(self._kept_privacy(), self._privacy(prov, model), model, what="this case",
                                         way_out="or start a new case")
+
+    def _helper_problem(self, prov: Provider, model: str, role: str) -> str | None:
+        """Why nothing of the open case goes to `model` on `prov` as its `role` (the vision helper,
+        the reviewer, the research model): a model less private than the case was answered with
+        (`_kept_privacy`) is given none of it, in words naming the helper, its level and the case's
+        (the author's rule: nothing of a conversation goes where its model is less private than it
+        was made, SealedLore's privacy.holds). None when it is as private or more."""
+        kept, found = self._kept_privacy(), self._privacy(prov, model)
+        if privacy_mod.rank(found) >= privacy_mod.rank(kept):
+            return None
+        return (f"The {role} {model} has {privacy_mod.level_phrase(found)} ({privacy_mod.service_words(found)}), and "
+                f"this case is kept to {privacy_mod.level_phrase(kept)}, so nothing of the case goes to it: choose a "
+                f"{role} at that level or higher in Settings → Model ({privacy_mod.LEVEL_CHOICES[kept.level]}).")
 
     def _privacy_view(self, prov: Provider, model: str) -> dict:
         """How private `model` is on `prov`, as an attestation, a reply or a model list shows it and
@@ -5606,7 +5630,11 @@ class Engine:
         model. Returns the model's tier."""
         if self.case is not case:
             raise UserError("The case changed before the request was sent; nothing was sent.")
-        return self._check_tier(prov, model)
+        tier = self._check_tier(prov, model)
+        held = self._helper_problem(prov, model, "model")     # a reply at a higher level meanwhile
+        if held:
+            raise UserError(held)
+        return tier
 
     async def _document(self, purpose: str, system_prompt: str, filename: str) -> dict:
         # Not a turn, so the technician can close the dialog and open another case meanwhile:
@@ -5657,6 +5685,9 @@ class Engine:
             rprov = self.cfg.provider(pname)
             if rprov:
                 rtier = self._check_tier(rprov, rmodel)
+                held = self._helper_problem(rprov, rmodel, "reviewer")
+                if held:
+                    raise UserError(held)
                 return rprov, rmodel, rtier, (rprov.name, rmodel) != (self.cfg.active_provider, self.cfg.active_model)
             if auto:
                 raise UserError(f"The reviewer's provider {pname} no longer exists; choose a reviewer in Settings → Model.")

@@ -327,7 +327,12 @@ NanoGPT's gateway) and Chutes' `-TEE` models (encrypted all the way, to a key th
 software Chutes signs); **not private**, every other model. A case keeps the level of its latest
 reply: it moves only to a model at that level or higher, and is refused, in words naming the
 levels, a less private one (choosing it, or sending to it after the case was opened again). So a
-`private/` or Tinfoil case never moves to Chutes. Marking a cloud model Local lets Confidential and Sovereign cases use it, so
+`private/` or Tinfoil case never moves to Chutes. The same holds for every other model given
+something of the case: the vision helper (an image and its message), the second-opinion reviewer,
+the research model (its brief), compaction and write-ups (the chat model's). One less private than
+the case is given nothing, saying which helper, its level and the case's, and the model picker
+greys it with the reason. Web search queries aren't held to it: each one goes, after you approve
+it as shown, to the search provider and not to a model, as it does for every case. Marking a cloud model Local lets Confidential and Sovereign cases use it, so
 do that only for a model on your own hardware. See the manual's
 [Model tiers and end-to-end encryption](../MANUAL.md#model-tiers-and-end-to-end-encryption).
 
