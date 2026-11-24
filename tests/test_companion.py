@@ -307,3 +307,85 @@ async def test_unauthenticated_upload_is_cut_off_over_tls(env, tmp_path, monkeyp
             assert r.status_code == 200
     finally:
         await app.state.companion.stop()
+
+
+def _can_bind(port: int) -> bool:
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+async def test_a_stop_while_the_companion_starts_leaves_nothing_on_its_port(tmp_path, monkeypatch):
+    """Start waits for uvicorn; a Stop in that moment crashed the start (a server error), and a new
+    certificate stopped meanwhile left a server serving the port that nothing knew of: every Start
+    after it said the port was in use."""
+    import asyncio
+
+    monkeypatch.setattr(companion, "lan_ip", lambda: "127.0.0.1")
+    server = companion.CompanionServer(FastAPI(), tmp_path)
+    port = _free_port()
+    await asyncio.gather(server.start(port), server.stop())
+    assert not server.running
+    await server.start(port)
+    await asyncio.gather(server.renew_cert(port), server.stop())
+    assert not server.running and _can_bind(port)
+    await server.start(port)                         # and it starts again
+    assert server.running
+    await server.stop()
+
+
+async def test_a_key_that_isnt_the_certificates_is_replaced_and_a_failed_start_frees_its_port(tmp_path, monkeypatch):
+    """A key written without its certificate (a crash between the two writes) made a pair TLS can't
+    serve: "The companion server didn't start" for good, and the port it had bound stayed taken."""
+    monkeypatch.setattr(companion, "lan_ip", lambda: "127.0.0.1")
+    cert, key = companion.ensure_cert(tmp_path, "127.0.0.1")
+    companion.ensure_cert(tmp_path / "other", "127.0.0.1")
+    key.write_bytes((tmp_path / "other" / companion.KEY_FILE).read_bytes())
+    first = companion.fingerprint(cert.read_bytes())
+    server = companion.CompanionServer(FastAPI(), tmp_path)
+    port = _free_port()
+    await server.start(port)                         # a new pair, made as for a first start
+    assert server.running and companion.fingerprint(cert.read_bytes()) != first
+    await server.stop()
+    # a start that fails all the same says why, and leaves the port free
+    monkeypatch.setattr(companion, "ensure_cert", lambda d, ip, renew=False: (tmp_path / "nothing.pem", key))
+    with pytest.raises(UserError, match="didn't start: .+"):
+        await server.start(port)
+    assert not server.running and _can_bind(port)
+
+
+def test_an_unreadable_certificate_shows_no_fingerprint_rather_than_an_error(tmp_path):
+    (tmp_path / companion.CERT_FILE).write_bytes(b"not a certificate")
+    info = companion.CompanionServer(FastAPI(), tmp_path).info(48443)
+    assert info["fingerprint"] is None and not info["running"]
+
+
+async def test_a_port_in_use_chosen_in_settings_leaves_the_companion_where_it_was(env, tmp_path, monkeypatch):  # noqa: F811
+    """The companion was stopped, every phone unpaired, before the new port was found taken, and the
+    port that couldn't be had was kept in Settings."""
+    engine, _, _ = env
+    monkeypatch.setattr(companion, "lan_ip", lambda: "127.0.0.1")
+    app: FastAPI = create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    engine.cfg.settings.companion_port = port = _free_port()
+    main = {"x-token": "main"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as gui:
+        assert (await gui.post("/api/phone/start", headers=main)).json()["running"]
+        comp = app.state.companion
+        token = comp.add_device("Pixel")
+        try:
+            with socket.socket() as taken:
+                taken.bind(("127.0.0.1", 0))
+                taken.listen(1)
+                r = await gui.post("/api/settings", json={"companion_port": taken.getsockname()[1]}, headers=main)
+                assert r.status_code == 400 and "already in use" in r.json()["error"]
+            assert comp.running and comp.port == port and comp.check(token)
+            assert engine.cfg.settings.companion_port == port
+            other = _free_port()
+            assert (await gui.post("/api/settings", json={"companion_port": other}, headers=main)).status_code == 200
+            assert comp.running and comp.port == other and _can_bind(port)
+        finally:
+            await comp.stop()

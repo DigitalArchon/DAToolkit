@@ -610,9 +610,17 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/settings")
     async def save_settings(body: dict, e: Engine = Depends(auth)):
+        was = companion_port()
         e.save_settings(body)
         if "companion_port" in body and companion.running and companion.port != companion_port():
-            await companion.start(companion_port())  # phones pair again on the new port
+            try:
+                await companion.start(companion_port())  # phones pair again on the new port
+            except UserError:
+                # a port that can't be had isn't kept: the companion runs on where it was, its phones
+                # paired. Until Nov 2026 it was stopped, every phone unpaired, and the port kept.
+                e.save_settings({"companion_port": was})
+                raise
+            emit({"type": "companion", "phones": len(companion.sockets)})
         return {"ok": True}
 
     @app.post("/api/layout")

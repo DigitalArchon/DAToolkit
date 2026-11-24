@@ -277,9 +277,16 @@ def ensure_cert(directory: Path, ip: str, renew: bool = False) -> tuple[Path, Pa
     if not renew and cert_path.exists() and key_path.exists():
         try:
             cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-            if cert.not_valid_after_utc - dt.datetime.now(dt.timezone.utc) > RENEW_BEFORE:
+            key = serialization.load_pem_private_key(key_path.read_bytes(), None)
+            # the key must be this certificate's: one written without the other (a crash between
+            # _make_cert's two writes, a half restored backup) left a pair TLS can't serve, and
+            # the companion never started again, saying only that it didn't (until Nov 2026)
+            ours = key.public_key().public_bytes(serialization.Encoding.DER,
+                                                 serialization.PublicFormat.SubjectPublicKeyInfo) == \
+                cert.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+            if ours and cert.not_valid_after_utc - dt.datetime.now(dt.timezone.utc) > RENEW_BEFORE:
                 return cert_path, key_path
-        except ValueError:
+        except (ValueError, TypeError):
             pass  # unreadable: make a new one
     _make_cert(cert_path, key_path, ip)
     return cert_path, key_path
@@ -316,6 +323,10 @@ class CompanionServer:
         self.devices: dict[str, Device] = {}      # the phones allowed: their tokens' hashes
         self.pairing = Pairing()
         self.sockets: dict = {}  # open companion WebSockets -> the device each belongs to
+        # one start, stop or new certificate at a time: start waits for uvicorn, and a Stop in
+        # that moment left it half made (a server error), or a server serving the port that
+        # nothing knew of, so every Start after it said the port was in use (until Nov 2026)
+        self._turn = asyncio.Lock()
 
     @property
     def running(self) -> bool:
@@ -358,11 +369,17 @@ class CompanionServer:
         await self._close_sockets(device_id)
 
     async def start(self, port: int) -> None:
-        if self.running:
-            await self.stop()
-        self.ip = lan_ip()
-        cert, key = ensure_cert(self.directory, self.ip)
-        address = listen_address(self.ip)
+        async with self._turn:
+            await self._start(port)
+
+    async def _start(self, port: int) -> None:
+        ip = lan_ip()
+        cert, key = ensure_cert(self.directory, ip)
+        address = listen_address(ip)
+        if self.running and (listen_address(self.ip), self.port) == (address, port):
+            await self._stop()           # the same port again (a new certificate): it is ours to take
+        # The new port is taken before the companion running is stopped: a port that can't be had
+        # leaves it running, its phones paired. Until Nov 2026 they were lost to a port in use.
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -375,25 +392,36 @@ class CompanionServer:
                                 "Settings → General.") from e
             raise UserError(f"Can't listen on port {port}: {e.strerror}. Choose another port in "
                             "Settings → General.") from e
+        if self.running:
+            await self._stop()
         sock.listen(16)
         sock.setblocking(False)
+        self.ip = ip
         self.devices.clear()
         self.pairing = Pairing()
         self.port = port
         config = uvicorn.Config(self.app, log_level="warning", lifespan="off", ssl_certfile=str(cert),
                                 ssl_keyfile=str(key), timeout_graceful_shutdown=2,
                                 limit_concurrency=MAX_CONNECTIONS, ws_max_size=WS_MAX_SIZE)
-        self._server = uvicorn.Server(config)
-        self._task = asyncio.create_task(self._server.serve(sockets=[sock]))
+        server = self._server = uvicorn.Server(config)
+        task = self._task = asyncio.create_task(server.serve(sockets=[sock]))
         for _ in range(100):
-            if self._server.started or self._task.done():
+            if server.started or task.done():
                 break
             await asyncio.sleep(0.02)
-        if not self._server.started:
-            await self.stop()
-            raise UserError("The companion server didn't start.")
+        if not server.started:
+            why = task.exception() if task.done() and not task.cancelled() else None
+            await self._stop()
+            # the socket is closed here: one left open held the port, and every Start after this one
+            # said it was in use (until Nov 2026)
+            sock.close()
+            raise UserError("The companion server didn't start" + (f": {why}." if why else "."))
 
     async def stop(self) -> None:
+        async with self._turn:
+            await self._stop()
+
+    async def _stop(self) -> None:
         self.devices.clear()
         self.pairing.close()
         await self._close_sockets()
@@ -412,9 +440,10 @@ class CompanionServer:
             self.open_code()
 
     async def renew_cert(self, port: int) -> None:
-        ensure_cert(self.directory, lan_ip(), renew=True)
-        if self.running:
-            await self.start(port)
+        async with self._turn:
+            ensure_cert(self.directory, lan_ip(), renew=True)
+            if self.running:
+                await self._start(port)
 
     async def _close_sockets(self, device_id: str | None = None) -> None:
         """Close the open pages of one phone, or of every phone."""
@@ -435,8 +464,11 @@ class CompanionServer:
                      "phones": len(self.sockets), "fingerprint": None, "expires": None}
         if cert_path.exists():
             pem = cert_path.read_bytes()
-            out["fingerprint"] = fingerprint(pem)
-            out["expires"] = x509.load_pem_x509_certificate(pem).not_valid_after_utc.date().isoformat()
+            try:
+                out["fingerprint"] = fingerprint(pem)
+                out["expires"] = x509.load_pem_x509_certificate(pem).not_valid_after_utc.date().isoformat()
+            except ValueError:
+                pass        # unreadable: none is shown, and Start makes a new one (ensure_cert)
         if self.running:
             base = f"https://{self.ip}:{self.port}"
             connected = set(self.sockets.values())
