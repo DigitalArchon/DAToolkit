@@ -964,7 +964,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         if sess.relay and sess.relay is not asyncio.current_task():
             sess.relay.cancel()
         sess.relay = asyncio.current_task()
-        clamp = lambda v, lo, hi, d: max(lo, min(hi, int(v))) if str(v).isdigit() else d  # noqa: E731
+        # ASCII digits only: "²" is a digit to str.isdigit, not to int(), and ended the tunnel with a
+        # server error until Nov 2026
+        clamp = lambda v, lo, hi, d: max(lo, min(hi, int(v))) if str(v).isascii() and str(v).isdigit() else d  # noqa: E731
         width, height = clamp(q.get("width"), 200, 8192, 1280), clamp(q.get("height"), 200, 8192, 800)
         dpi = clamp(q.get("dpi"), 48, 480, 96)
         writer = None

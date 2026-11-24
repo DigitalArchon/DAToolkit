@@ -1078,6 +1078,31 @@ def test_ws_relay_handshakes_pings_and_forwards(tmp_path, monkeypatch):
         assert _rdp_events(e) == [("rdp_connecting", {}), ("rdp_connected", {"pin_enforced": None}), ("rdp_disconnected", {})]
 
 
+def test_a_size_in_other_digits_is_taken_as_no_size(tmp_path, monkeypatch):
+    """A width of "²" (a digit to str.isdigit, not to int) ended the tunnel with a server error."""
+    g = FakeGuacd(after=GUACD_13_OK)
+    monkeypatch.setattr(guac, "GUACD", ("127.0.0.1", g.port))
+    holder = {}
+
+    def make(emit):
+        from datoolkit.config import Config
+        from datoolkit.engine import Engine
+        holder["e"] = Engine(Config(), emit, tmp_path / "rt", save_config=lambda c: None)
+        return holder["e"]
+
+    with TestClient(create_app("tok", make)) as client:
+        e = holder["e"]
+        e.new_case("relay", "open")
+        e.sessions.add(RdpSession(id="dc01", name="dc01", params={"hostname": "dc01", "password": "pw", "ignore-cert": "true"}))
+        with client.websocket_connect("/ws/rdp/dc01?t=tok&width=%C2%B2&height=%D9%A3%D9%A3%D9%A3&dpi=%EF%BC%99%EF%BC%96",
+                                      subprotocols=["guacamole"]) as ws:
+            got = ""
+            while "copy" not in got:
+                got += ws.receive_text()
+        assert g.handshake[1] == ["size", "1280", "800", "96"]       # the defaults
+    e.sessions.close_all()
+
+
 def _rdp_events(e) -> list:
     out = []
     for line in (e.case.dir / "events.jsonl").read_text().splitlines():
