@@ -550,7 +550,8 @@ shows.
 - **Watch.** **Watch** on a read-only item wraps it in a bounded loop (every N seconds, M
   samples). When you send the result, iterations identical to the previous one are dropped.
   Only an item the local rules rate read only has the button, and the loop it becomes is
-  rated again like any command.
+  rated again like any command. A command of several lines can't be watched: watch each line
+  as an item of its own, or join them with `;` first.
 
 ### Photos, replay, context
 

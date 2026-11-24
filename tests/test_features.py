@@ -930,6 +930,16 @@ def test_a_watch_loop_is_valid_shell_whatever_the_command_ends_with(command):
     assert ("#include" in loop) == ("#include" in command)          # quoted text is kept
 
 
+@pytest.mark.parametrize("command", ["df -h /  # disk first\nfree -m", "# connections\nss -s", "cat <<EOF\nx # y\nEOF"])
+def test_a_command_of_several_lines_is_not_made_a_watch(command):
+    # the loop is one line: the lines after a comment went with it, and a heredoc broke in two
+    from datoolkit.safety import watch
+    for shell in ("sh", "powershell"):
+        with pytest.raises(ValueError, match="one line"):
+            watch.wrap(command, 2, 3, shell)
+    assert "seq 1 3" in watch.wrap("  uptime\n", 2, 3, "sh")          # a line break at the end is no second line
+
+
 def test_a_watch_tells_the_ai_the_numbers_it_runs_with():
     from datoolkit.safety import watch
     assert watch.bounds(0, 5000) == (1, 720)

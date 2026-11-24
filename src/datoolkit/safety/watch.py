@@ -34,6 +34,11 @@ def _embeddable(command: str) -> str:
 def wrap(command: str, interval: int, count: int, shell: str) -> str:
     """Wrap a single-line command in a bounded loop for the session's shell family."""
     interval, count = bounds(interval, count)
+    if "\n" in command.strip():
+        # the loop is one line: until Nov 2026 the lines after a comment were cut off with it
+        # ("df -h /  # disk\nfree -m" watched df alone), and a heredoc was broken in two
+        raise ValueError("A watch repeats a command of one line, and this one has several. Watch each line as an "
+                         "item of its own, or join them with ; first.")
     command = _embeddable(command)
     if not command:
         raise ValueError("There is no command to watch.")
