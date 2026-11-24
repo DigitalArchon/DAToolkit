@@ -5236,9 +5236,12 @@ class Engine:
             elif call.name == "run_recipe":
                 try:
                     args = call.parsed()
-                    open_ids = [r["id"] for r in self.sessions.roster() if not r["exited"]]
+                    roster = self.sessions.roster()
+                    open_ids = [r["id"] for r in roster if not r["exited"]]
                     sid = args.get("session_id") or ""
-                    if sid not in open_ids and len(open_ids) == 1:
+                    # only an id that names no session falls back to the one open: a closed one is
+                    # still the machine the model meant (as for propose_commands below)
+                    if sid not in {r["id"] for r in roster} and len(open_ids) == 1:
                         sid = open_ids[0]
                     added = self.queue_recipe(str(args.get("recipe_id", "")), sid, bool(args.get("include_install")),
                                               call_id=call.id)
@@ -5246,6 +5249,8 @@ class Engine:
                     entry["proposals"] += nums
                     reply = (f"Recipe queued for technician review as {', '.join(f'#{n}' for n in nums)}. "
                              "Results will arrive in a later message.")
+                    if sid not in open_ids:
+                        reply += self._closed_note([sid])
                 except (UserError, ValueError, KeyError, TypeError) as e:
                     reply = f"run_recipe failed: {e}. Use a recipe id from the list, or propose_commands."
             elif call.name == "revise_queue":
@@ -5283,8 +5288,13 @@ class Engine:
                     # which recipe a step is of is for queue_recipe to say: an item carrying a
                     # baseline recipe's key would be saved and compared as that section of a baseline
                     items = [{k: v for k, v in it.items() if k not in ("recipe", "recipe_key")} for it in items]
-                    open_ids = [r["id"] for r in self.sessions.roster() if not r["exited"]]
-                    added = self.queue.add(call.id, items, known_sessions=set(open_ids),
+                    # An id that names no session (none given, or made up) goes to the only one open. One
+                    # that names a closed session stays with it, and the model is told: until Nov 2026 it
+                    # went to the open one too, and a command meant for a host whose connection had
+                    # dropped was queued, unsaid, for this machine's own shell.
+                    roster = self.sessions.roster()
+                    open_ids = [r["id"] for r in roster if not r["exited"]]
+                    added = self.queue.add(call.id, items, known_sessions={r["id"] for r in roster},
                                            fallback_session=open_ids[0] if len(open_ids) == 1 else "",
                                            session_kinds=self._session_kinds())
                     if not added:
@@ -5306,6 +5316,9 @@ class Engine:
                     if unknown:
                         reply += (f" Note: session id(s) {', '.join(unknown)} do not exist; the technician "
                                   "must pick a target for those.")
+                    closed = sorted({p.session_id for p in added if p.session_id in known} - set(open_ids))
+                    if closed:
+                        reply += self._closed_note(closed)
                     # an item the rules don't know as a reader is no change that lacks its rollback:
                     # the model is told how the technician sees it instead
                     unconfirmed = [p.num for p in added if p.unconfirmed]
@@ -5341,6 +5354,12 @@ class Engine:
             self.conv.append({"role": "tool", "tool_call_id": call.id, "content": reply})
         self._persist()
         return retry
+
+    @staticmethod
+    def _closed_note(sids: list[str]) -> str:
+        """What the model is told of items it queued for sessions that are closed."""
+        return (f" Note: session(s) {', '.join(sids)} are closed, so nothing can run there until the technician "
+                "opens the host again and picks the new session as the target; say so in your message.")
 
     def _revise_queue(self, call, entry: dict) -> str:
         try:

@@ -548,6 +548,34 @@ async def test_missing_session_id_defaults_to_only_open_session(env):
     assert "do not exist" in engine.conv[-1]["content"]
 
 
+async def test_a_command_for_a_closed_session_stays_with_it(env):
+    """A host's connection dropped (its tab stays, closed) while the model wrote: what it queued for
+    that host is not moved to the one session still open, this machine's shell."""
+    engine, fake, _ = env
+    engine.new_case("x", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    engine.sessions.spawn("web01", ["/bin/cat"], {}, name="web01", kind="ssh", host_name="web01", target="bob@web01.lan")
+    engine.sessions.write("web01", b"\x04")
+    for _ in range(200):
+        if engine.sessions.sessions["web01"].exited:
+            break
+        await asyncio.sleep(0.01)
+    engine.open_session("local")
+    calls = [("propose_commands", {"items": [{"session_id": "web01", "command": "sudo systemctl stop nginx", "purpose": "cache",
+                                             "risk": "disruptive", "rollback": "sudo systemctl start nginx"}]}),
+             ("run_recipe", {"recipe_id": "dns-reach-linux", "session_id": "web01"})]
+    fake.responses.append(sse(({"role": "assistant", "content": "Stopping nginx on web01."}, None), *[
+        ({"tool_calls": [{"index": i, "id": f"c{i}", "type": "function",
+                          "function": {"name": name, "arguments": json.dumps(args)}}]}, None)
+        for i, (name, args) in enumerate(calls)], ({}, "tool_calls")))
+    fake.responses.append(sse(({"role": "assistant", "content": "web01 needs reconnecting first."}, "stop")))
+    engine.send("nginx serves stale pages")
+    await wait_turn(engine)
+    assert {p.session_id for p in engine.queue.items} == {"web01"}
+    replies = [m["content"] for m in engine.conv if m["role"] == "tool"]
+    assert len(replies) == 2 and all("web01 are closed" in r for r in replies)
+
+
 async def test_ai_is_told_when_hidden_characters_were_taken_out(env):
     engine, fake, _ = env
     engine.new_case("smuggle", "open")
