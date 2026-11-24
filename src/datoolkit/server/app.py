@@ -912,8 +912,9 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
 
     @app.post("/api/open-folder")
     async def open_folder(e: Engine = Depends(auth)):
-        if e.case:
-            await asyncio.create_subprocess_exec("xdg-open", str(e.case.dir), env=host_env())
+        if not e.case:          # said, as every action that needs a case says it (until Nov 2026 nothing happened)
+            raise UserError("Start a case first.")
+        await asyncio.create_subprocess_exec("xdg-open", str(e.case.dir), env=host_env())
         return {"ok": True}
 
     # ------------------------------------------------------------ WebSockets

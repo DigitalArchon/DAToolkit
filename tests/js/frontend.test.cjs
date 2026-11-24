@@ -973,6 +973,21 @@ test("a provider's form opens with its model overrides in it, and Add a model ad
   assert.equal(button(rows()[1], "Route…").disabled, true);
 });
 
+test("with no case open, what the Context and Export menus offer for a case offers to start one, and asks the server nothing", async () => {
+  for (const act of ["markdown", "full", "summary", "client", "runbook", "context", "timeline", "folder"]) {
+    const app = await page("none");
+    await app.clock.tick(100);
+    app.$(".overlay")?.querySelector(".buttons button")?.click();         // the first-run dialog, put away
+    await app.clock.tick(100);
+    const before = app.calls.length;
+    app.$(`#${["context", "timeline", "folder"].includes(act) ? "context" : "export"}-menu button[data-act="${act}"]`).click();
+    await app.clock.tick(100);
+    assert.deepEqual(app.document.querySelectorAll(".modal h2").map((e) => e.textContent), ["Start a case"], act);
+    assert.match(app.$(".modal .warnbox").textContent, /That belongs to a case: start one first/, act);
+    assert.deepEqual(app.calls.slice(before).filter((c) => !/^\/api\/(cases|draft|phone)$/.test(c.path)).map((c) => c.path), [], act);
+  }
+});
+
 test("a baseline this case may not use is listed with the reason and can't be diffed", async () => {
   const refused = "Taken in a Sovereign case: it can't be used from this Open one.";
   const rows = [

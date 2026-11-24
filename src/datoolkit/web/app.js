@@ -5050,8 +5050,14 @@ function openFullExport() {
     } }] });
 }
 
+// What these menus offer that belongs to a case: with none open, each offers to start one, as
+// + Session does. (Until Nov 2026 each answered its own way: a toast, a dialog that said
+// "No case.", a context view of the empty prompt, the folder nothing at all.)
+const CASE_ACTS = ["markdown", "full", "summary", "client", "runbook", "context", "timeline", "folder"];
+
 async function doExport(act) {
   hideMenus();
+  if (CASE_ACTS.includes(act) && !S.state?.case) return openCaseModal(false, "That belongs to a case: start one first, or open a previous one.");
   if (act === "markdown") {
     const r = await guarded(() => api("POST", "/api/export/markdown"));
     if (r) await guarded(() => saveFile(r.filename, new Blob([r.content], { type: "text/markdown" })));

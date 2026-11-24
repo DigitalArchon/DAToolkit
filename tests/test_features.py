@@ -835,6 +835,16 @@ async def test_desktop_endpoints_need_the_main_token_and_the_app_window(env):  #
         assert (await c.get("/api/desktop/clipboard", headers={"x-token": "main"})).status_code == 404
 
 
+
+async def test_open_case_folder_with_no_case_says_to_start_one(env):  # noqa: F811
+    engine, _, _ = env
+    app: FastAPI = create_app("main", lambda emit: engine)
+    app.state.engine = engine
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/api/open-folder", headers={"x-token": "main"})
+    assert r.status_code == 400 and r.json()["error"] == "Start a case first."
+
+
 # ---------------------------------------------------------------- replay CLI
 
 def test_replay_reports_rule_changes(tmp_path):
