@@ -52,6 +52,27 @@ async def test_a_phone_showing_an_old_queue_cannot_undo_a_sent_item(env, tmp_pat
     assert r.status_code == 400 and engine.queue.get(num).status == "sent"
 
 
+async def test_results_that_went_already_are_not_sent_again(env):  # noqa: F811
+    """Send results from a second window, or a dialog older than the turn that sent them: what went
+    already isn't a new turn with nothing in it."""
+    engine, fake, _ = env
+    sid = setup(engine)
+    (num,) = _queued(engine, sid, "df -h")
+    engine.update_item(num, status="ran")
+    fake.responses.append(sse(({"role": "assistant", "content": "The disk is full."}, "stop")))
+    engine.send("", results=[{"num": num, "text": "/dev/sda1 100%"}])
+    await wait_turn(engine)
+    asked, chat = len(fake.requests), len(engine.chat)
+    with pytest.raises(UserError, match=f"#{num} is sent to the AI. Nothing was sent."):
+        engine.send("", results=[{"num": num, "text": "/dev/sda1 100%"}])
+    assert len(fake.requests) == asked and len(engine.chat) == chat and not engine.busy
+    # with words of their own, the words go, and no heading for results that aren't there
+    fake.responses.append(sse(({"role": "assistant", "content": "Yes."}, "stop")))
+    engine.send("anything else?", results=[{"num": num, "text": "/dev/sda1 100%"}])
+    await wait_turn(engine)
+    assert fake.requests[-1]["messages"][-1]["content"] == "anything else?"
+
+
 async def test_a_note_emptied_in_send_results_is_not_sent(env):  # noqa: F811
     engine, fake, _ = env
     sid = setup(engine)

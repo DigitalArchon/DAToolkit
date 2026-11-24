@@ -4600,6 +4600,14 @@ class Engine:
             raise UserError("Nothing to send.")
         if images and self.vision_status()["mode"] == "none":
             raise UserError(self.vision_status()["why"] + " Images can't be sent.")
+        # Results of items that went already (a second window, a dialog older than the turn that sent
+        # them) or that haven't run are left out. Until Nov 2026 the rest went all the same, and with
+        # nothing else to send that was a turn on "[Results returned by the technician]" and no result.
+        unsent = {int(r["num"]): self.queue.get(int(r["num"])).status for r in results}
+        fresh = [n for n, st in unsent.items() if st not in ("withdrawn", "pending", "sent")]
+        if results and not fresh and not (message.strip() or snippets or images):
+            raise UserError(" ".join(f"#{n} is {_STATUS_WORDS.get(st, st)}." for n, st in unsent.items())
+                            + " Nothing was sent.")
         saved_images = self._save_images(self.clean_images(images))
         # the first message of a case with words in it looks for similar past cases (off the loop, in
         # the turn), and so does the next one of a case resumed from before its runbooks were kept
@@ -4615,7 +4623,7 @@ class Engine:
                          "working at, with their description]")
         if message.strip():
             parts.append(message.strip())
-        if results:
+        if fresh:
             parts.append("[Results returned by the technician]")
         for r in results:
             p = self.queue.get(int(r["num"]))
