@@ -40,7 +40,10 @@ def replay_case(case_dir: Path) -> dict:
             p = Proposal(num=e.get("num") or 0, call_id="", session_id=sid, command=command, purpose="",
                          model_risk=str(e.get("model_risk", "modifying")), risk="modifying",
                          original_command=command, dry_run_of=e.get("dry_run_of"),
-                         rehearsal_reads=bool(e.get("rehearsal_reads")))
+                         rehearsal_reads=bool(e.get("rehearsal_reads")),
+                         # a recipe's step keeps its recipe's own label (Queue._classify): until Nov 2026
+                         # those were reported as rated differently, with no rule changed
+                         recipe=str(e.get("recipe") or ""))
             Queue._classify(p, {sid: kinds.get(sid, "local")})
             level, reasons = p.risk, p.risk_reasons
             if level != e.get("risk"):

@@ -868,6 +868,11 @@ def test_replay_sees_no_change_in_labels_the_queue_gave_on_purpose(tmp_path):
         {"ts": 3, "event": "proposal", "num": 2, "session_id": "web01", "command": "sudo apt install -s htop",
          "model_risk": "read_only", "risk": "read_only", "dry_run_of": 3},
     ]
+    # and a recipe's steps, labelled by the recipe where the rules don't know them as readers
+    from datoolkit import recipes
+    steps = [(r.id, st) for r in recipes.load_all() for st in r.steps]
+    lines += [{"ts": 4, "event": "proposal", "num": 10 + i, "session_id": "web01", "command": st.command,
+               "model_risk": st.risk, "risk": st.risk, "recipe": rid} for i, (rid, st) in enumerate(steps)]
     (d / "events.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
     assert replay_case(d)["risk_changes"] == []
 
