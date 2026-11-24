@@ -332,3 +332,108 @@ def test_quit_in_the_window_closes_the_window_too():
     app_mod.quit_app(browser, None)                # in the browser there is no window to close
     assert browser.should_exit
     app_mod.Desktop(None).close()                  # a window not made yet: nothing to close
+
+
+def _start_in_browser_mode(tmp_path):
+    """DA Toolkit as `datoolkit --no-open` runs it, in a process of its own with its own folders:
+    (process, port, token, its runtime directory's parent)."""
+    import os
+    import shutil
+    import socket
+    import subprocess
+    import sys
+    import tempfile
+
+    run = Path(tempfile.mkdtemp(prefix="dat-"))      # short: the askpass socket's path must fit
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    env.update(HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "config"), XDG_DATA_HOME=str(tmp_path / "data"),
+               XDG_STATE_HOME=str(tmp_path / "state"), XDG_RUNTIME_DIR=str(run), SHELL="/bin/sh",
+               PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring")
+    (tmp_path / "home").mkdir()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen([sys.executable, "-m", "datoolkit", "--no-open", "--port", str(port)], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    token = ""
+    for line in proc.stdout:
+        if "#t=" in line:
+            token = line.strip().split("#t=", 1)[1]
+            break
+    assert token, "it didn't start"
+    return proc, port, token, run, lambda: shutil.rmtree(run, ignore_errors=True)
+
+
+@pytest.mark.parametrize("sig", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_a_signal_in_the_browser_closes_what_datoolkit_opened(tmp_path, sig):
+    """Ctrl+C became a KeyboardInterrupt in the join of the server's thread, which Python 3.12 then
+    takes for ended: the process left with the engine never stopped (sessions, the guacd container,
+    the askpass helper's files in the runtime directory); SIGTERM and SIGHUP had no handler."""
+    import signal
+
+    proc, port, token, run, clean = _start_in_browser_mode(tmp_path)
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", headers={"x-token": token}, timeout=10) as c:
+            assert c.post("/api/case", json={"name": "s", "sensitivity": "open"}).status_code == 200
+            assert c.post("/api/sessions", json={"kind": "local"}).status_code == 200
+        assert [p.name for p in run.iterdir()] == [f"datoolkit-{proc.pid}"]
+        proc.send_signal(getattr(signal, sig))
+        assert proc.wait(15) == 0
+        assert list(run.iterdir()) == [], "the runtime files are gone with it"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        clean()
+
+
+def test_quit_while_a_question_is_up_ends_the_process(tmp_path):
+    """Quit while a session waited on the technician (here a WinRM listener's certificate, asked about
+    the first time): the server waited for that request, and the process stayed for the question's
+    five minutes."""
+    import socket
+    import ssl
+    import threading
+    import time
+
+    from datoolkit import companion
+
+    cert, key = companion.ensure_cert(tmp_path / "tls", "127.0.0.1")
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = listener.accept()
+                ctx.wrap_socket(conn, server_side=True).close()
+            except OSError:
+                return
+    threading.Thread(target=serve, daemon=True).start()
+    proc, port, token, run, clean = _start_in_browser_mode(tmp_path)
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", headers={"x-token": token}, timeout=30) as c:
+            c.post("/api/hosts", json={"host": {"name": "w", "kind": "winrm", "host": "127.0.0.1", "port": listener.getsockname()[1],
+                                                "user": "a", "auth": "ntlm", "winrm_ssl": True, "winrm_cert_validation": False}})
+            c.post("/api/case", json={"name": "q", "sensitivity": "open"})
+            def open_host():
+                try:
+                    c.post("/api/sessions", json={"kind": "winrm", "host": "w"})
+                except httpx.HTTPError:
+                    pass                     # the server went with the question unanswered
+            threading.Thread(target=open_host, daemon=True).start()
+            for _ in range(100):
+                if c.get("/api/state").json().get("prompts"):
+                    break
+                time.sleep(0.05)
+            assert c.get("/api/state").json()["prompts"], "the certificate is asked about"
+            assert c.post("/api/quit").status_code == 200
+        assert proc.wait(12) == 0
+        assert list(run.iterdir()) == []
+    finally:
+        listener.close()
+        if proc.poll() is None:
+            proc.kill()
+        clean()

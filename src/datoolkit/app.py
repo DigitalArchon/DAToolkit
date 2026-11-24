@@ -316,6 +316,21 @@ def window_problem() -> str | None:
     return None
 
 
+def stop_on_signals(server) -> None:
+    """In the browser, the signals that end DA Toolkit (Ctrl+C, SIGTERM, a logout's SIGHUP) ask the
+    server to stop, as Quit does, so the engine closes the sessions, stops the guacd container and
+    takes its runtime files away; a second one stops without waiting for open requests. Until Nov
+    2026 Ctrl+C was a KeyboardInterrupt in the main thread's join of the server's thread, which
+    Python 3.12 then takes for ended: the process left with that thread killed and none of this
+    done, and SIGTERM and SIGHUP had no handler at all. (The app window has its own: on_started.)"""
+    def stop(signum, frame) -> None:
+        if server.should_exit:
+            server.force_exit = True
+        server.should_exit = True
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+
+
 def quit_app(server, desktop: Desktop | None) -> None:
     """POST /api/quit: the server stops, and in the app window the window closes too."""
     server.should_exit = True
@@ -367,8 +382,10 @@ def main(argv: list[str] | None = None) -> None:
 
     launches = Launches()
     app = create_app(token, make_engine, desktop, on_quit=lambda: quit_app(server, desktop), launches=launches)
+    # timeout_graceful_shutdown: a request waiting on the technician (a certificate's question, a password)
+    # doesn't hold up Quit; until Nov 2026 the process stayed for as long as the question did, five minutes
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                           ws_max_size=16 * 1024 * 1024))
+                                           ws_max_size=16 * 1024 * 1024, timeout_graceful_shutdown=3))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     while not server.started:
@@ -379,6 +396,7 @@ def main(argv: list[str] | None = None) -> None:
     url = f"http://127.0.0.1:{port}/?t={token}"
     try:
         if use_browser:
+            stop_on_signals(server)
             # for the user's own terminal, to open by hand: the token in the fragment, which a browser
             # never sends, so it is in no request's first line
             url = f"http://127.0.0.1:{port}/#t={token}"
