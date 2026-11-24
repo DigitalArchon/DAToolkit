@@ -674,7 +674,7 @@ function handleEvent(ev) {
       renderBusy();
       renderChat(true);
       renderUsage();
-      if (ev.error && ev.error !== "stopped") toast(ev.error.startsWith("not sent: ") ? `AI request ${ev.error}` : `AI request failed: ${ev.error}`, "error", 12000);
+      if (ev.error && ev.error !== "stopped") toast(/^(not sent|failed): /.test(ev.error) ? `AI request ${ev.error}` : `AI request failed: ${ev.error}`, "error", 12000);
       break;
     case "search":
       if (!S.streaming) break;

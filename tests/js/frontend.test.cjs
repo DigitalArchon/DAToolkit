@@ -2498,3 +2498,13 @@ test("a Chutes key moved between Chutes' own hosts isn't asked about; anywhere e
   assert.equal(asked.call("keyReaches", "https://llm.chutes.ai:443", "http://llm.chutes.ai:80"), false);
   assert.equal(asked.call("keyReaches", "https://inference.tinfoil.sh:443", "https://router-0.tinfoil.sh:443"), false);
 });
+
+test("a failed request's toast says \"failed\" once, whichever way the engine words it", async () => {
+  const app = await page("a");
+  await app.event({ type: "turn_end", error: "failed: Error code: 401 - Incorrect API key provided", chat: [] });
+  await app.event({ type: "turn_end", error: "got an empty reply: m sent no message and queued nothing", chat: [] });
+  await app.event({ type: "turn_end", error: "not sent: The key is held back.", chat: [] });
+  const said = app.toasts().slice(-3);
+  assert.deepEqual(said, ["AI request failed: Error code: 401 - Incorrect API key provided",
+    "AI request failed: got an empty reply: m sent no message and queued nothing", "AI request not sent: The key is held back."]);
+});

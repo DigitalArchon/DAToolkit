@@ -494,7 +494,7 @@ async def test_a_failed_turn_shows_what_the_provider_answered_whichever_openai_i
     engine.send("web01 is slow")
     await wait_turn(engine)
     note = engine.chat[-1]["text"]
-    assert note.startswith("AI request BadRequestError: Error code: 400 (the provider said: this key's daily limit is "
+    assert note.startswith("AI request failed: Error code: 400 (the provider said: this key's daily limit is "
                            "spent y")
     assert len(note) < 400 and "\n" not in note
 

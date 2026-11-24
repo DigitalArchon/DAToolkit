@@ -357,7 +357,7 @@ async def test_a_turn_whose_reply_was_cut_off_queues_nothing_and_offers_retry(en
     assert not engine.queue.items
     note = engine.chat[-1]
     assert note["kind"] == "note" and note["retry"] is True and engine.can_retry
-    assert note["text"].startswith("AI request ProviderError: the reply stopped before it was finished: "
+    assert note["text"].startswith("AI request failed: the reply stopped before it was finished: "
                                    "the connection closed mid-answer")
     assert engine.chat[-2]["text"] == "Two checks, then the fix."           # what arrived stays shown, above the note
 

@@ -5105,7 +5105,9 @@ class Engine:
             if (self.attestation or {}).get("model") == model:
                 self.attestation = retired
         except Exception as e:  # noqa: BLE001
-            error = f"not sent: {e}" if isinstance(e, UserError) else netguard.scrubbed(f"{type(e).__name__}: {shown_error(e)}")
+            # said in words, without Python's name for the error ("AuthenticationError: …"), which told the
+            # technician nothing (until Nov 2026): the note reads "AI request failed: Error code: 401 - …"
+            error = f"not sent: {e}" if isinstance(e, UserError) else netguard.scrubbed(f"failed: {shown_error(e)}")
             if getattr(e, "status_code", None) in (401, 403):      # where to put that right is said too
                 error += f" ({prov.name} refused the API key, or what it allows: check the key in Settings → AI providers)"
             self._log_failed_round(in_flight, model, tier, entry, error)
