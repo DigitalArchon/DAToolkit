@@ -1939,6 +1939,32 @@ test("a settings notice and a keyring problem show in the banners", async () => 
   assert.equal(app.$("#keyring-banner").classList.contains("hidden"), true);
 });
 
+test("a model list that comes back after another provider was chosen is not shown under it", async () => {
+  const app = await page("a", (s) => {
+    s.config.providers = [{ name: "Slow", base_url: "http://127.0.0.1:1/v1", kind: "local" }, { name: "Quick", base_url: "http://127.0.0.1:2/v1", kind: "local" }];
+    s.config.active_provider = "Slow";
+  }, { "POST /api/model": () => ({ ok: true }) });
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  app.routes["GET /api/models"] = (call) => (call.query.provider === "Slow"
+    ? held.then(() => ({ models: [{ id: "slow/only-here", tier: "local", allowed: true }] }))
+    : { models: [{ id: "quick/model", tier: "local", allowed: true }] });
+  app.$("#model-btn").click();
+  await app.clock.tick(100);
+  const sel = app.$(".overlay select");
+  sel.value = "Quick";
+  sel.dispatchEvent(new Event("change"));
+  await app.clock.tick(0);
+  const ids = () => app.$(".model-list").querySelectorAll(".model-row .id").map((e) => e.textContent);
+  assert.deepEqual(ids(), ["quick/model"]);
+  release();
+  await app.clock.tick(0);
+  assert.deepEqual(ids(), ["quick/model"], "Slow's late list stays out of Quick's");
+  app.$(".model-list .model-row").click();
+  await app.clock.tick(0);
+  assert.deepEqual(plain(app.posts("/api/model").map((c) => c.body)), [{ provider: "Quick", model: "quick/model" }]);
+});
+
 test("the model picker says how many models it isn't showing", async () => {
   const models = Array.from({ length: 450 }, (_, i) => ({ id: `vendor/model-${String(i).padStart(3, "0")}`, tier: "standard", allowed: true }));
   const app = await page("a", null, { "GET /api/models": () => ({ models }) });

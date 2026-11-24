@@ -4078,13 +4078,20 @@ function pickModel({ title, current = "", filter = null, filterNote = "", note =
       listEl.append(h("div", { class: "muted small" }, `${shown.length - 400} more: type to narrow the list.`));
     }
   };
+  // Only the list last asked for is shown: one that comes back after another provider was chosen
+  // (or Refresh was pressed again) is dropped. (Until Nov 2026 a slow list arrived under the
+  // provider chosen since, and a click on one of its models chose it on that provider.)
+  let loads = 0;
   const load = async (refresh) => {
+    const asked = ++loads;
     listEl.replaceChildren(h("div", { class: "muted" }, "Loading…"));
     try {
-      models = (await api("GET", `/api/models?provider=${encodeURIComponent(prov)}&refresh=${refresh ? "true" : "false"}`)).models;
+      const got = (await api("GET", `/api/models?provider=${encodeURIComponent(prov)}&refresh=${refresh ? "true" : "false"}`)).models;
+      if (asked !== loads) return;
+      models = got;
       render();
     } catch (e) {
-      listEl.replaceChildren(h("div", { class: "warnbox" }, e.message));
+      if (asked === loads) listEl.replaceChildren(h("div", { class: "warnbox" }, e.message));
     }
   };
   search.addEventListener("input", render);
