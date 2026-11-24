@@ -499,6 +499,22 @@ async def test_a_failed_turn_shows_what_the_provider_answered_whichever_openai_i
     assert len(note) < 400 and "\n" not in note
 
 
+async def test_a_turn_refused_for_its_key_says_where_the_key_is_changed(env, monkeypatch):  # noqa: F811
+    from test_engine_turn_loop import answering
+    from test_revise_search import setup
+
+    engine, fake, _ = env
+    setup(engine)
+    answering(engine, fake, monkeypatch, lambda body: httpx.Response(
+        401, json={"error": {"message": "Incorrect API key provided", "code": "invalid_api_key"}}))
+    engine.send("web01 is slow")
+    await wait_turn(engine)
+    note = engine.chat[-1]["text"]
+    assert "Incorrect API key provided" in note
+    assert note.endswith(f"({engine.cfg.active_provider} refused the API key, or what it allows: check the key in "
+                         "Settings → AI providers)")
+
+
 @pytest.mark.parametrize("error,setting", [
     ("moonshotai/kimi-k3 does not support temperature on the selected route", "temperature"),
     ("Error code: 400 - {'error': {'message': \"Unsupported value: 'temperature' does not support 0.3 with this model. "

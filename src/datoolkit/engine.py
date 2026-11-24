@@ -5100,6 +5100,8 @@ class Engine:
                 self.attestation = retired
         except Exception as e:  # noqa: BLE001
             error = f"not sent: {e}" if isinstance(e, UserError) else netguard.scrubbed(f"{type(e).__name__}: {shown_error(e)}")
+            if getattr(e, "status_code", None) in (401, 403):      # where to put that right is said too
+                error += f" ({prov.name} refused the API key, or what it allows: check the key in Settings → AI providers)"
             self._log_failed_round(in_flight, model, tier, entry, error)
             overflowed = not isinstance(e, UserError) and self._overflow_message(prov, model, e)
             if overflowed:
