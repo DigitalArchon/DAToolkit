@@ -1464,6 +1464,49 @@ test("the phone's page claims its pairing code, shows the number, and is given i
   assert.equal(app.gets("/api/companion/state").at(-1).headers["X-Token"], "mine");
 });
 
+test("the phone's page says while its connection is lost, and once it has ended turns its buttons off", async () => {
+  const st = { case: { name: "c", sensitivity: "open" }, chat: [], busy: false, hypotheses: [], photos: { ok: true },
+    queue: [{ num: 1, status: "pending", risk: "read_only", session_id: "local", command: "uptime", purpose: "load" }] };
+  const app = loadApp({ page: "companion.html", script: "companion.js", hash: "#pair=abcdef", routes: {
+    "POST /api/companion/pair": () => ({ claim: "c1", check: "4821" }),
+    "GET /api/companion/pair/c1": () => ({ state: "approved", token: "mine" }),
+    "GET /api/companion/state": () => st } });
+  await app.clock.tick(0);
+  await app.clock.tick(1500);
+  const conn = app.$("#conn"), ran = () => button(app.$("#queue"), "I ran it");
+  assert.ok(conn.classList.contains("hidden"));
+  // the computer can't be reached: said in words, and nothing changed
+  app.routes["POST /api/companion/queue/1"] = () => { throw app.run('new TypeError("Failed to fetch")'); };
+  ran().click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.toasts(), ["DA Toolkit can't be reached from this phone just now: nothing was changed. Try again once it's back."]);
+  // the socket drops: the page says so until it is back
+  app.sockets.at(-1).close();
+  assert.match(conn.textContent, /connection to DA Toolkit is lost; reconnecting/);
+  assert.ok(!conn.classList.contains("hidden"));
+  await app.clock.tick(2000);
+  assert.ok(conn.classList.contains("hidden"), "back");
+  // this phone disconnected on the computer: said for good, and no button does anything any more
+  app.sockets.at(-1).onclose({ code: 4403 });
+  assert.match(conn.textContent, /^Disconnected: DA Toolkit stopped the companion or disconnected this phone/);
+  assert.ok(!conn.classList.contains("hidden"));
+  assert.equal(ran().disabled, true);
+  assert.equal(button(app.$("#photo"), "📷 Photo to AI").disabled, true);
+  // a 403 from a tap says the same
+  const other = loadApp({ page: "companion.html", script: "companion.js", hash: "#pair=abcdef", routes: {
+    "POST /api/companion/pair": () => ({ claim: "c1", check: "4821" }),
+    "GET /api/companion/pair/c1": () => ({ state: "approved", token: "mine" }),
+    "GET /api/companion/state": () => st,
+    "POST /api/companion/queue/1": () => ({ __status: 403, body: { error: "bad token" } }) } });
+  await other.clock.tick(0);
+  await other.clock.tick(1500);
+  button(other.$("#queue"), "I ran it").click();
+  await other.clock.tick(0);
+  assert.match(other.$("#conn").textContent, /^Disconnected:/);
+  assert.equal(button(other.$("#queue"), "I ran it").disabled, true);
+  assert.ok(!other.toasts().some((t) => /bad token/.test(t)));
+});
+
 test("the phone's page says so when the computer refuses it", async () => {
   const app = loadApp({ page: "companion.html", script: "companion.js", hash: "#pair=abcdef", routes: {
     "POST /api/companion/pair": () => ({ claim: "c1", check: "4821" }),

@@ -34,10 +34,32 @@ function h(tag, attrs = {}, ...kids) {
 async function api(method, path, body) {
   const r = await fetch(path, { method, headers: { "X-Token": TOKEN, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || d.detail || r.statusText);
+  if (!r.ok) throw Object.assign(new Error(d.error || d.detail || r.statusText), { status: r.status });
   return d;
 }
 function toast(t, kind = "error") { const el = h("div", { class: `toast ${kind}` }, t); $("#toasts").append(el); setTimeout(() => el.remove(), 5000); }
+
+// The connection, said on the page for as long as it holds: lost (reconnecting, what is shown may
+// be out of date), or ended for good (the companion stopped, or this phone disconnected), when
+// nothing here can be done any more and every button is off. A tap that can't reach the computer
+// says so in words. (Until Nov 2026 a toast said it once, for five seconds; the buttons stayed on
+// and answered "bad token" or "Failed to fetch".)
+const GONE = "Disconnected: DA Toolkit stopped the companion or disconnected this phone. Scan the connect code again.";
+let ended = false;
+function connection(lost) {
+  $("#conn").textContent = ended ? GONE : lost ? "⚠ The connection to DA Toolkit is lost; reconnecting… What is shown here may be out of date." : "";
+  $("#conn").classList.toggle("hidden", !ended && !lost);
+}
+function disconnected() {
+  ended = true;
+  photosAllowed = false;
+  for (const b of [...$("#queue").querySelectorAll("button"), ...$("#photo").querySelectorAll("button")]) b.disabled = true;
+  connection(true);
+}
+function failed(e) {
+  if (e.status === 403) disconnected();
+  else toast(e instanceof TypeError ? "DA Toolkit can't be reached from this phone just now: nothing was changed. Try again once it's back." : e.message);
+}
 
 // ---- read aloud: only messages that arrive after it is switched on, plus ▶ Read on demand.
 // Spoken a sentence at a time: the browsers' own pause()/resume() are unreliable (Android Chrome
@@ -122,6 +144,8 @@ $("#read-now").addEventListener("click", () => {
 $("#read-stop").addEventListener("click", stopSpeech);
 
 function render(st) {
+  if (ended) return;
+  connection(false);
   $("#case").textContent = st.case ? `${st.case.name} · ${st.case.sensitivity}` : "no case";
   const last = [...st.chat].reverse().find((e) => e.kind === "assistant");
   const text = last ? last.text : (st.busy ? "Thinking…" : "—");
@@ -157,13 +181,14 @@ function render(st) {
 }
 async function mark(num, status) {
   try { await api("POST", `/api/companion/queue/${num}`, { status, note: status === "skipped" ? "skipped from companion" : "" }); }
-  catch (e) { toast(e.message); }
+  catch (e) { failed(e); }
 }
 function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/events?t=${encodeURIComponent(TOKEN)}`);
   ws.onmessage = (m) => { const ev = JSON.parse(m.data); if (ev.type === "state") render(ev.state); };
   ws.onclose = (e) => {
-    if (e.code === 4403) { toast("Disconnected: DA Toolkit stopped the companion or disconnected this phone. Scan the connect code again."); return; }
+    if (e.code === 4403) { disconnected(); return; }
+    connection(true);
     setTimeout(reconnect, 2000);
   };
 }
@@ -172,7 +197,7 @@ async function reconnect() {
   try { render(await api("GET", "/api/companion/state")); connect(); }
   catch (e) {
     if (e instanceof TypeError) setTimeout(reconnect, 3000);  // unreachable for now: keep trying
-    else toast("Disconnected: DA Toolkit stopped the companion or disconnected this phone. Scan the connect code again.");
+    else disconnected();
   }
 }
 function start() { api("GET", "/api/companion/state").then(render).catch((e) => toast(e.message)); connect(); }
@@ -309,6 +334,6 @@ $("#photo-send").addEventListener("click", async () => {
     await api("POST", "/api/companion/photo", { message: $("#photo-text").value.trim(), image: canvas.toDataURL("image/jpeg", 0.9) });
     closePhoto();
     toast("Sent to the AI.", "ok");
-  } catch (e) { toast(e.message); }
+  } catch (e) { failed(e); }
   finally { btn.textContent = "Send to AI"; btn.disabled = !photosAllowed; }
 });
