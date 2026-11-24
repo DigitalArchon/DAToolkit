@@ -1911,6 +1911,9 @@ function activateTab(sid, focus = true) {
     tab.classList.toggle("active", id === sid);
     tab.setAttribute("aria-selected", String(id === sid));
   }
+  // the strip scrolls sideways when the tabs don't fit: the active one is brought into it (until
+  // Nov 2026 a session opened, or switched to, past its edge was the active one out of sight)
+  S.tabs.get(sid)?.scrollIntoView({ block: "nearest", inline: "nearest" });
   const t = S.terms[sid];
   if (t) { fitTerm(t, true); if (focus) t.term.focus(); }
   const r = S.rdps[sid];

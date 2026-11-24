@@ -1570,6 +1570,15 @@ test("the reply being written stays one bubble: an opened section, a finished pa
   assert.equal(app.$("#chat-log .msg.streaming").querySelector("details"), null);
 });
 
+test("the tab of the session switched to is scrolled into the strip", async () => {
+  const app = await page("a");
+  const tab = app.$('#tab-list .tab[data-sid="local"]');
+  const asked = [];
+  tab.scrollIntoView = (how) => { asked.push(plain(how)); };
+  app.call("activateTab", "local");
+  assert.deepEqual(asked, [{ block: "nearest", inline: "nearest" }]);
+});
+
 test("Alt+digit in a terminal goes to the program; Ctrl+Shift+digit switches tabs from there, and Alt+digit elsewhere", async () => {
   const app = await page("a", (s) => { s.sessions.push({ ...s.sessions[0], id: "local-2" }); });
   const term = app.terminals[1], active = () => app.run("S.activeSid");
