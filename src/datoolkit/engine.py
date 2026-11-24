@@ -1857,8 +1857,8 @@ class Engine:
     def save_host(self, data: dict, password: str | None = None, original_name: str | None = None,
                   use_saved_password: bool | None = None) -> None:
         """Save a host. Its saved password is held to the address it was entered for
-        (Host.password_for, _host_password), as a provider's key is: a host whose kind, address or
-        port changed without a new password keeps it for the old one, unless `use_saved_password`
+        (Host.password_for, _host_password), as a provider's key is: a host whose kind, address, port or
+        jump hosts changed without a new password keeps it for the old one, unless `use_saved_password`
         says the technician chose to use it there (Settings asks)."""
         name = str(data.get("name", "")).strip()
         if not name or not str(data.get("host", "")).strip():
@@ -3001,7 +3001,7 @@ class Engine:
     @staticmethod
     def _password_problem(host: Host) -> str | None:
         """Why the password saved for `host` isn't given to it, or None: it was entered for
-        another kind, address or port (Host.password_for) than the host has now. Nothing is
+        another kind, address, port or jump host (Host.password_for) than the host has now. Nothing is
         deleted (the design every DA app keeps for a saved key, Nov 2026)."""
         if host.password_for is None:
             return None

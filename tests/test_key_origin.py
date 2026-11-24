@@ -159,6 +159,21 @@ def test_a_hosts_origin_is_its_kind_address_and_port():
     assert host_origin(Host("a", "rdp", "srv", port=3390)) == "rdp://srv:3390"
     assert host_origin(Host("a", "winrm", "dc")) == "winrm+https://dc:5986"
     assert host_origin(Host("a", "winrm", "dc", winrm_ssl=False)) == "winrm+http://dc:5985"
+    # an SSH host's jump hosts too: 192.168.1.1 behind another client's is another machine
+    assert host_origin(Host("a", "ssh", "192.168.1.1", jump="me@Bastion.Client-A.example:2222, [fd00::1]")) == \
+        "ssh://192.168.1.1:22 via bastion.client-a.example,fd00::1"
+
+
+async def test_a_jump_host_changed_without_the_password_doesnt_take_it_along(env):  # noqa: F811
+    engine, _, _ = env
+    engine.save_host({"name": "router", "kind": "ssh", "host": "192.168.1.1", "user": "admin", "auth": "password",
+                      "jump": "tech@bastion.client-a.example"}, "client-a-router")
+    assert engine._host_password(engine.cfg.host("router")) == "client-a-router"
+    engine.save_host(host_data(engine, "router", jump="tech@bastion.client-b.example"), None, "router")
+    assert engine._host_password(engine.cfg.host("router")) is None, "another client's router"
+    assert "via bastion.client-a.example" in engine._password_problem(engine.cfg.host("router"))
+    engine.save_host(host_data(engine, "router", jump="tech@bastion.client-b.example"), None, "router", use_saved_password=True)
+    assert engine._host_password(engine.cfg.host("router")) == "client-a-router"
 
 
 async def test_a_hosts_address_changed_without_its_password_doesnt_take_it_along(env):  # noqa: F811

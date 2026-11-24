@@ -2337,6 +2337,27 @@ test("a host's No for an address is kept too, and Ask again asks", async () => {
   assert.match(again.document.querySelectorAll(".modal").at(-1).querySelector("h2").textContent, /^Use the saved password with/);
 });
 
+test("a host's jump host changed without a new password asks first too, naming the route", async () => {
+  const withPassword = (s) => {
+    const x = s.config.hosts.find((y) => y.name === "web01");
+    x.has_password = true;
+    x.jump = "tech@bastion-a.example";
+    x.password_for = "ssh://web01.lan:22 via bastion-a.example";
+  };
+  const app = await page("a", withPassword, { "POST /api/hosts": () => ({ ok: true }) });
+  app.call("openSettings", "hosts");
+  await app.clock.tick(0);
+  button(app.$(".modal .list").querySelectorAll(".list-item").find((i) => i.textContent.includes("web01")), "Edit").click();
+  await app.clock.tick(0);
+  assert.doesNotMatch(app.$(".modal").textContent, /The saved password is for/, "its own route: not held");
+  const jump = app.$(".modal").querySelectorAll("input").find((i) => i.value === "tech@bastion-a.example");
+  jump.value = "tech@bastion-b.example";
+  button(app.$(".modal"), "Save").click();
+  await app.clock.tick(0);
+  assert.equal(app.document.querySelectorAll(".modal").at(-1).querySelector("h2").textContent,
+    "Use the saved password with web01.lan via tech@bastion-b.example?");
+});
+
 test("a host's address changed without a new password asks first whether the saved one goes there", async () => {
   const withPassword = (s) => { s.config.hosts.find((x) => x.name === "web01").has_password = true; };
   const edit = async (address) => {

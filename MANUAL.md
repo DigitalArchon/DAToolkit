@@ -1038,7 +1038,9 @@ again, and its form says "The saved API key is for ‹old address›, not sent t
 **Ask again**. Type the key again for the new address, answer Yes (Ask again), or put the address
 back. **Save & test** sends the key at once, so it asks every time, a No kept or not. A key saved
 by an earlier version is held to the address saved beside it from the first start of this one.
-A host's saved password is held the same way to the host's kind, address and port: changed,
+A host's saved password is held the same way to the host's kind, address and port, and to an SSH
+host's jump hosts (192.168.1.1 behind one client's jump host is another machine than behind
+another's; a host saved before this asks once, with Ask again in its form): changed,
 Settings asks whether to use it there, and with No you are asked for the password when you
 connect, as though none were saved; the No is kept for that address too, with Ask again in the
 host's form.

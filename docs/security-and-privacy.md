@@ -240,8 +240,9 @@ container image itself; you pull it once, and it runs exactly the pinned image.
   answered Yes unread): the form says the key is for its old address, with Ask again; Save &
   test, which sends the key at once, asks every time. Nothing is deleted. A key saved by an
   earlier version takes the address saved beside it at the first start. A host's saved password
-  is held to the host's kind, address and port the same way: changed without it, you are asked
-  for the password when you connect.
+  is held to the host's kind, address and port, and an SSH host's jump hosts, the same way:
+  changed without it, you are asked for the password when you connect. (A host saved before
+  jump hosts counted asks once, with Ask again in its form.)
 - **A key goes only to the service it is for.** The NanoGPT key goes to NanoGPT (chat, search,
   the scraper, attestation); the Tinfoil key to `https://inference.tinfoil.sh` alone (Tinfoil's
   host, over the pinned connection); a Chutes key saved for one of Chutes' three hosts

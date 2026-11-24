@@ -928,11 +928,20 @@ function originOf(u) {
     return `${x.protocol}//${x.hostname.toLowerCase()}:${x.port || (x.protocol === "https:" ? "443" : "80")}`;
   } catch { return ""; }
 }
-// Where a host's saved password goes, as config.host_origin writes it ("ssh://web01.lan:22").
-function hostOrigin(kind, host, port, ssl) {
+// Where a host's saved password goes, as config.host_origin writes it ("ssh://web01.lan:22"), an SSH
+// host's jump hosts with it as ssh.jump_route reads them ("ssh://192.168.1.1:22 via bastion.example")
+function hostOrigin(kind, host, port, ssl, jump) {
   const k = kind === "winrm" ? `winrm+${ssl ? "https" : "http"}` : kind;
   const dflt = { ssh: 22, rdp: 3389 }[kind] || (ssl ? 5986 : 5985);
-  return `${k}://${String(host ?? "").trim().toLowerCase()}:${port || dflt}`;
+  const route = kind !== "ssh" ? [] : String(jump ?? "").split(",").map((hop) => {
+    let at = hop.trim().replace(/^ssh:\/\//, "");
+    at = at.slice(at.lastIndexOf("@") + 1);
+    if (at.startsWith("[")) at = at.slice(1).split("]")[0];
+    else if ((at.match(/:/g) || []).length === 1) at = at.split(":")[0];
+    return at.toLowerCase().replace(/\.+$/, "");
+  }).filter(Boolean);
+  const origin = `${k}://${String(host ?? "").trim().toLowerCase()}:${port || dflt}`;
+  return route.length ? `${origin} via ${route.join(",")}` : origin;
 }
 // Chutes' own three hosts, as llm/privacy.py CHUTES_KEY_ORIGINS writes them: a Chutes key saved for one
 // goes to the others too, over https, the one stated exception to a key going only where it was entered.
@@ -4545,11 +4554,12 @@ function openSettings(tab = "providers") {
       // the saved password goes only to the host it was entered for: one whose address changed,
       // without a new password typed, is asked about
       const port = f.port.value ? Number(f.port.value) : null;
-      const here = hostOrigin(x.kind, f.host.value, port, f.winrm_ssl.checked);
-      const was = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl);
+      const here = hostOrigin(x.kind, f.host.value, port, f.winrm_ssl.checked, f.jump.value);
+      const was = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl, x.jump);
       // asked once for an address: a No is kept (password_declined), as a provider's key's
       const useSaved = !x._new && x.has_password && !f.password.value && here !== was && (ask || here !== x.password_declined)
-        ? await askUseSaved("password", f.host.value.trim() || here) : undefined;
+        ? await askUseSaved("password", (ssh && f.jump.value.trim() ? `${f.host.value.trim()} via ${f.jump.value.trim()}` : f.host.value.trim()) || here)
+        : undefined;
       await api("POST", "/api/hosts", {
         use_saved_password: useSaved,
         host: {
@@ -4566,8 +4576,8 @@ function openSettings(tab = "providers") {
       await reshow("hosts");
     };
     // the saved password held to the address it was entered for: said, with the way to be asked again
-    const savedFor = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl);
-    const held = !x._new && x.has_password && savedFor !== hostOrigin(x.kind, x.host, x.port, x.winrm_ssl)
+    const savedFor = x.password_for ?? hostOrigin(x.kind, x.host, x.port, x.winrm_ssl, x.jump);
+    const held = !x._new && x.has_password && savedFor !== hostOrigin(x.kind, x.host, x.port, x.winrm_ssl, x.jump)
       ? h("div", { class: "muted small" }, `The saved password is for ${savedFor}, not given to ${x.host}: you are asked for it when you connect. Type it again above for this address, or `,
         h("button", { type: "button", class: "small", onclick: () => guarded(() => saveHost(true)) }, "Ask again"), ".")
       : null;

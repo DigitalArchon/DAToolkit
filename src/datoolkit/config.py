@@ -167,7 +167,7 @@ class Host:
     # from an earlier version is refused when opened (engine._NLA_EXT)
     rdp_security: str = "any"
     rdp_layout: str = "en-us-qwerty"
-    # where its saved password was entered for (host_origin: the kind, address and port): it is
+    # where its saved password was entered for (host_origin: the kind, address, port and jump hosts): it is
     # given there alone (Engine._host_password), so an address changed in Settings, or here by
     # hand, doesn't take the password with it. "" while none was saved; None when read from a file
     # written before passwords were held to an address (settle_key_origins)
@@ -178,10 +178,18 @@ class Host:
 
 def host_origin(host: Host) -> str:
     """Where a host's password goes: its kind ("winrm+http" for WinRM over plain HTTP), address
-    and port, the kind's own when none is set ("ssh://web01.lan:22")."""
+    and port, the kind's own when none is set ("ssh://web01.lan:22"), and for SSH the jump hosts
+    it is reached through ("ssh://192.168.1.1:22 via bastion.client-a.example"). 192.168.1.1
+    behind one client's jump host and behind another's are two machines (sessions/manager.py
+    link_key): until Nov 2026 a jump host changed in Settings took the first one's password to
+    the second without a word."""
+    from .sessions.ssh import jump_route
+
     kind = f"winrm+{'https' if host.winrm_ssl else 'http'}" if host.kind == "winrm" else host.kind
     default = {"ssh": 22, "rdp": 3389}.get(host.kind) or (5986 if host.winrm_ssl else 5985)
-    return f"{kind}://{(host.host or '').strip().lower()}:{host.port or default}"
+    origin = f"{kind}://{(host.host or '').strip().lower()}:{host.port or default}"
+    route = jump_route(host.jump) if host.kind == "ssh" and host.jump else ()
+    return f"{origin} via {','.join(route)}" if route else origin
 
 
 @dataclass
