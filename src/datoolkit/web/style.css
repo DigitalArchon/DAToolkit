@@ -112,8 +112,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 #topbar > *, #topbar button { white-space: nowrap; flex: none; }
 #topbar > .spacer { flex: 1 1 0; min-width: 0; }
 #case-btn { max-width: min(36ch, 42vw); overflow: hidden; text-overflow: ellipsis; }
-#model-btn { display: inline-flex; align-items: center; gap: 4px; max-width: min(52ch, 72vw); }
+#model-btn { display: inline-flex; align-items: center; gap: 4px; max-width: min(52ch, 72vw); overflow: hidden; }
 #model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* a provider's name is the user's own and may be long: cut too, so it can't push the tier and
+   privacy chips out of the button and over the controls beside it (until Nov 2026 it did) */
+#model-prov { flex: 0 1 auto; min-width: 3ch; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
+#model-btn > .badge, #model-btn > .privacy { flex: none; }
 .brand { font-weight: 700; letter-spacing: .02em; margin-right: 6px; }
 .menu-wrap { position: relative; }
 .menu {
@@ -168,7 +172,9 @@ body.rdp-max .term-host { inset: 0; }
 .msg.user { background: #1c2a3d; align-self: flex-end; max-width: 92%; }
 .msg.assistant { background: var(--panel-2); }
 .msg.note { color: var(--muted); font-style: italic; font-size: 12.5px; padding: 2px 4px; }
-.msg .who { font-size: 11px; color: var(--muted); margin-bottom: 2px; display: flex; gap: 6px; align-items: center; }
+.msg .who { font-size: 11px; color: var(--muted); margin-bottom: 2px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* in a narrow chat the header's chips go to the next line whole, never split inside a word */
+.msg .who > * { white-space: nowrap; overflow-wrap: normal; }
 .msg .body p { margin: .35em 0; }
 .msg .body pre { background: var(--bg); padding: 8px; border-radius: 6px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; }
 .msg .body code { font-family: var(--mono); font-size: 12.5px; background: var(--bg); padding: 0 3px; border-radius: 3px; }
