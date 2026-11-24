@@ -1922,7 +1922,7 @@ function activateTab(sid, focus = true) {
   }
   // the strip scrolls sideways when the tabs don't fit: the active one is brought into it (until
   // Nov 2026 a session opened, or switched to, past its edge was the active one out of sight)
-  S.tabs.get(sid)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  S.tabs.get(sid)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });   // (a DOM without it: the tests' jsdom)
   const t = S.terms[sid];
   if (t) { fitTerm(t, true); if (focus) t.term.focus(); }
   const r = S.rdps[sid];
