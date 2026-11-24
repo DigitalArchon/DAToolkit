@@ -2416,7 +2416,7 @@ class Engine:
             raise UserError("Start a case first.")
         if kind == "local":
             shell = os.environ.get("SHELL") or "/bin/bash"
-            sid = self.sessions.unique_id("local")
+            sid = self._new_session_id("local")
             sess = self.sessions.spawn(sid, [shell], {}, name=sid, kind="local", target="this machine",
                                        shell=Path(shell).name, os_hint=_local_os(), address="localhost")
         else:
@@ -2425,7 +2425,7 @@ class Engine:
                 raise UserError(f"Unknown host {host_name}")
             if host.kind == "rdp":
                 raise UserError("RDP hosts open through open_rdp.")
-            sid = self.sessions.unique_id(host.name)
+            sid = self._new_session_id(host.name)
             env = self.bridge.env_for(sid)
             if host.kind == "ssh":
                 sess = self.sessions.spawn(sid, ssh_argv(host), env, name=host.name, kind="ssh",
@@ -2453,6 +2453,21 @@ class Engine:
                                            address=host.host, port=winrm.port(host))
         self.log("session_opened", **sess.roster())
         return sess.roster()
+
+    def _new_session_id(self, base: str) -> str:
+        """An id for a terminal session that no session of the open case has had: each one's
+        transcript is the file of its id, and a command's output is read from that file up to the
+        next command's start, or its end. Until Nov 2026 a session closed and opened again took
+        the id it had, its transcript was written on, and an earlier command's captured output
+        went on into what was typed in the new session."""
+        passed = []
+        sid = self.sessions.reserve(base)
+        while self.case and self.case.transcript_file(sid).exists():
+            passed.append(sid)
+            sid = self.sessions.reserve(base)
+        for taken in passed + [sid]:
+            self.sessions.release(taken)
+        return sid
 
     async def open_winrm(self, host_name: str) -> dict:
         """Open a WinRM session. A host whose certificate the system CA store doesn't vouch

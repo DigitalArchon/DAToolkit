@@ -78,6 +78,24 @@ async def test_capture_reads_a_bounded_part_of_a_long_output_and_says_so(env, mo
     assert engine.capture(q.num) == {"text": "x" * 5000 + "\nlast line", "source": "transcript"}
 
 
+async def test_a_session_opened_again_gets_an_id_and_transcript_of_its_own(env):  # noqa: F811
+    """A command run in a session that was then closed: the session opened in its place doesn't
+    write on its transcript, so the command's captured output ends where that session ended."""
+    engine, _, _ = env
+    engine.new_case("again", "open")
+    first = engine.open_session("local")["id"]
+    p = engine.queue.add("c1", [{"session_id": first, "command": "echo hi", "risk": "read_only"}])[0]
+    engine.case.transcript_path(first).write_bytes(b"$ echo hi\nhi\n")
+    p.capture_start = 0
+    engine.close_session(first)
+    second = engine.open_session("local")["id"]
+    assert second != first and engine.case.transcript_path(second) != engine.case.transcript_path(first)
+    with engine.case.transcript_path(second).open("ab") as f:
+        f.write(b"$ typed in the new session\n")
+    assert engine.capture(p.num)["text"] == "$ echo hi\nhi"
+    engine.close_session(second)
+
+
 # ---------------------------------------------------------------- the pin store
 
 async def test_a_snapshot_reads_the_pin_store_once(env, monkeypatch):  # noqa: F811
