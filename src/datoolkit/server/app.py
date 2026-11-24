@@ -410,7 +410,12 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
             # "pending" from the phone undoes its own ran or skipped; an item the AI took back is
             # restored at the computer, where the command is in front of the technician
             raise UserError(f"#{num} was withdrawn by the AI. Restore it on the computer if it should run after all.")
-        e.update_item(num, status=status, note=str(body.get("note", ""))[:200])
+        # A note typed at the computer stays: the phone sends none with "ran" and its own with "skipped",
+        # and until Nov 2026 either one replaced it before Send results, which tells the AI the note.
+        # "pending" undoes the phone's own mark, its note with it, as before.
+        note = str(body.get("note") or "")[:200]
+        keep = status != "pending" and (not note or e.queue.get(num).note)
+        e.update_item(num, status=status, **({} if keep else {"note": note}))
         return {"ok": True}
 
     @comp.post("/api/companion/photo")

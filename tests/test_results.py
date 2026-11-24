@@ -73,6 +73,26 @@ async def test_results_that_went_already_are_not_sent_again(env):  # noqa: F811
     assert fake.requests[-1]["messages"][-1]["content"] == "anything else?"
 
 
+async def test_a_phone_marking_an_item_keeps_the_note_typed_at_the_computer(env, tmp_path):  # noqa: F811
+    engine, _, _ = env
+    sid = setup(engine)
+    ran, skipped, plain = _queued(engine, sid, "uptime", "df -h", "free -m")
+    for num in (ran, skipped):
+        engine.update_item(num, note="ran it on the console instead")
+    app: FastAPI = server_app.create_app("main", lambda emit: engine, companion_dir=tmp_path)
+    app.state.engine = engine
+    app.state.companion.add_device("test phone", "phone")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:
+        for num, status, note in ((ran, "ran", ""), (skipped, "skipped", "skipped from companion"),
+                                  (plain, "skipped", "skipped from companion")):
+            r = await c.post(f"/api/companion/queue/{num}", json={"status": status, "note": note}, headers={"x-token": "phone"})
+            assert r.status_code == 200
+        assert [engine.queue.get(n).note for n in (ran, skipped, plain)] == [
+            "ran it on the console instead", "ran it on the console instead", "skipped from companion"]
+        r = await c.post(f"/api/companion/queue/{plain}", json={"status": "pending", "note": ""}, headers={"x-token": "phone"})
+        assert r.status_code == 200 and engine.queue.get(plain).note == ""       # undone, its note with it
+
+
 async def test_a_note_emptied_in_send_results_is_not_sent(env):  # noqa: F811
     engine, fake, _ = env
     sid = setup(engine)
