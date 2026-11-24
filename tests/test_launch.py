@@ -148,6 +148,16 @@ async def test_bad_requests_get_a_400_and_a_refused_settings_save_changes_nothin
             r = await c.post(path, json=body, headers=m)
             assert r.status_code == 400 and r.json()["error"], (path, body, r.status_code)
         assert (engine.cfg.settings.font_size, engine.cfg.settings.scrollback) == (font, scroll)
+        # each number is held to what it can be, and refused in the words Settings → General labels it with
+        for body, said in (({"font_size": 999}, "Terminal font size must be a whole number from 6 to 40."),
+                           ({"capture_max_lines": 0}, "Max lines per result must be a whole number of 1 or more."),
+                           ({"scrollback": 5}, "Terminal scrollback must be a whole number of 100 or more."),
+                           ({"context_warn_tokens": 1.5}, "Warn when prompt tokens exceed must be a whole number of 1000 or more."),
+                           ({"capture_max_chars": 2.5}, "Max characters per result must be a whole number of 1 or more.")):
+            r = await c.post("/api/settings", json=body, headers=m)
+            assert (r.status_code, r.json()["error"]) == (400, said), body
+        assert (await c.post("/api/settings", json={"font_size": 16.0, "capture_max_chars": "30000"}, headers=m)).status_code == 200
+        assert (engine.cfg.settings.font_size, engine.cfg.settings.capture_max_chars) == (16, 30000)
         # a token with characters outside ASCII is a wrong token, on both ports, not a crash
         assert (await c.get("/api/state", headers={"x-token": "tök".encode("latin-1")})).status_code == 403
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.companion.app), base_url="http://t") as c:

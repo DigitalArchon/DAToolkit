@@ -1958,14 +1958,20 @@ class Engine:
         # checked on a copy, kept only if every value holds: a refused one changed nothing, where
         # the fields before it used to stay set (and were saved with the next change of anything)
         s = copy.deepcopy(self.cfg.settings)
-        for key in ("capture_max_lines", "capture_max_chars", "scrollback", "font_size", "context_warn_tokens"):
+        # each as Settings → General labels it, and within what it can be (until Nov 2026 only "more
+        # than 0", in the field's own name: font size 999 and a warning at 1 token were saved, 1.5
+        # was cut to 1, and a field left empty was refused as "capture_max_lines must be positive.")
+        for key, label, low, high in (("capture_max_lines", "Max lines per result", 1, None),
+                                      ("capture_max_chars", "Max characters per result", 1, None),
+                                      ("scrollback", "Terminal scrollback", 100, None),
+                                      ("font_size", "Terminal font size", 6, 40),
+                                      ("context_warn_tokens", "Warn when prompt tokens exceed", 1000, None)):
             if key in data:
-                try:
-                    value = int(data[key])
-                except (TypeError, ValueError):
-                    raise UserError(f"{key} must be a whole number.") from None
-                if value <= 0:
-                    raise UserError(f"{key} must be positive.")
+                value = data[key]
+                if isinstance(value, float) and value.is_integer() or isinstance(value, str) and value.strip().isdigit():
+                    value = int(value)
+                if type(value) is not int or value < low or (high is not None and value > high):
+                    raise UserError(f"{label} must be a whole number {f'from {low} to {high}' if high else f'of {low} or more'}.")
                 setattr(s, key, value)
         if "companion_port" in data:
             try:
