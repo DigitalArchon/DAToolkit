@@ -1896,7 +1896,7 @@ test("a long case name is cut in the bar and whole in its tooltip, and the style
   assert.doesNotMatch(rule("#vision-btn.none"), /line-through/);
 });
 
-test("in a small window the queue leaves the workspace its room, and a menu opens inside the window", async () => {
+test("in a small window the queue leaves the workspace its room, and a menu opens inside the window and closes with Escape", async () => {
   const app = await page("a");
   const queueH = () => app.document.documentElement.style.getPropertyValue("--queue-h");
   app.call("applyLayout");
@@ -1920,6 +1920,15 @@ test("in a small window the queue leaves the workspace its room, and a menu open
   app.$("#export-btn").click();
   app.$("#export-btn").click();
   assert.deepEqual([menu.style.left, menu.style.right], ["", ""]);
+  // Escape closes it, and with no menu open is left alone
+  assert.equal(menu.classList.contains("hidden"), false);
+  assert.equal(app.key(app.document.body, { key: "Escape" }).defaultPrevented, true);
+  assert.equal(menu.classList.contains("hidden"), true);
+  assert.equal(app.key(app.document.body, { key: "Escape" }).defaultPrevented, false);
+  app.$("#new-session-btn").click();
+  assert.equal(app.$("#session-menu").classList.contains("hidden"), false);
+  app.key(app.document.body, { key: "Escape" });
+  assert.equal(app.$("#session-menu").classList.contains("hidden"), true);
 });
 
 test("a toast can be dismissed and is announced; the status line announces what changed, not its clock", async () => {

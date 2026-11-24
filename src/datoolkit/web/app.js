@@ -5256,6 +5256,13 @@ function init() {
     toggleMenu($("#session-menu"));
   });
   document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) hideMenus(); });
+  // Escape closes an open menu, as a click outside it does; with none open it is left to whatever
+  // has the focus (a terminal's program). (Until Nov 2026 a menu stayed open through Escape.)
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || MODALS.length || MENUS.every((m) => m.classList.contains("hidden"))) return;
+    e.preventDefault();
+    hideMenus();
+  });
   // both carry whatever is typed in the chat box as the message sent with the results
   $("#send-results-btn").addEventListener("click", () => guarded(() => openSendResults()));
   $("#chat-results-btn").addEventListener("click", () => guarded(() => openSendResults()));

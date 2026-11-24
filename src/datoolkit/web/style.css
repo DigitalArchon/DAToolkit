@@ -122,11 +122,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .menu-wrap { position: relative; }
 .menu {
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 50; min-width: 240px;
-  max-height: 70vh; overflow-y: auto;
+  /* never wider than the window: a saved host's long name is cut, not the menu's left side
+     (until Nov 2026 + Session's menu ran off a narrow window's left edge) */
+  max-width: calc(100vw - 16px); max-height: 70vh; overflow-y: auto;
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 4px;
   box-shadow: 0 8px 24px rgba(0,0,0,.4); display: flex; flex-direction: column;
 }
-.menu button { text-align: left; border: none; background: transparent; padding: 6px 10px; }
+.menu button { text-align: left; border: none; background: transparent; padding: 6px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .menu button:hover { background: var(--panel); }
 .menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
 .menu .label { color: var(--muted); font-size: 11px; padding: 4px 10px; text-transform: uppercase; }
