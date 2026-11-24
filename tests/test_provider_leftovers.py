@@ -21,6 +21,30 @@ async def _settle():
         await asyncio.sleep(0)
 
 
+# ---------------------------------------------------------------- not while a turn uses it
+
+async def test_a_provider_a_turn_is_using_is_not_changed_under_it(env):  # noqa: F811
+    from test_engine import sse, wait_turn
+
+    engine, fake, _ = env
+    engine.save_provider({"name": "Other", "base_url": "https://other.example/v1"})
+    engine.new_case("busy", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    fake.responses.append(sse(({"role": "assistant", "content": "Looking."}, "stop")))
+    engine.send("hello")
+    assert engine.busy
+    for change in (lambda: engine.save_provider({"name": "Renamed", "base_url": BASE}, original_name="Fake"),
+                   lambda: engine.save_provider({"name": "Fake", "base_url": BASE, "tier_overrides": {"m": "local"}},
+                                                original_name="Fake"),
+                   lambda: engine.delete_provider("Fake")):
+        with pytest.raises(UserError, match="Wait for the AI to finish"):
+            change()
+    engine.delete_provider("Other")          # one the turn doesn't use
+    await wait_turn(engine)
+    assert engine.cfg.provider("Fake") and engine.cfg.provider("Fake").tier_overrides == {}
+    engine.delete_provider("Fake")           # once it is done
+
+
 # ---------------------------------------------------------------- a deleted provider's leftovers
 
 async def test_a_deleted_provider_leaves_nothing_to_a_new_one_of_its_name(env):  # noqa: F811

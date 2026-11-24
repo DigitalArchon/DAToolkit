@@ -820,6 +820,8 @@ class Engine:
             raise UserError(f"There is already a provider called {name}. The same address can be added again with "
                             f"another API key, under a name of its own (such as \"{name} PAYG\" beside \"{name} Sub Only\").")
         renamed = bool(original_name and original_name != name and old)
+        if old:
+            self._provider_idle(old.name)
         if "|" in name and not (old and old.name == name):
             # "provider|model" is how a setting names a model (the reviewer, the vision helper, the
             # recent models), and it is split at the first "|": one in the name would be read as
@@ -879,6 +881,20 @@ class Engine:
         self._save()
         self._changed()
 
+    def _provider_idle(self, name: str) -> None:
+        """UserError while a turn is using provider `name`: as the chat model's, the vision helper's,
+        the research model's or the one that pays for searches. The turn's requests go on to the
+        provider as it began with, whatever is saved meanwhile: until Nov 2026 a provider could be
+        renamed, deleted, given another address or a model's tier changed while a turn was under way,
+        and its later rounds still went out, to a model the case might no longer allow."""
+        if not self.busy:
+            return
+        s = self.cfg.settings
+        helpers = {v.split("|", 1)[0] for v in (s.vision_model, s.research_model) if "|" in v}
+        search = self._search_provider()
+        if name == self.cfg.active_provider or name in helpers or (search and search.name == name):
+            raise UserError("Wait for the AI to finish (or stop it) before changing or deleting a provider it is using.")
+
     def _provider_moved(self, prov: Provider) -> None:
         """A provider's address, API or tier marks changed. What the top bar shows as attested
         was attested at the address as it was, for the model as it was rated: it is dropped,
@@ -925,6 +941,7 @@ class Engine:
         starts clean: its model list and what its models can do, and the settings that name it
         (the reviewer, the vision helper, the research model, who pays for searches, the recent
         models), which would otherwise pass to the newcomer unasked."""
+        self._provider_idle(name)
         self._settings_ours()
         try:
             creds.delete_secret("provider", name)
