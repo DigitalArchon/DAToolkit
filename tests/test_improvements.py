@@ -69,6 +69,25 @@ async def test_preview_carries_warnings(env):  # noqa: F811
 
 # ---------------------------------------------------------------- server: stale ids are 400s
 
+@pytest.mark.parametrize("path, body", [
+    ("/api/send", {"message": None}), ("/api/send", {"message": ["x"]}), ("/api/settings", {"generation": 5}),
+    ("/api/providers", {"provider": {"name": "P2", "base_url": "https://p2.example/v1", "tier_overrides": 5}}),
+    ("/api/providers", {"provider": {"name": "P2", "base_url": "https://p2.example/v1", "routes": ["x"]}}),
+    ("/api/hosts", {"host": {"name": "h2", "kind": "ssh", "host": "h2.lan", "ssh_options": [1]}}),
+])
+async def test_a_field_of_the_wrong_type_is_400_not_500(env, path, body):  # noqa: F811
+    engine, _, _ = env
+    engine.new_case("types", "open")
+    engine.select_model("Fake", "anthropic/claude-opus-5.5")
+    app: FastAPI = create_app("tok", lambda emit: engine)
+    app.state.engine = engine
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                                 base_url="http://t") as c:
+        r = await c.post(path, json=body, headers={"x-token": "tok"})
+    assert r.status_code == 400 and r.json()["error"].startswith("Invalid request")
+    assert not engine.busy and engine.cfg.provider("P2") is None and engine.cfg.host("h2") is None
+
+
 async def test_unknown_queue_item_is_400(env):  # noqa: F811
     engine, _, _ = env
     app: FastAPI = create_app("tok", lambda emit: engine)

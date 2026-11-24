@@ -334,6 +334,10 @@ def create_app(token: str, make_engine: Callable[[Callable[[dict], None]], Engin
         a.add_exception_handler(KeyError, key_error)
         a.add_exception_handler(ValueError, bad_value)
         a.add_exception_handler(TypeError, bad_value)
+        # a field of the wrong type reaching code that reads it as text, a list or an object (a
+        # message given as null, overrides given as a number, an SSH option that is a list): until
+        # Nov 2026 Python's AttributeError, an Internal Server Error
+        a.add_exception_handler(AttributeError, bad_value)
 
     @app.post(LAUNCH_PATH)
     async def launch(request: Request):
