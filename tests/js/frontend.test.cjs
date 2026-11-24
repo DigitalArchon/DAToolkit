@@ -1319,6 +1319,43 @@ test("Settings: naming the provider behind each TEE reply is off by default and 
   assert.equal(on.$(".modal input.tee-upstreams").checked, true);
 });
 
+test("Settings → Model: a model chosen there, or instructions saved, leave what was typed elsewhere on the tab", async () => {
+  const models = [{ id: "x/reviewer", tier: "standard", allowed: true, vision: true }];
+  const app = await page("a", null, { "GET /api/models": () => ({ models }), "POST /api/settings": () => ({ ok: true }) });
+  app.call("openSettings", "model");
+  await app.clock.tick(0);
+  const temp = app.$(".modal input[type=number]");
+  await app.type(temp, "0.9");
+  button(app.$(".modal"), "Add instruction").click();
+  const match = app.$(".modal .model-note input");
+  await app.type(match, "glm");
+  const auto = () => app.$(".modal").querySelectorAll("select").find((s) => s.options.some((o) => o.value === "flagged"));
+  assert.equal(auto().disabled, true);
+  // the reviewer: chosen in the picker, saved at once, and the state that follows names it
+  app.$(".modal").querySelectorAll("button").filter((b) => b.textContent === "Choose…")[2].click();      // vision, research, reviewer
+  await app.clock.tick(100);
+  app.$(".model-list .model-row").click();
+  await app.clock.tick(0);
+  assert.deepEqual(app.posts("/api/settings").map((c) => Object.keys(c.body)), [["review_model"]]);
+  assert.match(app.posts("/api/settings")[0].body.review_model, /\|x\/reviewer$/);
+  await app.event({ type: "state", state: state("a", (s) => { s.config.settings.review_model = "P|x/reviewer"; }) });
+  await app.clock.tick(300);
+  assert.equal(temp.value, "0.9", "the temperature typed is still there");
+  assert.ok(temp.isConnected);
+  assert.equal(match.value, "glm");
+  assert.ok(match.isConnected, "the instruction typed is still there");
+  assert.equal(auto().disabled, false, "automatic review can be set now that a reviewer is");
+  // saving the instructions leaves the temperature as typed too
+  button(app.$(".modal"), "Save instructions").click();
+  await app.clock.tick(300);
+  assert.equal(temp.value, "0.9");
+  assert.ok(temp.isConnected);
+  // and closing still asks, the temperature not being saved
+  app.key(app.document.body, { key: "Escape" });
+  await app.clock.tick(0);
+  assert.deepEqual(app.document.querySelectorAll(".modal h2").map((e) => e.textContent), ["Settings", "Close without saving?"]);
+});
+
 test("plain http to anywhere but this computer, its network or an onion is a link that isn't secure", async () => {
   const app = await page("a");
   const insecure = (url) => app.call("insecureLink", url);

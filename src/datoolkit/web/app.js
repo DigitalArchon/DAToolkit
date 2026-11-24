@@ -4637,7 +4637,7 @@ function openSettings(tab = "providers") {
     return box;
   }
 
-  function helperAttestation() {
+  function helperAttestation(redraw) {
     const v = visionState();
     const lab = v.mode === "helper" ? attestLabel(S.state.helper_attestation) : null;
     if (!lab) return h("span", {});
@@ -4647,7 +4647,7 @@ function openSettings(tab = "providers") {
       att.status === "verified" || att.status === "failed" ? h("button", { type: "button", class: "small", onclick: () => guarded(async () => {
         const r = await api("POST", "/api/attest", { slot: "helper" });
         toast(r.status === "verified" ? `Vision helper ${r.kind === "tee" ? `(${r.headline || "TEE attested"})` : "attested"}: ${r.summary}` : r.status === "retired" ? `${r.error}; nothing is sent to it.` : `Attestation ${r.kind === "tee" ? "refused" : "failed"}: ${r.error}`, r.status === "verified" ? "ok" : "error", 10000);
-        show("model");
+        redraw();
       }) }, "Re-check") : null);
   }
 
@@ -4669,17 +4669,37 @@ function openSettings(tab = "providers") {
       noneLabel: "None (image features off for text-only models)", pickTitle: "Choose a vision helper",
       filter: (m) => m.vision === true, filterNote: "vision",
       note: "The vision helper describes each image for a chat model that can't read images. Only models that read images are listed.",
-      onSaved: () => setTimeout(() => show("model"), 300) });
-    const v = visionState();
+      onSaved: () => setTimeout(drawImages, 300) });
+    // What a model chosen here (it saves itself) changes is drawn again by itself, once the state
+    // that follows the save has come: the rest of the tab is left as it is, typed into or not.
+    // (Until Nov 2026 the whole tab was drawn again from what was saved, and generation settings
+    // and model instructions typed but not saved yet were lost without a word.)
+    const imagesNow = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
+    function drawImages() {
+      const v = visionState();
+      imagesNow.replaceChildren(h("div", { class: `vision-now ${v.mode}` }, v.mode === "native" ? `The current model (${v.model}) reads images directly.`
+        : v.mode === "helper" ? `The current model (${v.model}) can't read images; ${v.helper} describes them for it.`
+        : `Image features are off: ${v.why}`),
+      helperAttestation(drawImages));
+    }
+    drawImages();
     // (these three save themselves as they are changed)
     const promptCache = h("select", { "data-no-guard": "",
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { prompt_cache: e.target.value }); toast("Saved.", "ok", 2000); }) },
       [["1h", "On, kept for 1 hour"], ["5m", "On, kept for 5 minutes"], ["off", "Off"]]
         .map(([val, l]) => h("option", { value: val, selected: val === (S.state.config.settings.prompt_cache || "1h") }, l)));
-    const autoReview = h("select", { disabled: !S.state.config.settings.review_model, "data-no-guard": "",
+    const autoReview = h("select", { "data-no-guard": "",
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { auto_review: e.target.value }); toast("Saved.", "ok", 2000); }) },
       [["off", "Off"], ["disruptive", "Disruptive commands"], ["flagged", "Everything flagged (modifying, disruptive or sensitive)"]]
         .map(([val, l]) => h("option", { value: val, selected: val === (S.state.config.settings.auto_review || "off") }, l)));
+    const reviewHint = h("div", { class: "muted small" });
+    const drawReview = () => {
+      autoReview.disabled = !S.state.config.settings.review_model;
+      reviewHint.textContent = S.state.config.settings.review_model
+        ? "Asked in the background as each command is queued; the verdict shows on the item. It only adds warnings: it never lowers a risk level or clears a flag. Each review is one request to the reviewer model."
+        : "Choose a reviewer model first: automatic reviews never fall back to the chat model.";
+    };
+    drawReview();
     // off by default: the one lookup that goes to api.redpill.ai directly (llm/tee.py served_by)
     const teeNames = h("input", { type: "checkbox", class: "tee-upstreams", "data-no-guard": "", checked: S.state.config.settings.tee_name_upstreams === true,
       onchange: (e) => guarded(async () => { await api("POST", "/api/settings", { tee_name_upstreams: e.target.checked }); toast("Saved.", "ok", 2000); }) });
@@ -4702,27 +4722,20 @@ function openSettings(tab = "providers") {
       h("h3", {}, "Model-specific instructions"),
       modelNotes(),
       h("h3", {}, "Images"),
-      h("div", { class: `vision-now ${v.mode}` }, v.mode === "native" ? `The current model (${v.model}) reads images directly.`
-        : v.mode === "helper" ? `The current model (${v.model}) can't read images; ${v.helper} describes them for it.`
-        : `Image features are off: ${v.why}`),
-      helperAttestation(),
+      imagesNow,
       field("Vision helper", helper, "Used only when the chat model can't read images: it describes each image once (text exactly, then the rest), and the chat model gets the description. That adds a request per image, so replies with images take longer. It must be allowed by the case's sensitivity. With no helper, image features are disabled for text-only models."),
       h("h3", {}, "Research agent"),
       field("Research model", modelSetting({ key: "research_model", value: S.state.config.settings.research_model || "",
         noneLabel: "Automatic (Claude Sonnet 5.5 on the search provider)", pickTitle: "Choose the research model",
-        note: "The research agent searches the web and reads pages for the chat model, then reports with quotes and sources. It needs tool calling and a long context; a fast model suits it.",
-        onSaved: () => setTimeout(() => show("model"), 300) }),
+        note: "The research agent searches the web and reads pages for the chat model, then reports with quotes and sources. It needs tool calling and a long context; a fast model suits it." }),
         "It reads only the AI's brief, never the case, and is gated like web search (Settings → General): Sovereign cases never research and Confidential cases always ask. Its searches and page fetches are paid with the search provider's NanoGPT key; pages that block the normal fetch are retried in stealth mode (5× the price)."),
       h("h3", {}, "Second opinion"),
       field("Reviewer model", modelSetting({ key: "review_model", value: S.state.config.settings.review_model || "",
         noneLabel: "Clear (use the chat model)", pickTitle: "Choose the second-opinion reviewer",
         note: "The reviewer sees only the command and case notes, never the proposer's reasoning. A different model gives a more independent opinion; a fast, cheap one suits automatic reviews.",
-        onSaved: () => setTimeout(() => show("model"), 300) }),
+        onSaved: () => setTimeout(drawReview, 300) }),
         "It must be allowed by the case's sensitivity. With none set, the chat model answers the 2nd opinion button."),
-      field("Automatic review", autoReview,
-        S.state.config.settings.review_model
-          ? "Asked in the background as each command is queued; the verdict shows on the item. It only adds warnings: it never lowers a risk level or clears a flag. Each review is one request to the reviewer model."
-          : "Choose a reviewer model first: automatic reviews never fall back to the chat model."),
+      h("label", { class: "field" }, h("span", {}, "Automatic review"), autoReview, reviewHint),
       h("h3", {}, "TEE models"),
       h("label", { class: "check" }, teeNames, "Name the provider behind each TEE reply"),
       h("div", { class: "muted small tee-upstreams-note" }, TEE_UPSTREAMS_NOTE),
@@ -4747,8 +4760,16 @@ function openSettings(tab = "providers") {
       await api("POST", "/api/settings", { builtin_model_prompts: builtin.checked,
         model_prompts: [...rows.children].map((r) => r._get()).filter((r) => r.match || r.text) });
       toast("Model instructions saved.", "ok");
-      setTimeout(() => show("model"), 300);
+      setTimeout(drawInUse, 300);      // what applies now; the rows, and the rest of the tab, as they are
     };
+    const inUse = h("div", { style: "display:flex;flex-direction:column;gap:8px" });
+    const drawInUse = () => {
+      const now = S.state.model_notes || { active: "" };
+      inUse.replaceChildren(h("div", { class: "muted small" }, S.state.config.active_model
+        ? (now.active ? `In use for ${S.state.config.active_model}:` : `None apply to ${S.state.config.active_model}.`) : "No chat model chosen."),
+      ...(now.active ? [h("div", { class: "muted small pre" }, now.active)] : []));
+    };
+    drawInUse();
     return h("div", { style: "display:flex;flex-direction:column;gap:8px" },
       h("div", { class: "muted small" }, "Added to the end of the system prompt when the chat model's id contains the match (case doesn't matter). Use them to correct a model's habits, e.g. one that describes commands instead of queueing them."),
       h("label", { class: "check" }, builtin, " Use DA Toolkit's built-in notes for models that need them"),
@@ -4757,9 +4778,7 @@ function openSettings(tab = "providers") {
       rows,
       h("div", { class: "row" }, h("button", { type: "button", onclick: () => addRow() }, "Add instruction"), h("span", { class: "spacer" }),
         h("button", { type: "button", class: "primary", onclick: () => guarded(save) }, "Save instructions")),
-      h("div", { class: "muted small" }, S.state.config.active_model
-        ? (notes.active ? `In use for ${S.state.config.active_model}:` : `None apply to ${S.state.config.active_model}.`) : "No chat model chosen."),
-      notes.active ? h("div", { class: "muted small pre" }, notes.active) : null);
+      inUse);
   }
 
   function clientsPane() {
