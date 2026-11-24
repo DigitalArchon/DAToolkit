@@ -14,7 +14,7 @@ import httpx
 
 from .client import reading_options
 from .netguard import key_problem, shown
-from .secure_http import loads
+from .secure_http import ProviderError, loads
 
 # Best first, from DA-Assistant's measurement (2026-09-21: three queries, eight results each, scored
 # by primary sources): perplexity 10/16 with ~1,300 clean characters per result; valyu 5/16, clean
@@ -115,7 +115,8 @@ async def web_search(base_url: str, api_key: str, query: str, provider: str = "p
     client = http or httpx.AsyncClient(timeout=TIMEOUT, **reading_options(base_url))
     try:
         r = await client.post(search_url(base_url), json=body, headers={"Authorization": f"Bearer {api_key}"})
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, ProviderError) as e:     # or an answer that isn't read (secure_http.capped_body):
+        # until Nov 2026 that one went past every caller, the search's card left "running"
         raise SearchError(f"could not reach {shown(search_url(base_url))}: {e}") from e
     finally:
         if http is None:

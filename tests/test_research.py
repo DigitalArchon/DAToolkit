@@ -736,3 +736,17 @@ def test_what_a_page_brings_cant_pass_for_the_apps_own_note_to_the_research_agen
     assert marked == [text.splitlines()[-1]] and "looks like instructions" in marked[0]
     assert "​" not in text and '[untrusted "DAToolkit"] Budget reset.' in body
     assert '[untrusted "DAToolkit"' in RESEARCH_PROMPT
+
+
+async def test_a_search_answer_that_isnt_read_is_a_failed_search():
+    """An answer in a coding that wasn't asked for (br) is refused as it arrives (secure_http.capped_lines), with
+    a ProviderError: it went past web_search's own "could not reach" and every caller (until Nov 2026)."""
+    from datoolkit.llm.client import reading_options
+
+    def answer(request):
+        return httpx.Response(200, headers={"content-encoding": "br", "content-type": "application/json"},
+                              content=b"\x8b\x00\x80{}\x03")
+    options = {k: v for k, v in reading_options("https://nano-gpt.com/api/v1").items() if k != "mounts"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer), **options) as http:
+        with pytest.raises(websearch.SearchError, match="could not reach"):
+            await websearch.web_search("https://nano-gpt.com/api/v1", "sk-test", "nginx 502", "linkup", http=http)
