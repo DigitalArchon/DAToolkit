@@ -66,19 +66,27 @@ class PtyProcess:
         _set_size(self.fd, rows, cols)
 
     def terminate(self) -> None:
-        """Hang up the session like closing a terminal window, then kill whatever ignores it."""
-        for sig, grace in ((signal.SIGHUP, 0.5), (signal.SIGKILL, 1)):
-            if self.popen.poll() is not None:
-                break
-            try:
-                os.killpg(self.pid, sig)  # the child is a session and process group leader
-            except ProcessLookupError:
-                self.popen.send_signal(sig)  # closed so soon that setsid hasn't run yet
-            try:
-                self.popen.wait(timeout=grace)
-            except subprocess.TimeoutExpired:
-                pass
-        self.close()
+        """Hang up the session like closing a terminal window, then kill whatever ignores it.
+        A program that is another user's now (`exec sudo -i` in a local shell) can't be sent a
+        signal: closing the terminal still hangs it up, the kernel's doing. Until Nov 2026 the
+        refusal went up from here before the terminal was closed, and the program ran on with
+        its session gone from the app."""
+        try:
+            for sig, grace in ((signal.SIGHUP, 0.5), (signal.SIGKILL, 1)):
+                if self.popen.poll() is not None:
+                    break
+                try:
+                    os.killpg(self.pid, sig)  # the child is a session and process group leader
+                except ProcessLookupError:
+                    self.popen.send_signal(sig)  # closed so soon that setsid hasn't run yet
+                except PermissionError:
+                    break
+                try:
+                    self.popen.wait(timeout=grace)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            self.close()
 
     def close(self) -> None:
         if self.fd >= 0:

@@ -635,3 +635,30 @@ def test_the_terminal_socket_passes_over_what_it_cant_use(tmp_path, monkeypatch)
         engine.sessions.write("gone", b"x")
         engine.sessions.resize(sid, 70000, 24)
         assert resized == [(1000, 1)]
+
+
+async def test_closing_a_session_whose_program_cant_be_signalled_still_hangs_it_up(monkeypatch):
+    """A local shell that became another user's (`exec sudo -i`): killpg is refused. The refusal
+    went up before the terminal was closed, and the program ran on with no session to it."""
+    from datoolkit.sessions import ptyproc
+
+    mgr = SessionManager(on_change=lambda: None)
+    sess = mgr.spawn("root", ["/bin/sh"], {}, name="root", kind="local")
+    pid, fd = sess.proc.pid, sess.proc.fd
+    real = os.killpg
+
+    def killpg(pgid, sig):
+        if pgid == pid:
+            raise PermissionError(1, "Operation not permitted")
+        return real(pgid, sig)
+    monkeypatch.setattr(ptyproc.os, "killpg", killpg)
+    await asyncio.sleep(0.2)
+    mgr.close("root")
+    await mgr.wait_closed(5)
+    with pytest.raises(OSError):
+        os.fstat(fd)                                 # the terminal is closed: the kernel hangs it up
+    for _ in range(100):
+        if sess.proc.popen.poll() is not None:
+            break
+        await asyncio.sleep(0.05)
+    assert sess.proc.popen.poll() is not None
