@@ -1445,6 +1445,21 @@ test("a phone asking to pair is asked about here, its number shown, Refuse the d
   assert.deepEqual(app.posts("/api/phone/claims/c2").map((c) => c.body), [{ allow: false }]);
 });
 
+test("a paired phone's time is shown on this computer's clock, not as the server's UTC", async () => {
+  const tz = process.env.TZ;
+  process.env.TZ = "Europe/Paris";
+  try {
+    const info = { running: true, phones: 1, port: 48443, ip: "192.168.1.5", fingerprint: "AA:BB", pair_qr: "data:image/png;base64,", pair_url: "https://192.168.1.5:48443/pair",
+      devices: [{ id: "d1", name: "Pixel", paired_at: "2026-11-24T13:48:05+00:00", connected: true }], claims: [] };
+    const app = await page("a", null, { "GET /api/phone": () => info });
+    await app.call("openPhone");
+    await app.clock.tick(0);
+    assert.match(app.$(".phone-devices").textContent, /Pixel · connected · paired 2026-11-24 14:48/);
+  } finally {
+    if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
+  }
+});
+
 test("the phone's page claims its pairing code, shows the number, and is given its own token once allowed", async () => {
   let polls = 0;
   const app = loadApp({ page: "companion.html", script: "companion.js", hash: "#pair=abcdef", routes: {

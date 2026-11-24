@@ -4923,6 +4923,15 @@ function askToPair(claim) {
 // already paired needs neither again while the companion runs. One that hasn't accepted this
 // certificate (new, or its browser forgot) gets the browser's warning at the connect step, before
 // anything is claimed, and is sent back to step 1.
+// "2026-11-24 14:48" on this computer's clock, from a time the server gives in UTC (companion.py
+// paired_at). (Until Nov 2026 the UTC time was shown as it was, an hour or more out, unmarked.)
+function localTime(iso) {
+  const t = new Date(iso || "");
+  if (isNaN(t)) return "";
+  const two = (n) => String(n).padStart(2, "0");
+  return `${t.getFullYear()}-${two(t.getMonth() + 1)}-${two(t.getDate())} ${two(t.getHours())}:${two(t.getMinutes())}`;
+}
+
 async function openPhone() {
   let info = await api("GET", "/api/phone");
   let step = 1;
@@ -4959,7 +4968,7 @@ async function openPhone() {
       h("button", { class: "small danger", title: "Stop the companion; every phone pairs again next time", onclick: () => act("stop") }, "Stop")),
       devices.length ? h("div", { class: "phone-devices" }, h("div", { class: "small muted" }, "Paired phones (each has a token of its own):"),
         devices.map((d) => h("div", { class: "row small" }, h("span", {}, `${d.name}${d.connected ? " · connected" : ""}`),
-          h("span", { class: "muted" }, ` · paired ${(d.paired_at || "").replace("T", " ").slice(0, 16)}`), h("span", { class: "spacer" }),
+          h("span", { class: "muted" }, ` · paired ${localTime(d.paired_at)}`), h("span", { class: "spacer" }),
           h("button", { class: "small danger", title: "Its token stops working; it would have to pair again",
             onclick: () => guarded(async () => { info = await api("DELETE", `/api/phone/devices/${encodeURIComponent(d.id)}`); render(); }) }, "Disconnect")))) : null,
       (info.claims || []).map((c) => h("div", { class: "warnbox" }, `${c.name} is waiting to be allowed (it shows ${c.check}). `,
