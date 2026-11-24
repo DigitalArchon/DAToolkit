@@ -95,6 +95,25 @@ def image_present(runtime: str, run=_run) -> bool:
         return False
 
 
+# The proxy variables FreeRDP (inside guacd) reads for itself
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+
+
+def no_proxy_args(runtime: str) -> list[str]:
+    """What keeps the desktop's proxy out of guacd's container. podman copies the host's proxy
+    variables into every container unless told not to, and Docker puts in those of the user's
+    ~/.docker/config.json (blanked here: docker run can't take one away). FreeRDP in guacd reads
+    https_proxy itself, so until Nov 2026 an RDP connection, to a host on the local network too,
+    went through the environment's proxy (one on 127.0.0.1 being the container's own, where
+    nothing listens), and the container held any user:password the proxy's address carried. The
+    container's guacd now connects directly, as the distribution's guacd service does; the rule
+    is the WinRM console's (psrp_console.connection): a host on this network is never reached
+    through a proxy from the environment."""
+    if runtime == "podman":
+        return ["--http-proxy=false"]
+    return [arg for name in PROXY_VARS for arg in ("-e", f"{name}=")]
+
+
 def lock_dir() -> Path:
     """Where the locks are kept: the user's runtime directory, which every DA Toolkit of theirs sees."""
     return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
@@ -206,7 +225,7 @@ class GuacdContainer:
                 return
             try:
                 self._run([runtime, "rm", "-f", CONTAINER], 30)
-                r = self._run([runtime, "run", "-d", "--rm", "--pull=never", "--cap-drop=ALL",
+                r = self._run([runtime, "run", "-d", "--rm", "--pull=never", *no_proxy_args(runtime), "--cap-drop=ALL",
                                "--security-opt", "no-new-privileges", "--name", CONTAINER,
                                "-p", f"{GUACD[0]}:{GUACD[1]}:4822", GUACD_IMAGE], 60)
             except (OSError, subprocess.SubprocessError) as e:

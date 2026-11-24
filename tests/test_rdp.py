@@ -721,7 +721,8 @@ def test_guacd_container_runs_pinned_on_loopback_and_stops():
     assert c.runtime == "podman"
     assert rt.calls[-2] == ["podman", "rm", "-f", guac.CONTAINER]          # a stopped leftover goes first
     # never downloaded by the app, and given nothing: it reads what hostile servers send
-    assert rt.calls[-1] == ["podman", "run", "-d", "--rm", "--pull=never", "--cap-drop=ALL",
+    # nor the desktop's proxy, which podman copies in by default and FreeRDP would use
+    assert rt.calls[-1] == ["podman", "run", "-d", "--rm", "--pull=never", "--http-proxy=false", "--cap-drop=ALL",
                             "--security-opt", "no-new-privileges", "--name", guac.CONTAINER,
                             "-p", "127.0.0.1:4822:4822", guac.GUACD_IMAGE]
     assert c.stop() is True
@@ -737,6 +738,18 @@ def test_guacd_container_runs_pinned_on_loopback_and_stops():
     bad = FakeRuntime(run_error="port 4822 already in use")
     with pytest.raises(guac.GuacError, match="already in use"):
         guac.GuacdContainer(bad.which, bad.run).start()
+
+
+def test_guacds_container_under_docker_is_given_no_proxy_either():
+    """Docker has no --http-proxy=false; the proxy its config.json would put in is blanked."""
+    rt = FakeRuntime()
+    rt.which = lambda name: "/usr/bin/docker" if name == "docker" else None
+    c = guac.GuacdContainer(rt.which, rt.run)
+    c.start()
+    run = next(call for call in rt.calls if call[1] == "run")
+    assert run[0] == "docker" and "--http-proxy=false" not in run
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        assert run[run.index(f"{name}=") - 1] == "-e"
 
 
 def _removals(rt) -> int:

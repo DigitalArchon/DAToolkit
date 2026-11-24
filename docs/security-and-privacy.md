@@ -610,7 +610,9 @@ A Local provider is reached directly, never through a proxy from your environmen
   what the server chose when its certificate was read, so a downgrade to legacy RDP security is
   refused. A pin file that can't be read is set aside and said to be, never taken for "no
   pins". Where DA Toolkit runs guacd's container, it runs it with no capabilities and no way to
-  gain privileges, from the image you pulled (`--pull=never`).
+  gain privileges, from the image you pulled (`--pull=never`), and without the environment's
+  proxy variables (podman's `--http-proxy=false`; with Docker they are set empty), so an RDP
+  connection never goes through a proxy from the environment.
 - **Typing into a remote desktop** is key presses: a command with a tab or another control
   character is refused, Insert of a command of several lines asks every time (each line break
   is Enter there), and your own keys are held back while a command is typed.

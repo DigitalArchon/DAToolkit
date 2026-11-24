@@ -1387,7 +1387,9 @@ fetched is in the case's audit log and timeline: the host, the session's id and 
     session closes or DA Toolkit quits. You download the image once (`podman pull`, which the
     dialog shows); DA Toolkit never downloads it itself, and uses exactly the pinned 1.6.0
     image. The container is run with `--pull=never`, with no capabilities and unable to gain
-    privileges: guacd reads what RDP servers send it and needs neither. Two DA Toolkits
+    privileges: guacd reads what RDP servers send it and needs neither. Your desktop's proxy
+    settings (`HTTPS_PROXY` and the like) aren't passed into it: guacd connects to RDP hosts
+    directly, as the distribution's guacd service does. Two DA Toolkits
     running at once share the one container, and it is removed when the last of them to use it
     closes its last RDP session or quits. A guacd that's already running, such as the
     distribution's service, is used as is and left alone. If you set up the always-running
