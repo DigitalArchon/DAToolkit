@@ -518,6 +518,8 @@ class AnthropicClient:
         async for m in self._client.models.list(limit=1000):
             if getattr(m, "lifecycle", None) == "retired":
                 continue                    # still listed, as a record, but every request naming it fails
+            if not isinstance(getattr(m, "id", None), str) or not m.id:
+                continue                    # no model at all (a compatible endpoint's list): sorted() raised on it
             ids.append(m.id)
             if self.official:
                 caps[m.id] = parse_caps(m)

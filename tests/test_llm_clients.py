@@ -559,3 +559,19 @@ async def test_a_turn_on_a_server_that_refuses_stream_options_is_answered(env): 
         assert not any(e["kind"] == "note" for e in engine.chat)        # nothing for the technician to do about it
     finally:
         client_module._NO_STREAM_OPTIONS.clear()
+
+
+async def test_an_entry_that_is_no_model_doesnt_take_the_model_list_down():
+    """One entry without an id, or that isn't an object at all, lost the whole list to Python's own error
+    ("KeyError: 'id'", "'<' not supported between instances of 'NoneType' and 'str'"), and a size given as text
+    failed later, where a request's max_tokens is held to it (until Nov 2026; DA Private Coder skipped them)."""
+    listed = [{"id": "good", "object": "model", "context_length": "128k", "max_output_tokens": "8k",
+               "capabilities": ["vision"], "reasoning_efforts": "high", "subscription": "yes"},
+              {"object": "model"}, {"id": 5}, "junk", None, {"id": ""}]
+    caps = capabilities.parse(listed)
+    assert list(caps) == ["good"] and caps["good"]["context"] is None and caps["good"]["max_output"] is None
+    assert caps["good"]["vision"] is False and caps["good"]["efforts"] == []
+    assert capabilities.parse(None) == {} and capabilities.parse("junk") == {}
+    answer = json.dumps({"object": "list", "data": listed}).encode()
+    async with Stub({"/v1/models": ("application/json", answer)}) as provider:
+        assert await LLMClient(f"http://127.0.0.1:{provider.port}/v1", "sk-local-1").list_models() == ["good"]
